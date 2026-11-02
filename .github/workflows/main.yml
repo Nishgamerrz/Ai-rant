@@ -29,6 +29,7 @@ jobs:
 
       - name: Launch Local AI Brain
         run: |
+          # FIX: Direct path to the installer shell script
           curl -fsSL https://ollama.com | sh
           ollama serve &
           sleep 10
@@ -75,11 +76,9 @@ jobs:
           import math
           from PIL import Image, ImageDraw, ImageFont
 
-          # Load the AI scene configuration data
           with open('structural_data.json', 'r') as f:
               data = json.load(f)
 
-          # High Resolution Full 9:16 HD Layout
           width, height = 1080, 1920
           fps = 30
           os.makedirs('frames', exist_ok=True)
@@ -88,14 +87,12 @@ jobs:
           frame_count = 0
           audio_merge_list = []
 
-          # Fallback structural font setup for clean scaling
           font_size = 85
           try:
               font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
           except:
               font = ImageFont.load_default()
 
-          print("🎙️ Generating Voiceover clips & calculating kinetic word frames...")
           for idx, scene in enumerate(data['scenes']):
               from gtts import gTTS
               from mutagen.mp3 import MP3
@@ -119,16 +116,13 @@ jobs:
                   img = Image.new('RGB', (width, height), color=bg)
                   draw = ImageDraw.Draw(img)
                   
-                  # Character physics bounce calculations
                   bounce = int(math.sin(f * 0.3) * 12)
                   sway = int(math.cos(f * 0.2) * 8)
                   
-                  # Render Classic Roblox Avatar Mesh Shapes
-                  draw.rectangle([390 + sway, 660 + bounce, 690 + sway, 1050 + bounce], fill=(0, 120, 255)) # Torso
+                  draw.rectangle([390 + sway, 660 + bounce, 690 + sway, 1050 + bounce], fill=(0, 120, 255))
                   hx1, hy1, hx2, hy2 = 440 + sway, 430 + bounce, 640 + sway, 630 + bounce
-                  draw.rectangle([hx1, hy1, hx2, hy2], fill=(255, 225, 120)) # Head
+                  draw.rectangle([hx1, hy1, hx2, hy2], fill=(255, 225, 120))
                   
-                  # Animate Speaking Face Expressions
                   seq_index = min(int((f / total_scene_frames) * len(face_seq)), len(face_seq) - 1)
                   current_expression = face_seq[seq_index]
                   
@@ -151,28 +145,23 @@ jobs:
                   elif current_expression == "shocked":
                       draw.ellipse([mouth_x - 35, mouth_y - 25, mouth_x + 35, mouth_y + 45], fill=(0, 0, 0))
 
-                  # 3. Dynamic Word-by-Word Subtitle Highlight Overlay
                   active_word_idx = min(f // frames_per_word, len(words) - 1)
                   active_word = words[active_word_idx].upper()
                   
-                  # Perfect Mobile & Desktop Shared Center Alignments
                   text_y = 1380
                   
-                  # Get Text bounding coordinates to draw accurate thick outlines
                   try:
                       text_w = draw.textlength(active_word, font=font)
                   except:
                       text_w = len(active_word) * 50
                   text_x = (width - text_w) // 2
                   
-                  # 4. Burn a high-contrast heavy dark text border outline effect
                   border_thickness = 8
                   for dx in range(-border_thickness, border_thickness + 1):
                       for dy in range(-border_thickness, border_thickness + 1):
                           if dx*dx + dy*dy <= border_thickness*border_thickness:
                               draw.text((text_x + dx, text_y + dy), active_word, font=font, fill=(0, 0, 0))
                   
-                  # Draw core text layer over the border outline mapping (Neon Yellow)
                   draw.text((text_x, text_y), active_word, font=font, fill=(255, 255, 0))
                   
                   img.save(f"frames/frame_{frame_count:05d}.png")
@@ -181,8 +170,6 @@ jobs:
           with open('audio_list.txt', 'w') as al:
               for path in audio_merge_list:
                   al.write(f"file '{path}'\n")
-
-          print(f"📦 Staging complete. Total calculated pipeline video frames: {frame_count}")
           EOF
           python render_engine.py
 
@@ -197,3 +184,4 @@ jobs:
         with:
           name: YouTube-Shorts-HD-Captions-Pack
           path: roblox_shorts_final.mp4
+          
