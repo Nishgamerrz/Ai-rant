@@ -68,7 +68,7 @@ jobs:
         run: |
           TARGET_WORDS=$((DURATION_SECONDS * 17 / 10))
           cat > narration_prompt.txt <<PROMPT
-          Think privately through a clear hook, escalating problem, and satisfying payoff. Then write a lively, polished, natural ENGLISH voiceover script for a Roblox short about: "${STORY_TOPIC}".
+          Plan briefly in private (hook, escalating problem, satisfying payoff; no long reasoning). Then write a lively, polished, natural ENGLISH voiceover script for a Roblox short about: "${STORY_TOPIC}".
           The target runtime is ${DURATION_SECONDS} seconds. Return ONLY valid JSON in this shape:
           {"narration":"The complete spoken narration goes here."}
           Aim for about ${TARGET_WORDS} spoken words (roughly 102 words per minute, matching the clear female voice pace).
@@ -77,7 +77,7 @@ jobs:
           sound effects, timestamps, or artificial pauses. Keep it appropriate for a general audience.
           PROMPT
           jq -n --arg model "$AI_MODEL" --rawfile prompt narration_prompt.txt \
-            '{model:$model, prompt:$prompt, format:"json", stream:false, options:{temperature:0.65, num_predict:1200}}' > narration_request.json
+            '{model:$model, prompt:$prompt, format:"json", stream:false, options:{temperature:0.6, num_predict:700}}' > narration_request.json
           curl --fail --silent --show-error --max-time 600 \
             http://127.0.0.1:11434/api/generate -d @narration_request.json -o narration_response.json
           mkdir -p dist
@@ -85,7 +85,7 @@ jobs:
             DRAFT=$(jq -r '.response // ""' narration_response.json)
             jq -n --arg model "$AI_MODEL" --arg draft "$DRAFT" \
               --arg topic "$STORY_TOPIC" --arg duration "$DURATION_SECONDS" --arg words "$TARGET_WORDS" \
-              '{model:$model, format:"json", stream:false, options:{temperature:0.55, num_predict:1200}, prompt:("Rewrite this narration as a complete, natural English mini-story for a Roblox short about: " + $topic + ". It must be about " + $words + " words, for a " + $duration + " second voiceover at a clear, steady pace. Return a JSON object containing only the narration field. Draft to rewrite: " + $draft)}' \
+              '{model:$model, format:"json", stream:false, options:{temperature:0.55, num_predict:700}, prompt:("Rewrite this narration as a complete, natural English mini-story for a Roblox short about: " + $topic + ". It must be about " + $words + " words, for a " + $duration + " second voiceover at a clear, steady pace. Return a JSON object containing only the narration field. Draft to rewrite: " + $draft)}' \
               > narration_repair_request.json
             curl --fail --silent --show-error --max-time 600 \
               http://127.0.0.1:11434/api/generate -d @narration_repair_request.json -o narration_response.json
