@@ -104,8 +104,12 @@ def main():
     minimum, maximum = int(duration * 1.6), int(duration * 1.75)
     if not minimum <= len(words) <= maximum:
         fields = ", ".join(payload.keys()) if isinstance(payload, dict) else type(payload).__name__
+        if not text and isinstance(payload, dict) and payload.get("thinking"):
+            reason = "Qwen3 returned private reasoning but no final narration; the request must use think:false. "
+        else:
+            reason = ""
         raise SystemExit(
-            f"Narration is {len(words)} words (response fields: {fields}); expected "
+            f"{reason}Narration is {len(words)} words (response fields: {fields}); expected "
             f"{minimum}–{maximum} for a {duration}-second short."
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
