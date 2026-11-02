@@ -32,7 +32,7 @@ permissions:
 jobs:
   generate_animation_and_voice:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -45,7 +45,7 @@ jobs:
       - name: Install animation and neural voice tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl jq zstd zip
+          sudo apt-get install -y curl jq zstd zip blender ffmpeg xvfb libgl1-mesa-dri fonts-dejavu-core
           python -m pip install --upgrade pip
           python -m pip install edge-tts mutagen
 
@@ -103,7 +103,8 @@ jobs:
           The character is speaking this story: "${NARRATION}"
           General action/topic: "${STORY_TOPIC}"
           Required animation duration: ${DURATION_SECONDS} seconds. Return ONLY valid JSON:
-          {"name":"ShortAnimation","keyframes":[{"time":0,"poses":{"Head":[0,0,0],"UpperTorso":[0,0,0],"RightUpperArm":[0,0,0]}}]}
+          {"name":"ShortAnimation","keyframes":[{"time":0,"face":"talk","poses":{"Head":[0,0,0],"UpperTorso":[0,0,0],"RightUpperArm":[0,0,0]}}]}
+          Every keyframe must also set face to one of: neutral, talk, smile, shocked, blink.
           Plan clear story beats, then make 24 to 42 keyframes distributed through the FULL runtime, starting at 0 and ending
           close to ${DURATION_SECONDS}. Use seconds for time. Pose arrays are [rotationX,rotationY,rotationZ]
           in degrees, relative to the neutral R15 pose; keep each angle between -100 and 100.
@@ -126,14 +127,19 @@ jobs:
         env:
           STORY_TOPIC: ${{ inputs.story_topic }}
           AVATAR_USERNAME: ${{ inputs.avatar_username }}
+          DURATION_SECONDS: ${{ inputs.duration_seconds }}
         run: |
           NARRATION=$(cat dist/narration.txt)
           cat > map_prompt.txt <<PROMPT
           Design a polished, colorful 3D Roblox set that matches this short story.
           Story/topic: "${STORY_TOPIC}"
           Story narration: "${NARRATION}"
-          Return ONLY valid JSON with this structure:
-          {"name":"Neon Plaza","theme":"A clear environment description","ground_color":[38,48,68],"ambient_color":[140,160,200],"props":[{"name":"Arcade","shape":"Block","material":"Neon","position":[-35,8,10],"size":[24,16,20],"color":[30,210,240]}]}
+          Build the camera plan across ${DURATION_SECONDS} seconds. Return ONLY valid JSON with this structure:
+          {"name":"Neon Plaza","theme":"A clear environment description","ground_color":[38,48,68],"ambient_color":[140,160,200],"props":[{"name":"Arcade","shape":"Block","material":"Neon","position":[-35,8,10],"size":[24,16,20],"color":[30,210,240]}],"camera_shots":[{"time":0,"position":[0,30,76],"target":[0,3,24],"transition":"smooth"},{"time":${DURATION_SECONDS},"position":[-22,13,34],"target":[0,3,24],"transition":"snap"}]}
+          Use 5 to 8 camera_shots with increasing times from 0 through ${DURATION_SECONDS}; vary positions and targets to show the map/character.
+          Coordinates are Roblox X,Y,Z (Y is height). Aim close shots near [0,3,24], begin wide, finish on the avatar.
+          Use 2 wide views about 45-65 studs away and 2 close views about 10-18 studs away; mix smooth cinematic moves with 2-3 deliberate snap cuts.
+          Keep the avatar in frame and avoid clipping through props or moving chaotically.
           Include 12 to 24 thoughtfully arranged, visually varied props that make a readable,
           walkable set: buildings/landmarks, foreground set dressing, and a few colorful accents.
           Use a strong palette that fits the story, and leave the central avenue and center of the
@@ -148,13 +154,15 @@ jobs:
             '{model:$model, prompt:$prompt, format:"json", think:false, stream:false, options:{temperature:0.65, num_predict:3000}}' > map_request.json
           curl --fail --silent --show-error --max-time 600 \
             http://127.0.0.1:11434/api/generate -d @map_request.json -o map_response.json
-          python tools/build_story_map.py map_response.json dist/Roblox_Story_Map.lua
+          python tools/build_story_map.py map_response.json dist/Roblox_Story_Map.lua "$DURATION_SECONDS"
           python tools/build_avatar_setup.py "$AVATAR_USERNAME" dist/Roblox_Avatar_Setup.lua
 
       - name: Synthesize one continuous natural female voiceover
         run: |
           edge-tts --voice en-US-AriaNeural --rate=-8% \
-            --file dist/narration.txt --write-media dist/narration.mp3
+            --file dist/narration.txt --write-media dist/narration.mp3 \
+            --write-subtitles dist/narration.srt
+          test -s dist/narration.srt
           python - <<'PY'
           from mutagen.mp3 import MP3
           path = 'dist/narration.mp3'
@@ -164,46 +172,81 @@ jobs:
               raise SystemExit('Voiceover must be 55–125 seconds; rerun with a fresh narration.')
           PY
 
-      - name: Package Studio-ready animation and voiceover
+      - name: Render a 2K vertical 3D MP4 with camera moves and burned-in captions
+        env:
+          DURATION_SECONDS: ${{ inputs.duration_seconds }}
+        run: |
+          mkdir -p dist /tmp/blender-config
+          BLENDER_USER_CONFIG=/tmp/blender-config xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 \
+            blender -b --threads 4 --python tools/render_short.py -- \
+            --animation dist/Roblox_R15_Animation.json \
+            --map dist/Roblox_Story_Map.json \
+            --duration "$DURATION_SECONDS" \
+            --output "$PWD/dist/short_silent.mp4" \
+            --width 1440 --height 2560 --fps 30
+          ffmpeg -hide_banner -y -i dist/short_silent.mp4 -i dist/narration.mp3 \
+            -vf "subtitles=dist/narration.srt:force_style='FontName=DejaVu Sans,FontSize=64,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00111111,BorderStyle=1,Outline=5,Shadow=1,MarginL=120,MarginR=120,MarginV=300,Alignment=2'" \
+            -map 0:v:0 -map 1:a:0 -c:v libx264 -preset fast -crf 20 \
+            -pix_fmt yuv420p -r 30 -c:a aac -b:a 192k \
+            -af loudnorm=I=-16:TP=-1.5:LRA=11 -shortest \
+            -movflags +faststart dist/Roblox_2K_YouTube_Short.mp4
+          python - <<'PY'
+          import json, subprocess
+          path = 'dist/Roblox_2K_YouTube_Short.mp4'
+          info = json.loads(subprocess.check_output([
+              'ffprobe', '-v', 'error', '-show_streams', '-show_format', '-of', 'json', path
+          ], text=True))
+          video = next(s for s in info['streams'] if s['codec_type'] == 'video')
+          audio = next(s for s in info['streams'] if s['codec_type'] == 'audio')
+          seconds = float(info['format']['duration'])
+          print(f"MP4 verified: {video['width']}x{video['height']} {video['avg_frame_rate']} fps, {seconds:.1f}s, audio={audio['codec_name']}")
+          if (video['width'], video['height']) != (1440, 2560) or audio['codec_name'] != 'aac' or not 55 <= seconds <= 125:
+              raise SystemExit('MP4 failed 2K portrait/voice/duration validation.')
+          PY
+
+      - name: Package direct MP4 and Roblox source assets
         env:
           DURATION_SECONDS: ${{ inputs.duration_seconds }}
         run: |
           cat > dist/README.txt <<EOF
-          ROBLOX R15 ANIMATED SHORT - ${DURATION_SECONDS} SECONDS
+          FINISHED 2K VERTICAL SHORT - ${DURATION_SECONDS} SECONDS
 
-          Roblox_R15_Animation.rbxmx is a native Roblox XML KeyframeSequence model with
-          actual R15 body-part poses and keyframes. This is not a 2D-rendered character.
-          narration.mp3 is one continuous neural female voiceover (Microsoft Edge TTS,
-          en-US-AriaNeural); it is synthesized as a single file to avoid scene-concat gaps.
-          narration.txt is the exact spoken script. Roblox_R15_Animation.json contains the poses.
-          Roblox_Story_Map.lua builds a matching 3D set with buildings, props, a road, and lighting;
-          Roblox_Story_Map.json contains its validated 3D layout. Roblox_Avatar_Setup.lua
-          fetches the current R15 avatar for the optional username supplied at workflow run time.
-          Story and map generation use the Qwen3 reasoning model offline; it does not browse the web.
-          Avatar lookup happens live through Roblox Studio's username/avatar services.
+          Roblox_2K_YouTube_Short.mp4 is the ready-to-watch 1440x2560 (vertical 2K), 30 fps,
+          H.264 MP4. It includes a real 3D Roblox-style block avatar, story map, AI-directed
+          smooth camera moves and snap cuts, animated face/mouth, continuous female narration,
+          and lower-third captions burned into the video. No editing or Studio step is required
+          to watch/upload the MP4.
 
-          TO MAKE YOUR SHORT IN ROBLOX STUDIO
-          1. Open Roblox_Story_Map.lua, copy its contents into Studio's Command Bar, and run it.
-             It builds the 3D map in Workspace; this is not a 2D background image.
-          2. Open Roblox_Avatar_Setup.lua in Studio's Command Bar and run it to load the chosen
-             public avatar. If no username was supplied, replace YOUR_ROBLOX_USERNAME first.
-          3. Open Roblox_R15_Animation.rbxmx in Studio (or drag it into an open place).
-          4. Use the R15 rig and Animation Editor to preview the imported KeyframeSequence.
-          5. Publish the animation from the Animation Editor to get its Roblox asset ID.
-          6. Add narration.mp3 to your Roblox experience as audio, then play it alongside
-             the animation. Record the avatar in Studio to make a true in-game Roblox video.
+          The MP4 is rendered in Blender as a Roblox-style 3D scene; it is not captured from a
+          live Roblox game. Roblox_R15_Animation.rbxmx is also supplied as a native Roblox
+          KeyframeSequence, and Roblox_Story_Map.lua builds the matching map inside Studio.
+          Roblox_Avatar_Setup.lua fetches the supplied account's current R15 avatar for Studio.
+          The MP4 uses a generated blocky avatar; use the Studio assets if you need the exact
+          Roblox account avatar in a game capture.
 
-          GitHub Actions cannot publish animation/audio assets to Roblox for you; Studio
-          must publish them under the account or group that owns your experience.
+          FILES
+          - Roblox_2K_YouTube_Short.mp4: final vertical 2K video with captions and audio.
+          - narration.mp3 / narration.srt / narration.txt: continuous voiceover and captions.
+          - Roblox_R15_Animation.rbxmx / .json: native pose animation and source keyframes.
+          - Roblox_Story_Map.lua / .json: Studio map builder and AI map/camera plan.
+          - Roblox_Avatar_Setup.lua: loads the optional Roblox username's avatar in Studio.
+
+          OPTIONAL ROBLOX STUDIO USE
+          Run Roblox_Story_Map.lua and Roblox_Avatar_Setup.lua from Studio's Command Bar,
+          then import Roblox_R15_Animation.rbxmx and publish from the Animation Editor.
+          GitHub Actions cannot publish Roblox animation/audio assets on your behalf.
+          Story, poses, map, and camera plan use Qwen3:4b; the local model does not web-browse.
           EOF
-          (cd dist && zip -q Roblox_R15_Animated_Short.zip Roblox_R15_Animation.rbxmx \
-            Roblox_R15_Animation.json Roblox_Story_Map.lua Roblox_Story_Map.json \
-            Roblox_Avatar_Setup.lua narration.mp3 narration.txt README.txt)
+          (cd dist && zip -q Roblox_R15_Animated_Short.zip Roblox_2K_YouTube_Short.mp4 \
+            Roblox_R15_Animation.rbxmx Roblox_R15_Animation.json Roblox_Story_Map.lua \
+            Roblox_Story_Map.json Roblox_Avatar_Setup.lua narration.mp3 narration.srt narration.txt README.txt)
 
-      - name: Upload animation, script, and voiceover
+      - name: Upload finished 2K MP4 and source pack
         uses: actions/upload-artifact@v4
         with:
-          name: Roblox-R15-Animated-Short
-          path: dist/Roblox_R15_Animated_Short.zip
+          name: Roblox-2K-YouTube-Short
+          path: |
+            dist/Roblox_2K_YouTube_Short.mp4
+            dist/Roblox_R15_Animated_Short.zip
           if-no-files-found: error
           retention-days: 14

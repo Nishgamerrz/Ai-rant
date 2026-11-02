@@ -40,6 +40,60 @@ def default_plan():
     }
 
 
+def default_camera_shots(duration):
+    """A mix of smooth camera sweeps and story-beat snap cuts for the rendered short."""
+    beats = [0, .16, .32, .48, .64, .80, 1.0]
+    views = [
+        ([0, 32, 76], [0, 3, 24], "smooth"),
+        ([-16, 12, 48], [0, 3, 24], "smooth"),
+        ([18, 10, 38], [8, 4, 24], "snap"),
+        ([22, 14, 10], [0, 3, 24], "smooth"),
+        ([-10, 8, 38], [0, 3, 24], "snap"),
+        ([8, 10, 54], [0, 3, 24], "smooth"),
+        ([0, 28, 84], [0, 3, 24], "smooth"),
+    ]
+    return [
+        {"time": round(duration * ratio, 2), "position": pos, "target": target, "transition": mode}
+        for ratio, (pos, target, mode) in zip(beats, views)
+    ]
+
+
+def normalize_camera_shots(shots, duration):
+    if not isinstance(shots, list) or not 4 <= len(shots) <= 12:
+        return default_camera_shots(duration)
+    clean, previous = [], -1.0
+    for shot in shots:
+        if not isinstance(shot, dict):
+            return default_camera_shots(duration)
+        time, pos, target = shot.get("time"), shot.get("position"), shot.get("target")
+        transition = shot.get("transition", "smooth")
+        if (isinstance(time, bool) or not isinstance(time, (int, float))
+                or not 0 <= time <= duration or time <= previous):
+            return default_camera_shots(duration)
+        for vector in (pos, target):
+            if (not isinstance(vector, list) or len(vector) != 3
+                    or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                           or not -120 <= v <= 120 for v in vector)):
+                return default_camera_shots(duration)
+        if transition not in {"smooth", "snap"}:
+            transition = "smooth"
+        clean.append({
+            "time": round(float(time), 2),
+            "position": [round(float(v), 2) for v in pos],
+            "target": [round(float(v), 2) for v in target],
+            "transition": transition,
+        })
+        previous = time
+    if clean[0]["time"] != 0:
+        clean.insert(0, default_camera_shots(duration)[0])
+    if clean[-1]["time"] < duration:
+        last = dict(clean[-1])
+        last["time"] = float(duration)
+        last["transition"] = "smooth"
+        clean.append(last)
+    return clean
+
+
 def decode_response(path):
     payload = json.loads(path.read_text(encoding="utf-8"))
     response = payload.get("response", "") if isinstance(payload, dict) else ""
@@ -50,7 +104,7 @@ def decode_response(path):
     return plan
 
 
-def validate(plan):
+def validate(plan, duration=90):
     if not isinstance(plan, dict):
         raise ValueError("map plan must be an object")
     props = plan.get("props")
@@ -103,6 +157,7 @@ def validate(plan):
         "ground_color": color(plan.get("ground_color"), [50, 60, 75]),
         "ambient_color": color(plan.get("ambient_color"), [145, 160, 195]),
         "props": clean_props,
+        "camera_shots": normalize_camera_shots(plan.get("camera_shots"), duration),
     }
 
 
@@ -172,14 +227,17 @@ def emit_lua(plan, output):
 
 
 def main():
-    if len(sys.argv) != 3:
-        raise SystemExit("usage: build_story_map.py OLLAMA_RESPONSE.json OUTPUT.lua")
-    source, destination = map(Path, sys.argv[1:])
+    if len(sys.argv) != 4:
+        raise SystemExit("usage: build_story_map.py OLLAMA_RESPONSE.json OUTPUT.lua DURATION_SECONDS")
+    source, destination = map(Path, sys.argv[1:3])
+    duration = float(sys.argv[3])
+    if not 60 <= duration <= 120:
+        raise SystemExit("duration must be 60 to 120 seconds")
     try:
-        plan = validate(decode_response(source))
+        plan = validate(decode_response(source), duration)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"Invalid AI map plan ({exc}); using a complete Roblox city-plaza map.", file=sys.stderr)
-        plan = validate(default_plan())
+        plan = validate(default_plan(), duration)
     emit_lua(plan, destination)
     destination.with_suffix(".json").write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
     print(f"Created {destination}: {plan['name']} with {len(plan['props'])} 3D props.")

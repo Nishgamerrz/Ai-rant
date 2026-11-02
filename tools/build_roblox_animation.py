@@ -28,6 +28,7 @@ JOINTS = {
     "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
     "RightUpperLeg", "RightLowerLeg", "RightFoot",
 }
+FACE_STATES = {"neutral", "talk", "smile", "shocked", "blink"}
 
 
 def default_animation(duration):
@@ -47,7 +48,8 @@ def default_animation(duration):
                 pose["LeftUpperArm"] = [-15, 0, -65]
                 pose["LeftLowerArm"] = [0, 0, 25]
                 pose["LeftHand"] = [0, 0, -10]
-        poses.append({"time": duration * ratio, "poses": pose})
+        face = "smile" if i in (0, 13) else ("shocked" if i in (5, 6) else "talk")
+        poses.append({"time": duration * ratio, "poses": pose, "face": face})
     return {
         "name": "AI_R15_Story_Animation",
         "looped": False,
@@ -84,10 +86,13 @@ def normalize(data, duration):
                            or not math.isfinite(v) or abs(v) > 180 for v in angles)):
                 raise ValueError(f"{joint} must have three rotation angles between -180 and 180")
             clean_poses[joint] = [float(v) for v in angles]
-        normalized.append({"time": time, "poses": clean_poses})
+        face = frame.get("face", "talk")
+        if not isinstance(face, str) or face.lower() not in FACE_STATES:
+            face = "talk"
+        normalized.append({"time": time, "poses": clean_poses, "face": face.lower()})
         previous = time
     if normalized[0]["time"] != 0:
-        normalized.insert(0, {"time": 0.0, "poses": {j: [0.0, 0.0, 0.0] for j in JOINTS}})
+        normalized.insert(0, {"time": 0.0, "poses": {j: [0.0, 0.0, 0.0] for j in JOINTS}, "face": "neutral"})
 
     # Always span the chosen short runtime. Keep generated relative timing, but stretch
     # it to the requested duration if the model returned a shorter timeline.
