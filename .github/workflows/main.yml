@@ -68,7 +68,7 @@ jobs:
         run: |
           TARGET_WORDS=$((DURATION_SECONDS * 17 / 10))
           cat > narration_prompt.txt <<PROMPT
-          Plan briefly in private (hook, escalating problem, satisfying payoff; no long reasoning). Then write a lively, polished, natural ENGLISH voiceover script for a Roblox short about: "${STORY_TOPIC}".
+          Write a lively, polished, natural ENGLISH voiceover script for a Roblox short about: "${STORY_TOPIC}".
           The target runtime is ${DURATION_SECONDS} seconds. Return ONLY valid JSON in this shape:
           {"narration":"The complete spoken narration goes here."}
           Aim for about ${TARGET_WORDS} spoken words (roughly 102 words per minute, matching the clear female voice pace).
@@ -77,7 +77,7 @@ jobs:
           sound effects, timestamps, or artificial pauses. Keep it appropriate for a general audience.
           PROMPT
           jq -n --arg model "$AI_MODEL" --rawfile prompt narration_prompt.txt \
-            '{model:$model, prompt:$prompt, format:"json", stream:false, options:{temperature:0.6, num_predict:700}}' > narration_request.json
+            '{model:$model, prompt:$prompt, format:{type:"object",properties:{narration:{type:"string"}},required:["narration"],additionalProperties:false}, think:false, stream:false, options:{temperature:0.6, num_predict:700}}' > narration_request.json
           curl --fail --silent --show-error --max-time 600 \
             http://127.0.0.1:11434/api/generate -d @narration_request.json -o narration_response.json
           mkdir -p dist
@@ -85,7 +85,7 @@ jobs:
             DRAFT=$(jq -r '.response // ""' narration_response.json)
             jq -n --arg model "$AI_MODEL" --arg draft "$DRAFT" \
               --arg topic "$STORY_TOPIC" --arg duration "$DURATION_SECONDS" --arg words "$TARGET_WORDS" \
-              '{model:$model, format:"json", stream:false, options:{temperature:0.55, num_predict:700}, prompt:("Rewrite this narration as a complete, natural English mini-story for a Roblox short about: " + $topic + ". It must be about " + $words + " words, for a " + $duration + " second voiceover at a clear, steady pace. Return a JSON object containing only the narration field. Draft to rewrite: " + $draft)}' \
+              '{model:$model, format:{type:"object",properties:{narration:{type:"string"}},required:["narration"],additionalProperties:false}, think:false, stream:false, options:{temperature:0.55, num_predict:700}, prompt:("Rewrite this narration as a complete, natural English mini-story for a Roblox short about: " + $topic + ". It must be about " + $words + " words, for a " + $duration + " second voiceover at a clear, steady pace. Return a JSON object containing only the narration field. Draft to rewrite: " + $draft)}' \
               > narration_repair_request.json
             curl --fail --silent --show-error --max-time 600 \
               http://127.0.0.1:11434/api/generate -d @narration_repair_request.json -o narration_response.json
@@ -104,7 +104,7 @@ jobs:
           General action/topic: "${STORY_TOPIC}"
           Required animation duration: ${DURATION_SECONDS} seconds. Return ONLY valid JSON:
           {"name":"ShortAnimation","keyframes":[{"time":0,"poses":{"Head":[0,0,0],"UpperTorso":[0,0,0],"RightUpperArm":[0,0,0]}}]}
-          Think through the story beats privately, then make 24 to 42 keyframes distributed through the FULL runtime, starting at 0 and ending
+          Plan clear story beats, then make 24 to 42 keyframes distributed through the FULL runtime, starting at 0 and ending
           close to ${DURATION_SECONDS}. Use seconds for time. Pose arrays are [rotationX,rotationY,rotationZ]
           in degrees, relative to the neutral R15 pose; keep each angle between -100 and 100.
           Poses are sparse: include only joints that move in that keyframe; omitted joints are neutral.
@@ -116,7 +116,7 @@ jobs:
           Do not make a 2D image, video, scene layout, or subtitles. This is joint motion data only.
           PROMPT
           jq -n --arg model "$AI_MODEL" --rawfile prompt animation_prompt.txt \
-            '{model:$model, prompt:$prompt, format:"json", stream:false, options:{temperature:0.55, num_predict:3000}}' > animation_request.json
+            '{model:$model, prompt:$prompt, format:"json", think:false, stream:false, options:{temperature:0.55, num_predict:3000}}' > animation_request.json
           curl --fail --silent --show-error --max-time 900 \
             http://127.0.0.1:11434/api/generate -d @animation_request.json -o animation_response.json
           jq -r '.response // empty' animation_response.json > ai_animation.json
@@ -129,7 +129,7 @@ jobs:
         run: |
           NARRATION=$(cat dist/narration.txt)
           cat > map_prompt.txt <<PROMPT
-          Think through the story setting privately, then design a polished, colorful 3D Roblox set that matches this short story.
+          Design a polished, colorful 3D Roblox set that matches this short story.
           Story/topic: "${STORY_TOPIC}"
           Story narration: "${NARRATION}"
           Return ONLY valid JSON with this structure:
@@ -145,7 +145,7 @@ jobs:
           0.5 to 60, and RGB color as three integers from 0 to 255. Keep it appropriate for all ages.
           PROMPT
           jq -n --arg model "$AI_MODEL" --rawfile prompt map_prompt.txt \
-            '{model:$model, prompt:$prompt, format:"json", stream:false, options:{temperature:0.65, num_predict:3000}}' > map_request.json
+            '{model:$model, prompt:$prompt, format:"json", think:false, stream:false, options:{temperature:0.65, num_predict:3000}}' > map_request.json
           curl --fail --silent --show-error --max-time 600 \
             http://127.0.0.1:11434/api/generate -d @map_request.json -o map_response.json
           python tools/build_story_map.py map_response.json dist/Roblox_Story_Map.lua
