@@ -24,7 +24,8 @@ def main():
         raise SystemExit("The AI did not return a narration string.")
     text = re.sub(r"\s+", " ", text).strip()
     words = re.findall(r"\b[\w’'-]+\b", text)
-    minimum, maximum = int(duration * 2.15), int(duration * 2.55)
+    # In the tested voice pipeline, ~1.7 words/second lands near the chosen runtime.
+    minimum, maximum = int(duration * 1.6), int(duration * 1.75)
     if not minimum <= len(words) <= maximum:
         raise SystemExit(
             f"Narration is {len(words)} words; expected {minimum}–{maximum} "

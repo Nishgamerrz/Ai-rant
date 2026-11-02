@@ -17,6 +17,14 @@ on:
           - '60'
           - '90'
           - '120'
+      avatar_username:
+        description: 'Optional Roblox username whose R15 avatar should be loaded in Studio'
+        required: false
+        default: ''
+        type: string
+
+env:
+  AI_MODEL: qwen3:4b
 
 permissions:
   contents: read
@@ -51,33 +59,33 @@ jobs:
             sleep 2
           done
           curl -fsS http://127.0.0.1:11434/api/tags >/dev/null
-          ollama pull qwen2.5:3b-instruct
+          ollama pull "$AI_MODEL"
 
       - name: Write a full-length short script
         env:
           STORY_TOPIC: ${{ inputs.story_topic }}
           DURATION_SECONDS: ${{ inputs.duration_seconds }}
         run: |
-          TARGET_WORDS=$((DURATION_SECONDS * 23 / 10))
+          TARGET_WORDS=$((DURATION_SECONDS * 17 / 10))
           cat > narration_prompt.txt <<PROMPT
-          Write a lively, natural English voiceover script for a Roblox short about: "${STORY_TOPIC}".
+          Think privately through a clear hook, escalating problem, and satisfying payoff. Then write a lively, polished, natural ENGLISH voiceover script for a Roblox short about: "${STORY_TOPIC}".
           The target runtime is ${DURATION_SECONDS} seconds. Return ONLY valid JSON in this shape:
           {"narration":"The complete spoken narration goes here."}
-          Aim for about ${TARGET_WORDS} spoken words (roughly 138 words per minute).
+          Aim for about ${TARGET_WORDS} spoken words (roughly 102 words per minute, matching the clear female voice pace).
           Make it a coherent mini-story with a strong hook, conversational pacing, and a satisfying ending.
-          Use varied sentence lengths and natural contractions. No stage directions, speaker labels,
+          Use correct, fluent English, varied sentence lengths, and natural contractions. No stage directions, speaker labels,
           sound effects, timestamps, or artificial pauses. Keep it appropriate for a general audience.
           PROMPT
-          jq -n --arg model 'qwen2.5:3b-instruct' --rawfile prompt narration_prompt.txt \
-            '{model:$model, prompt:$prompt, format:"json", stream:false, options:{temperature:0.75}}' > narration_request.json
+          jq -n --arg model "$AI_MODEL" --rawfile prompt narration_prompt.txt \
+            '{model:$model, prompt:$prompt, format:"json", stream:false, options:{temperature:0.65, num_predict:1200}}' > narration_request.json
           curl --fail --silent --show-error --max-time 600 \
             http://127.0.0.1:11434/api/generate -d @narration_request.json -o narration_response.json
           mkdir -p dist
           if ! python tools/prepare_narration.py narration_response.json dist/narration.txt "$DURATION_SECONDS"; then
             DRAFT=$(jq -r '.response // ""' narration_response.json)
-            jq -n --arg model 'qwen2.5:3b-instruct' --arg draft "$DRAFT" \
+            jq -n --arg model "$AI_MODEL" --arg draft "$DRAFT" \
               --arg topic "$STORY_TOPIC" --arg duration "$DURATION_SECONDS" --arg words "$TARGET_WORDS" \
-              '{model:$model, format:"json", stream:false, options:{temperature:0.7}, prompt:("Rewrite this narration as a complete, natural English mini-story for a Roblox short about: " + $topic + ". It must be about " + $words + " words, for a " + $duration + " second voiceover at a clear, steady pace. Return a JSON object containing only the narration field. Draft to rewrite: " + $draft)}' \
+              '{model:$model, format:"json", stream:false, options:{temperature:0.55, num_predict:1200}, prompt:("Rewrite this narration as a complete, natural English mini-story for a Roblox short about: " + $topic + ". It must be about " + $words + " words, for a " + $duration + " second voiceover at a clear, steady pace. Return a JSON object containing only the narration field. Draft to rewrite: " + $draft)}' \
               > narration_repair_request.json
             curl --fail --silent --show-error --max-time 600 \
               http://127.0.0.1:11434/api/generate -d @narration_repair_request.json -o narration_response.json
@@ -96,7 +104,7 @@ jobs:
           General action/topic: "${STORY_TOPIC}"
           Required animation duration: ${DURATION_SECONDS} seconds. Return ONLY valid JSON:
           {"name":"ShortAnimation","keyframes":[{"time":0,"poses":{"Head":[0,0,0],"UpperTorso":[0,0,0],"RightUpperArm":[0,0,0]}}]}
-          Make 18 to 32 keyframes distributed through the FULL runtime, starting at 0 and ending
+          Think through the story beats privately, then make 24 to 42 keyframes distributed through the FULL runtime, starting at 0 and ending
           close to ${DURATION_SECONDS}. Use seconds for time. Pose arrays are [rotationX,rotationY,rotationZ]
           in degrees, relative to the neutral R15 pose; keep each angle between -100 and 100.
           Poses are sparse: include only joints that move in that keyframe; omitted joints are neutral.
@@ -107,12 +115,41 @@ jobs:
           gestures, avoid holding one pose for long, keep the avatar in place, and end at a relaxed pose.
           Do not make a 2D image, video, scene layout, or subtitles. This is joint motion data only.
           PROMPT
-          jq -n --arg model 'qwen2.5:3b-instruct' --rawfile prompt animation_prompt.txt \
-            '{model:$model, prompt:$prompt, format:"json", stream:false, options:{temperature:0.7}}' > animation_request.json
+          jq -n --arg model "$AI_MODEL" --rawfile prompt animation_prompt.txt \
+            '{model:$model, prompt:$prompt, format:"json", stream:false, options:{temperature:0.55, num_predict:3000}}' > animation_request.json
           curl --fail --silent --show-error --max-time 900 \
             http://127.0.0.1:11434/api/generate -d @animation_request.json -o animation_response.json
           jq -r '.response // empty' animation_response.json > ai_animation.json
           python tools/build_roblox_animation.py ai_animation.json dist/Roblox_R15_Animation.rbxmx "$DURATION_SECONDS"
+
+      - name: Design a matching 3D Roblox story map
+        env:
+          STORY_TOPIC: ${{ inputs.story_topic }}
+          AVATAR_USERNAME: ${{ inputs.avatar_username }}
+        run: |
+          NARRATION=$(cat dist/narration.txt)
+          cat > map_prompt.txt <<PROMPT
+          Think through the story setting privately, then design a polished, colorful 3D Roblox set that matches this short story.
+          Story/topic: "${STORY_TOPIC}"
+          Story narration: "${NARRATION}"
+          Return ONLY valid JSON with this structure:
+          {"name":"Neon Plaza","theme":"A clear environment description","ground_color":[38,48,68],"ambient_color":[140,160,200],"props":[{"name":"Arcade","shape":"Block","material":"Neon","position":[-35,8,10],"size":[24,16,20],"color":[30,210,240]}]}
+          Include 12 to 24 thoughtfully arranged, visually varied props that make a readable,
+          walkable set: buildings/landmarks, foreground set dressing, and a few colorful accents.
+          Use a strong palette that fits the story, and leave the central avenue and center of the
+          map open enough for an R15 character to perform. This is a real 3D Roblox map layout,
+          not an image, screenshot, or 2D drawing.
+          Every prop must have a distinct short name, shape Block/Ball/Cylinder, material chosen
+          only from Plastic, SmoothPlastic, Concrete, Grass, Slate, Wood, Metal, Neon, Glass,
+          Brick, Asphalt, position as three numbers from -85 to 85, size as three numbers from
+          0.5 to 60, and RGB color as three integers from 0 to 255. Keep it appropriate for all ages.
+          PROMPT
+          jq -n --arg model "$AI_MODEL" --rawfile prompt map_prompt.txt \
+            '{model:$model, prompt:$prompt, format:"json", stream:false, options:{temperature:0.65, num_predict:3000}}' > map_request.json
+          curl --fail --silent --show-error --max-time 600 \
+            http://127.0.0.1:11434/api/generate -d @map_request.json -o map_response.json
+          python tools/build_story_map.py map_response.json dist/Roblox_Story_Map.lua
+          python tools/build_avatar_setup.py "$AVATAR_USERNAME" dist/Roblox_Avatar_Setup.lua
 
       - name: Synthesize one continuous natural female voiceover
         run: |
@@ -138,20 +175,30 @@ jobs:
           actual R15 body-part poses and keyframes. This is not a 2D-rendered character.
           narration.mp3 is one continuous neural female voiceover (Microsoft Edge TTS,
           en-US-AriaNeural); it is synthesized as a single file to avoid scene-concat gaps.
-          narration.txt is the exact spoken script. The JSON file contains the pose data.
+          narration.txt is the exact spoken script. Roblox_R15_Animation.json contains the poses.
+          Roblox_Story_Map.lua builds a matching 3D set with buildings, props, a road, and lighting;
+          Roblox_Story_Map.json contains its validated 3D layout. Roblox_Avatar_Setup.lua
+          fetches the current R15 avatar for the optional username supplied at workflow run time.
+          Story and map generation use the Qwen3 reasoning model offline; it does not browse the web.
+          Avatar lookup happens live through Roblox Studio's username/avatar services.
 
           TO MAKE YOUR SHORT IN ROBLOX STUDIO
-          1. Open Roblox_R15_Animation.rbxmx in Studio (or drag it into an open place).
-          2. Use an R15 rig and preview the imported KeyframeSequence in the Animation Editor.
-          3. Publish the animation from the Animation Editor to get its Roblox asset ID.
-          4. Add narration.mp3 to your Roblox experience as audio, then play it alongside
+          1. Open Roblox_Story_Map.lua, copy its contents into Studio's Command Bar, and run it.
+             It builds the 3D map in Workspace; this is not a 2D background image.
+          2. Open Roblox_Avatar_Setup.lua in Studio's Command Bar and run it to load the chosen
+             public avatar. If no username was supplied, replace YOUR_ROBLOX_USERNAME first.
+          3. Open Roblox_R15_Animation.rbxmx in Studio (or drag it into an open place).
+          4. Use the R15 rig and Animation Editor to preview the imported KeyframeSequence.
+          5. Publish the animation from the Animation Editor to get its Roblox asset ID.
+          6. Add narration.mp3 to your Roblox experience as audio, then play it alongside
              the animation. Record the avatar in Studio to make a true in-game Roblox video.
 
           GitHub Actions cannot publish animation/audio assets to Roblox for you; Studio
           must publish them under the account or group that owns your experience.
           EOF
           (cd dist && zip -q Roblox_R15_Animated_Short.zip Roblox_R15_Animation.rbxmx \
-            Roblox_R15_Animation.json narration.mp3 narration.txt README.txt)
+            Roblox_R15_Animation.json Roblox_Story_Map.lua Roblox_Story_Map.json \
+            Roblox_Avatar_Setup.lua narration.mp3 narration.txt README.txt)
 
       - name: Upload animation, script, and voiceover
         uses: actions/upload-artifact@v4
