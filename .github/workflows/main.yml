@@ -25,7 +25,7 @@ jobs:
       - name: Install Graphic and Voice Processing Dependencies
         run: |
           pip install pillow numpy gTTS mutagen
-          sudo apt-get update && sudo apt-get install -y ffmpeg zstd
+          sudo apt-get update && sudo apt-get install -y ffmpeg zstd jq
 
       - name: Launch Local AI Brain
         run: |
@@ -34,40 +34,99 @@ jobs:
           sudo tar -I zstd -xf ollama.tar.zst -C /usr
           ollama serve &
           sleep 8
-          ollama pull deepseek-r1:1.5b
+          # qwen2.5:3b-instruct follows strict-JSON / English-only instructions far more
+          # reliably than a "thinking" model like deepseek-r1, which leaks its reasoning
+          # (and sometimes switches language) into stdout and breaks JSON parsing.
+          ollama pull qwen2.5:3b-instruct
 
       - name: Generate Story Layout Matrix
         id: ai_generation
         run: |
-          PROMPT="You are a professional Roblox animation system. 
-          Generate a 3-scene sequence layout for a short vertical video about: '\${{ github.event.inputs.story_topic }}'.
-          Keep text content short (3-6 words per scene).
-          Output STRICTLY a raw JSON object (no markdown formatting blocks, no explanations). The JSON must match this structure exactly:
+          STORY_TOPIC="${{ github.event.inputs.story_topic }}"
+
+          PROMPT=$(cat <<EOF
+          You are a professional Roblox animation system.
+          Write all text strictly in English, regardless of the topic language.
+          Generate a 3-scene sequence layout for a short vertical video about: "${STORY_TOPIC}".
+          Keep "text" short (3-6 words per scene), punchy, and in English only.
+          "bg_color" must be an array of 3 integers between 0 and 255, e.g. [135, 206, 235].
+          "facial_sequence" must only use these values: "blink", "talk_open", "talk_closed", "smile", "shocked".
+          Return ONLY a single JSON object, no commentary, matching exactly this structure:
           {
-            \"scenes\": [
-              {
-                \"scene_num\": 1, 
-                \"text\": \"Bro look at his chair\", 
-                \"bg_color\":,
-                \"facial_sequence\": [\"blink\", \"talk_open\", \"talk_closed\", \"talk_open\"]
-              },
-              {
-                \"scene_num\": 2, 
-                \"text\": \"He is literally flying\", 
-                \"bg_color\":,
-                \"facial_sequence\": [\"talk_open\", \"talk_closed\", \"shocked\", \"talk_open\"]
-              },
-              {
-                \"scene_num\": 3, 
-                \"text\": \"Bro is built different\", 
-                \"bg_color\":,
-                \"facial_sequence\": [\"smile\", \"talk_open\", \"talk_closed\", \"smile\"]
-              }
+            "scenes": [
+              {"scene_num": 1, "text": "string", "bg_color": [0,0,0], "facial_sequence": ["talk_open","talk_closed"]},
+              {"scene_num": 2, "text": "string", "bg_color": [0,0,0], "facial_sequence": ["talk_open","talk_closed"]},
+              {"scene_num": 3, "text": "string", "bg_color": [0,0,0], "facial_sequence": ["talk_open","talk_closed"]}
             ]
-          }"
-          ollama run deepseek-r1:1.5b "\$PROMPT" > structural_data.json
-          sed -i '/```/d' structural_data.json
-          cat structural_data.json
+          }
+          EOF
+          )
+
+          # Build the API payload safely with jq (handles escaping of quotes/newlines)
+          jq -n --arg model "qwen2.5:3b-instruct" --arg prompt "$PROMPT" \
+            '{model: $model, prompt: $prompt, format: "json", stream: false, options: {temperature: 0.7}}' \
+            > request.json
+
+          # Use the HTTP API with format:"json" so Ollama enforces valid JSON output,
+          # instead of trusting the CLI's raw stdout (which was leaking stray text/thinking).
+          curl -s http://127.0.0.1:11434/api/generate \
+            -d @request.json \
+            | jq -r '.response' > raw_model_output.txt
+
+          cat raw_model_output.txt
+
+          # Safety net: extract the {...} block even if the model adds stray text,
+          # and fall back to a hardcoded scene set if parsing still fails, so the
+          # workflow never hard-crashes on a bad generation.
+          python3 <<'PYEOF'
+          import json, re, sys
+
+          with open("raw_model_output.txt", "r", encoding="utf-8") as f:
+              raw = f.read()
+
+          def default_scenes():
+              return {
+                  "scenes": [
+                      {"scene_num": 1, "text": "Bro look at this setup", "bg_color": [135, 206, 235],
+                       "facial_sequence": ["blink", "talk_open", "talk_closed", "talk_open"]},
+                      {"scene_num": 2, "text": "This is actually insane", "bg_color": [255, 140, 0],
+                       "facial_sequence": ["talk_open", "talk_closed", "shocked", "talk_open"]},
+                      {"scene_num": 3, "text": "Bro is built different", "bg_color": [60, 179, 113],
+                       "facial_sequence": ["smile", "talk_open", "talk_closed", "smile"]},
+                  ]
+              }
+
+          data = None
+          match = re.search(r"\{.*\}", raw, re.DOTALL)
+          if match:
+              try:
+                  data = json.loads(match.group(0))
+              except json.JSONDecodeError:
+                  data = None
+
+          if not data or "scenes" not in data or len(data["scenes"]) == 0:
+              print("WARNING: Falling back to default scenes (model output was invalid).", file=sys.stderr)
+              data = default_scenes()
+
+          # Validate / repair each scene so render_engine.py never chokes on bad data
+          valid_faces = {"blink", "talk_open", "talk_closed", "smile", "shocked"}
+          for i, scene in enumerate(data["scenes"]):
+              scene.setdefault("scene_num", i + 1)
+              if not isinstance(scene.get("text"), str) or not scene["text"].strip():
+                  scene["text"] = "Bro this is wild"
+              bg = scene.get("bg_color")
+              if not (isinstance(bg, list) and len(bg) == 3 and all(isinstance(c, int) and 0 <= c <= 255 for c in bg)):
+                  scene["bg_color"] = [100, 149, 237]
+              seq = scene.get("facial_sequence")
+              if not (isinstance(seq, list) and len(seq) > 0 and all(s in valid_faces for s in seq)):
+                  scene["facial_sequence"] = ["talk_open", "talk_closed", "smile"]
+
+          with open("structural_data.json", "w", encoding="utf-8") as f:
+              json.dump(data, f)
+
+          print("Final structural_data.json:")
+          print(json.dumps(data, indent=2))
+          PYEOF
 
       - name: Programmatically Render HD Frames with Border Subtitles
         run: |
@@ -84,52 +143,88 @@ jobs:
           fps = 30
           os.makedirs('frames', exist_ok=True)
           os.makedirs('audio_clips', exist_ok=True)
-          
+
           frame_count = 0
           audio_merge_list = []
 
           font_size = 85
           try:
               font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
-          except:
+          except Exception:
               font = ImageFont.load_default()
+
+          def lerp_color(c1, c2, t):
+              return tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3))
+
+          def draw_map(draw, accent):
+              """Draws a simple Roblox-style baseplate 'map': gradient sky,
+              a green/grey grid baseplate, and a few blocky background props."""
+              horizon = int(height * 0.62)
+
+              # Sky gradient (accent color blended toward white near the horizon)
+              sky_top = accent
+              sky_bottom = (240, 248, 255)
+              for y in range(horizon):
+                  t = y / max(1, horizon)
+                  r, g, b = lerp_color(sky_top, sky_bottom, t)
+                  draw.line([(0, y), (width, y)], fill=(r, g, b))
+
+              # A couple of simple blocky background buildings for depth
+              draw.rectangle([60, horizon - 260, 230, horizon], fill=(180, 180, 190))
+              draw.rectangle([850, horizon - 340, 1020, horizon], fill=(160, 160, 175))
+              draw.rectangle([720, horizon - 180, 840, horizon], fill=(200, 200, 210))
+
+              # Baseplate ground (classic Roblox green)
+              draw.rectangle([0, horizon, width, height], fill=(74, 150, 74))
+
+              # Grid lines on the baseplate, converging slightly for a pseudo-3D feel
+              grid_color = (58, 120, 58)
+              for gx in range(-4, 24):
+                  x_top = gx * 90 + (width // 2 - 400)
+                  x_bottom = gx * 140 + (width // 2 - 700)
+                  draw.line([(x_top, horizon), (x_bottom, height)], fill=grid_color, width=2)
+              for gy_t, gy_frac in zip(range(1, 7), [0.06, 0.14, 0.24, 0.37, 0.55, 0.8]):
+                  y = horizon + int((height - horizon) * gy_frac)
+                  draw.line([(0, y), (width, y)], fill=grid_color, width=2)
 
           for idx, scene in enumerate(data['scenes']):
               from gtts import gTTS
               from mutagen.mp3 import MP3
 
               text_content = scene['text']
-              bg = tuple(scene['bg_color'])
+              accent = tuple(scene['bg_color'])
               face_seq = scene['facial_sequence']
               words = text_content.split()
-              
+
               tts = gTTS(text=text_content, lang='en', tld='co.uk', slow=False)
               audio_path = f"audio_clips/scene_{idx}.mp3"
               tts.save(audio_path)
-              
+
               audio_length = MP3(audio_path).info.length
-              total_scene_frames = int(audio_length * fps)
+              total_scene_frames = max(1, int(audio_length * fps))
               audio_merge_list.append(audio_path)
-              
+
               frames_per_word = max(1, total_scene_frames // len(words))
-              
+
               for f in range(total_scene_frames):
-                  img = Image.new('RGB', (width, height), color=bg)
+                  img = Image.new('RGB', (width, height), color=(0, 0, 0))
                   draw = ImageDraw.Draw(img)
-                  
+
+                  draw_map(draw, accent)
+
                   bounce = int(math.sin(f * 0.3) * 12)
                   sway = int(math.cos(f * 0.2) * 8)
-                  
+
                   draw.rectangle([390 + sway, 660 + bounce, 690 + sway, 1050 + bounce], fill=(0, 120, 255))
                   hx1, hy1, hx2, hy2 = 440 + sway, 430 + bounce, 640 + sway, 630 + bounce
                   draw.rectangle([hx1, hy1, hx2, hy2], fill=(255, 225, 120))
-                  
+
                   seq_index = min(int((f / total_scene_frames) * len(face_seq)), len(face_seq) - 1)
                   current_expression = face_seq[seq_index]
-                  
+
                   eye_y, left_eye_x, right_eye_x = hy1 + 60, hx1 + 50, hx1 + 150
                   mouth_y, mouth_x = hy1 + 130, hx1 + 100
-                  
+
                   if current_expression == "blink":
                       draw.line([left_eye_x - 15, eye_y, left_eye_x + 15, eye_y], fill=(0, 0, 0), width=6)
                       draw.line([right_eye_x - 15, eye_y, right_eye_x + 15, eye_y], fill=(0, 0, 0), width=6)
@@ -148,23 +243,23 @@ jobs:
 
                   active_word_idx = min(f // frames_per_word, len(words) - 1)
                   active_word = words[active_word_idx].upper()
-                  
+
                   text_y = 1380
-                  
+
                   try:
                       text_w = draw.textlength(active_word, font=font)
-                  except:
+                  except Exception:
                       text_w = len(active_word) * 50
                   text_x = (width - text_w) // 2
-                  
+
                   border_thickness = 8
                   for dx in range(-border_thickness, border_thickness + 1):
                       for dy in range(-border_thickness, border_thickness + 1):
-                          if dx*dx + dy*dy <= border_thickness*border_thickness:
+                          if dx * dx + dy * dy <= border_thickness * border_thickness:
                               draw.text((text_x + dx, text_y + dy), active_word, font=font, fill=(0, 0, 0))
-                  
+
                   draw.text((text_x, text_y), active_word, font=font, fill=(255, 255, 0))
-                  
+
                   img.save(f"frames/frame_{frame_count:05d}.png")
                   frame_count += 1
 
@@ -185,4 +280,3 @@ jobs:
         with:
           name: YouTube-Shorts-HD-Captions-Pack
           path: roblox_shorts_final.mp4
-          
