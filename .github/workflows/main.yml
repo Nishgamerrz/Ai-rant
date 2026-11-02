@@ -25,14 +25,15 @@ jobs:
       - name: Install Graphic and Voice Processing Dependencies
         run: |
           pip install pillow numpy gTTS mutagen
-          sudo apt-get update && sudo apt-get install -y ffmpeg
+          sudo apt-get update && sudo apt-get install -y ffmpeg zstd
 
       - name: Launch Local AI Brain
         run: |
-          # FIX: Direct path to the installer shell script
-          curl -fsSL https://ollama.com | sh
+          # 100% Manual Binary Fetch to completely bypass sh/bash installer script errors
+          curl -L https://ollama.com/download/ollama-linux-amd64.tar.zst -o ollama.tar.zst
+          sudo tar -I zstd -xf ollama.tar.zst -C /usr
           ollama serve &
-          sleep 10
+          sleep 8
           ollama pull deepseek-r1:1.5b
 
       - name: Generate Story Layout Matrix
@@ -41,7 +42,7 @@ jobs:
           PROMPT="You are a professional Roblox animation system. 
           Generate a 3-scene sequence layout for a short vertical video about: '\${{ github.event.inputs.story_topic }}'.
           Keep text content short (3-6 words per scene).
-          Output STRICTLY a raw JSON object (no markdown, no explanations). The JSON must match this structure exactly:
+          Output STRICTLY a raw JSON object (no markdown formatting blocks, no explanations). The JSON must match this structure exactly:
           {
             \"scenes\": [
               {
