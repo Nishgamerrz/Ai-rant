@@ -1,4 +1,4 @@
-name: Validate Roblox Studio experience generator
+name: Validate Roblox short generator
 
 on:
   push:
@@ -22,11 +22,31 @@ jobs:
       - name: Install workflow parser
         run: python -m pip install PyYAML reportlab
 
+      - name: Set up Node for renderer syntax checks
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Compile Python and run experience tests
         run: |
           python -m py_compile tools/*.py tests/*.py
           python -m unittest discover -s tests -v
           git diff --check
+
+      - name: Validate Three.js renderer and embedded browser module syntax
+        run: |
+          node --check tools/video_renderer/render_short.mjs
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          source = Path('tools/video_renderer/render_short.mjs').read_text(encoding='utf-8')
+          match = re.search(r'<script type="module">(.*?)</script>', source, re.S)
+          if not match:
+              raise SystemExit('renderer HTML module was not found')
+          module = match.group(1).replace('${WIDTH}', '720').replace('${HEIGHT}', '1280')
+          Path('/tmp/renderer-module-check.mjs').write_text(module, encoding='utf-8')
+          PY
+          node --check /tmp/renderer-module-check.mjs
 
       - name: Validate workflow YAML and embedded Bash
         run: |

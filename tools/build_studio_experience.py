@@ -229,7 +229,7 @@ def build_scene_parts(plan, cast):
         name = prop.get("name", f"Landmark {index}").casefold()
         x, _, z = prop["position"]
         sx, sy, sz = prop["size"]
-        if any(word in name for word in ("building", "shop", "tower", "house", "school", "cafe", "store", "station", "temple", "castle", "museum", "hall", "market", "hotel", "factory")):
+        if any(word in name for word in ("building", "shop", "tower", "house", "school", "cafe", "store", "station", "temple", "castle", "museum", "hall", "market", "hotel", "factory", "arcade", "bakery", "library", "hospital", "restaurant", "office", "apartment", "mansion", "workshop", "palace", "warehouse")):
             accent = prop.get("color", [120, 160, 210])
             add(f"{prop.get('name','Landmark')} Roof Detail", (sx * 1.06, max(0.6, min(2.5, sy * 0.08)), sz * 1.06),
                 (x, prop["position"][1] + sy / 2 + 0.5, z), [min(255, c + 22) for c in accent], "SmoothPlastic")
@@ -619,14 +619,13 @@ def build(args):
             f"**Duration:** {args.duration} seconds  \n"
             f"**AI-designed props:** {len(plan.get('props', []))}  \n"
             f"**Cast:** {cast_label}\n\n"
-            "## Run it in Roblox Studio\n\n"
-            "1. Download and unzip the `Roblox-Studio-Experience` workflow artifact.\n"
-            "2. Open `Roblox_Studio_Experience.rbxlx` in Roblox Studio. The full AI-authored map is already visible and editable in Workspace before you press Play.\n"
-            "3. Click **Play**. Your actual Roblox Player character is the lead; no AI-built character rig or AI body animation is used. Optional usernames are loaded from their authentic public Roblox avatar appearances.\n"
-            "4. The readable, high-contrast captions and story camera tour start together; press **Space** to skip and explore. The player can walk around after the tour.\n"
-            "5. The ZIP includes `narration.mp3`, timed `narration.srt`, `AI_Creation_Summary.txt`, and `AI_Design_and_Tools_Report.pdf`. Roblox cannot play a local MP3 directly; upload it as a Roblox audio asset, then rerun with its numeric asset ID in `narration_audio_asset_id` to hear it in the place.\n\n"
+            "## Watch the short\n\n"
+            "1. Download and unzip `Roblox_Studio_Complete_Package.zip`.\n"
+            "2. Play `Roblox_2K_YouTube_Short.mp4` directly. It is rendered automatically by the workflow with the authentic Roblox avatar mesh, world, camera tour, narration, and visible burned-in captions; you do not need to open Roblox Studio.\n"
+            "3. The ZIP also includes `AI_Creation_Summary.txt`, `AI_Design_and_Tools_Report.pdf`, narration audio/subtitles, generation prompts, and an optional editable `Roblox_Studio_Experience.rbxlx` project.\n"
+            "4. The real Roblox avatar is loaded from the username entered in the workflow. The MP4 is a headless Three.js rendering of the generated world, not a capture from a running Roblox client.\n\n"
             "## Notes\n\n"
-            "Roblox Studio is not available on the Linux GitHub Actions runner. CI therefore creates the editable, runnable Studio place but cannot launch Studio or export an MP4; run the place in Studio on your computer and use your screen recorder to capture the automatic camera tour. Roblox account avatar loading requires Studio's normal online access; if a username lookup fails, the server Output window shows the reason. Use **File → Save to File** in Studio after any edits.\n"
+            "The workflow renders the MP4 automatically using headless Chromium, Three.js, and FFmpeg; neither Roblox Studio nor Blender needs to be installed or launched. The optional `.rbxlx` project remains editable in Studio. Video validation does not claim a Roblox game-client runtime test.\n"
         )
         args.readme.write_text(guide, encoding="utf-8")
     print(f"Created runnable Roblox Studio place {args.output} with {len(plan.get('props', []))} AI props and {len(cast)} Roblox avatar(s).")
