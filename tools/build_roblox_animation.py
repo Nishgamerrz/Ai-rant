@@ -28,6 +28,7 @@ JOINTS = {
     "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
     "RightUpperLeg", "RightLowerLeg", "RightFoot",
 }
+FACE_STATES = {"neutral", "talk", "smile", "shocked", "blink"}
 
 
 def default_animation(duration):
@@ -47,7 +48,8 @@ def default_animation(duration):
                 pose["LeftUpperArm"] = [-15, 0, -65]
                 pose["LeftLowerArm"] = [0, 0, 25]
                 pose["LeftHand"] = [0, 0, -10]
-        poses.append({"time": duration * ratio, "poses": pose})
+        face = "smile" if i in (0, 13) else ("shocked" if i in (5, 6) else "talk")
+        poses.append({"time": duration * ratio, "poses": pose, "face": face})
     return {
         "name": "AI_R15_Story_Animation",
         "looped": False,
@@ -84,10 +86,13 @@ def normalize(data, duration):
                            or not math.isfinite(v) or abs(v) > 180 for v in angles)):
                 raise ValueError(f"{joint} must have three rotation angles between -180 and 180")
             clean_poses[joint] = [float(v) for v in angles]
-        normalized.append({"time": time, "poses": clean_poses})
+        face = frame.get("face", "talk")
+        if not isinstance(face, str) or face.lower() not in FACE_STATES:
+            face = "talk"
+        normalized.append({"time": time, "poses": clean_poses, "face": face.lower()})
         previous = time
     if normalized[0]["time"] != 0:
-        normalized.insert(0, {"time": 0.0, "poses": {j: [0.0, 0.0, 0.0] for j in JOINTS}})
+        normalized.insert(0, {"time": 0.0, "poses": {j: [0.0, 0.0, 0.0] for j in JOINTS}, "face": "neutral"})
 
     # Always span the chosen short runtime. Keep generated relative timing, but stretch
     # it to the requested duration if the model returned a shorter timeline.
@@ -170,8 +175,9 @@ def create_rbxmx(animation, output):
 
 
 def main():
-    if len(sys.argv) != 4:
-        raise SystemExit("usage: build_roblox_animation.py INPUT.json OUTPUT.rbxmx DURATION_SECONDS")
+    json_only = len(sys.argv) == 5 and sys.argv[4] == "--json-only"
+    if len(sys.argv) not in (4, 5) or (len(sys.argv) == 5 and not json_only):
+        raise SystemExit("usage: build_roblox_animation.py INPUT.json OUTPUT_PATH DURATION_SECONDS [--json-only]")
     source, destination = map(Path, sys.argv[1:3])
     try:
         duration = float(sys.argv[3])
@@ -184,9 +190,11 @@ def main():
         duration = float(sys.argv[3])
         animation = normalize(default_animation(duration), duration)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    create_rbxmx(animation, destination)
-    destination.with_suffix(".json").write_text(json.dumps(animation, indent=2) + "\n", encoding="utf-8")
-    print(f"Created {destination}: {duration:g} seconds, {len(animation['keyframes'])} R15 keyframes.")
+    json_path = destination if json_only else destination.with_suffix(".json")
+    if not json_only:
+        create_rbxmx(animation, destination)
+    json_path.write_text(json.dumps(animation, indent=2) + "\n", encoding="utf-8")
+    print(f"Created animation data {json_path}: {duration:g} seconds, {len(animation['keyframes'])} R15 keyframes.")
 
 
 if __name__ == "__main__":
