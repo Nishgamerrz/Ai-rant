@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -104,7 +105,43 @@ def decode_response(path):
     return plan
 
 
-def validate(plan, duration=90):
+def default_character_placements(usernames):
+    positions = [[0, 0, 24], [-3, 0, 24], [3, 0, 24], [-6, 0, 29], [6, 0, 29], [0, 0, 34]]
+    return [
+        {"username": name, "role": "lead" if index == 0 else "supporting", "position": positions[index]}
+        for index, name in enumerate(usernames[:6])
+    ]
+
+
+def normalize_character_placements(raw, usernames):
+    if not usernames:
+        return []
+    defaults = default_character_placements(usernames)
+    by_name = {}
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict) or not isinstance(item.get("username"), str):
+                continue
+            name = item["username"].casefold()
+            pos = item.get("position")
+            if (name not in {n.casefold() for n in usernames}
+                    or not isinstance(pos, list) or len(pos) != 3
+                    or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in pos)
+                    or not -8 <= pos[0] <= 8 or not 0 <= pos[1] <= 3 or not 12 <= pos[2] <= 38):
+                continue
+            by_name[name] = [round(float(v), 2) for v in pos]
+    placements = []
+    for index, default in enumerate(defaults):
+        name = default["username"]
+        placements.append({
+            "username": name,
+            "role": "lead" if index == 0 else "supporting",
+            "position": by_name.get(name.casefold(), default["position"]),
+        })
+    return placements
+
+
+def validate(plan, duration=90, usernames=()):
     if not isinstance(plan, dict):
         raise ValueError("map plan must be an object")
     props = plan.get("props")
@@ -158,6 +195,7 @@ def validate(plan, duration=90):
         "ambient_color": color(plan.get("ambient_color"), [145, 160, 195]),
         "props": clean_props,
         "camera_shots": normalize_camera_shots(plan.get("camera_shots"), duration),
+        "character_placements": normalize_character_placements(plan.get("character_placements"), usernames),
     }
 
 
@@ -227,18 +265,26 @@ def emit_lua(plan, output):
 
 
 def main():
-    json_only = len(sys.argv) == 5 and sys.argv[4] == "--json-only"
-    if len(sys.argv) not in (4, 5) or (len(sys.argv) == 5 and not json_only):
-        raise SystemExit("usage: build_story_map.py OLLAMA_RESPONSE.json OUTPUT_PATH DURATION_SECONDS [--json-only]")
-    source, destination = map(Path, sys.argv[1:3])
-    duration = float(sys.argv[3])
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("source", type=Path)
+    parser.add_argument("destination", type=Path)
+    parser.add_argument("duration", type=float)
+    parser.add_argument("--json-only", action="store_true")
+    parser.add_argument("--usernames", type=Path, help="JSON file containing the ordered Roblox cast")
+    args = parser.parse_args()
+    source, destination, duration = args.source, args.destination, args.duration
+    json_only = args.json_only
+    usernames = json.loads(args.usernames.read_text(encoding="utf-8")) if args.usernames else []
+    if not isinstance(usernames, list) or any(not isinstance(name, str) for name in usernames):
+        raise SystemExit("usernames file must be a JSON array of strings")
     if not 30 <= duration <= 60:
         raise SystemExit("duration must be 30 to 60 seconds")
     try:
-        plan = validate(decode_response(source), duration)
+        plan = validate(decode_response(source), duration, usernames)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"Invalid AI map plan ({exc}); using a complete Roblox city-plaza map.", file=sys.stderr)
-        plan = validate(default_plan(), duration)
+        plan = validate(default_plan(), duration, usernames)
     json_path = destination if json_only else destination.with_suffix(".json")
     if not json_only:
         emit_lua(plan, destination)

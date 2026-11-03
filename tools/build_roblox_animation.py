@@ -58,12 +58,12 @@ def default_animation(duration):
     }
 
 
-def normalize(data, duration):
+def normalize(data, duration, allowed_usernames=(), min_keyframes=12):
     if not isinstance(data, dict):
         raise ValueError("animation must be a JSON object")
     frames = data.get("keyframes")
-    if not isinstance(frames, list) or not 12 <= len(frames) <= 80:
-        raise ValueError("keyframes must contain 12 to 80 entries")
+    if not isinstance(frames, list) or not min_keyframes <= len(frames) <= 80:
+        raise ValueError(f"keyframes must contain {min_keyframes} to 80 entries")
     normalized = []
     previous = -1.0
     for frame in frames:
@@ -108,12 +108,25 @@ def normalize(data, duration):
     if not isinstance(name, str):
         name = "AI_R15_Story_Animation"
     name = "".join(ch for ch in name if ch.isalnum() or ch in " _-")[:80].strip()
+    clean_character_motions = {}
+    allowed_by_key = {username.casefold(): username for username in allowed_usernames}
+    raw_character_motions = data.get("character_motions", {})
+    if isinstance(raw_character_motions, dict):
+        for username, track_frames in list(raw_character_motions.items())[:6]:
+            if not isinstance(username, str) or username.casefold() not in allowed_by_key:
+                continue
+            try:
+                track = normalize({"keyframes": track_frames}, duration, (), 4)
+                clean_character_motions[allowed_by_key[username.casefold()]] = track["keyframes"]
+            except (TypeError, ValueError):
+                continue
     return {
         "name": name or "AI_R15_Story_Animation",
         "looped": False,
         "priority": "Action",
         "duration_seconds": float(duration),
         "keyframes": normalized,
+        "character_motions": clean_character_motions,
     }
 
 
@@ -175,20 +188,27 @@ def create_rbxmx(animation, output):
 
 
 def main():
-    json_only = len(sys.argv) == 5 and sys.argv[4] == "--json-only"
-    if len(sys.argv) not in (4, 5) or (len(sys.argv) == 5 and not json_only):
-        raise SystemExit("usage: build_roblox_animation.py INPUT.json OUTPUT_PATH DURATION_SECONDS [--json-only]")
-    source, destination = map(Path, sys.argv[1:3])
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("source", type=Path)
+    parser.add_argument("destination", type=Path)
+    parser.add_argument("duration", type=float)
+    parser.add_argument("--json-only", action="store_true")
+    parser.add_argument("--usernames", type=Path, help="JSON file containing allowed cast usernames")
+    args = parser.parse_args()
+    source, destination, duration = args.source, args.destination, args.duration
+    json_only = args.json_only
+    usernames = json.loads(args.usernames.read_text(encoding="utf-8")) if args.usernames else []
+    if not isinstance(usernames, list) or any(not isinstance(name, str) for name in usernames):
+        raise SystemExit("usernames file must be a JSON array of strings")
     try:
-        duration = float(sys.argv[3])
         if not 30 <= duration <= 60:
             raise ValueError("duration must be 30 to 60 seconds")
         data = json.loads(source.read_text(encoding="utf-8"))
-        animation = normalize(data, duration)
+        animation = normalize(data, duration, usernames)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"Invalid AI animation ({exc}); using generated R15 gesture keyframes.", file=sys.stderr)
-        duration = float(sys.argv[3])
-        animation = normalize(default_animation(duration), duration)
+        animation = normalize(default_animation(duration), duration, usernames)
     destination.parent.mkdir(parents=True, exist_ok=True)
     json_path = destination if json_only else destination.with_suffix(".json")
     if not json_only:

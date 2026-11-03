@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import sys
@@ -24,10 +25,12 @@ def args_from_blender():
     parser = argparse.ArgumentParser()
     parser.add_argument("--animation", required=True)
     parser.add_argument("--map", required=True)
+    parser.add_argument("--characters", help="JSON array of Roblox usernames for the cast", default="")
+    parser.add_argument("--profiles", help="JSON array of public avatar model profiles", default="")
     parser.add_argument("--duration", type=int, choices=(30, 45, 60), required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--width", type=int, default=1440)
-    parser.add_argument("--height", type=int, default=2560)
+    parser.add_argument("--width", type=int, default=720)
+    parser.add_argument("--height", type=int, default=1280)
     parser.add_argument("--fps", type=int, default=30)
     return parser.parse_args(argv)
 
@@ -99,15 +102,168 @@ def add_world_map(plan):
         make_primitive(prop["name"], prop["shape"], dimensions, mat, position=pos)
 
 
-def create_character():
-    skin = make_material("Avatar Skin", SKIN)
-    shirt = make_material("Avatar Shirt", SHIRT)
-    pants = make_material("Avatar Pants", PANTS)
-    hair = make_material("Avatar Hair", HAIR)
-    dark = make_material("Face Details", FACE_DARK)
+def create_avatar_name_tag(label, parent, height, variant, front_local=(0, -1)):
+    name_material = make_material(f"Roblox Name Tag {variant + 1}", (0.96, 0.97, 1.0, 1.0))
+    name_curve = bpy.data.curves.new(f"Roblox Name Tag Text {variant + 1}", type="FONT")
+    name_curve.body = label[:20]
+    name_curve.align_x = "CENTER"
+    name_curve.size = 0.30
+    name_obj = bpy.data.objects.new(f"Roblox Name Tag {variant + 1}", name_curve)
+    bpy.context.collection.objects.link(name_obj)
+    name_obj.parent = parent
+    front_length = math.hypot(float(front_local[0]), float(front_local[1])) or 1.0
+    front_x, front_y = float(front_local[0]) / front_length, float(front_local[1]) / front_length
+    name_obj.location = (front_x * 0.44, front_y * 0.44, height / 2 + 0.28)
+    name_obj.rotation_euler = (math.radians(90), 0, math.atan2(front_x, -front_y))
+    name_obj.data.materials.append(name_material)
+    return name_obj
 
-    root = local_empty("R15_Root")
-    root.location = (0, -24, 1.9)
+
+def import_avatar_model(username, profile, position, variant):
+    obj_path = Path(profile.get("model_obj", ""))
+    if not profile.get("model_ready") or not obj_path.is_file():
+        raise RuntimeError(f"Actual Roblox avatar mesh is missing for {username}")
+    before = set(bpy.data.objects)
+    if not hasattr(bpy.ops.wm, "obj_import"):
+        try:
+            bpy.ops.preferences.addon_enable(module="io_scene_obj")
+        except Exception:
+            pass
+    if hasattr(bpy.ops.wm, "obj_import"):
+        bpy.ops.wm.obj_import(filepath=str(obj_path), forward_axis="NEGATIVE_Z", up_axis="Y",
+                              use_split_objects=True, use_split_groups=True)
+    elif hasattr(bpy.ops.import_scene, "obj"):
+        bpy.ops.import_scene.obj(filepath=str(obj_path), axis_forward="-Z", axis_up="Y",
+                                 use_split_objects=True, use_split_groups=True)
+    else:
+        raise RuntimeError("This Blender build does not provide a usable OBJ importer")
+    imported = [obj for obj in bpy.data.objects if obj not in before and obj.type == "MESH"]
+    if not imported:
+        imported = [obj for obj in bpy.context.selected_objects if obj.type == "MESH"]
+    if not imported:
+        raise RuntimeError(f"Roblox avatar OBJ imported no mesh for {username}")
+
+    bpy.ops.object.select_all(action="DESELECT")
+    for obj in imported:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = imported[0]
+    bpy.ops.object.join()
+    avatar = bpy.context.object
+    avatar.name = f"RobloxAvatar_{variant + 1}_{username[:20]}"
+    avatar.data.name = f"RobloxAvatarMesh_{variant + 1}"
+
+    image_nodes = []
+    for material in avatar.data.materials:
+        if not material:
+            continue
+        color = list(material.diffuse_color)
+        if len(color) == 4:
+            color[3] = 1.0
+            material.diffuse_color = color
+        if material.node_tree:
+            for node in material.node_tree.nodes:
+                node.select = False
+                if node.type == "TEX_IMAGE" and node.image:
+                    node.select = True
+                    material.node_tree.nodes.active = node
+                    image_nodes.append(node)
+                if node.type == "BSDF_PRINCIPLED" and "Alpha" in node.inputs:
+                    node.inputs["Alpha"].default_value = 1.0
+    if profile.get("texture_count", 0) and not image_nodes:
+        raise RuntimeError(f"Roblox avatar textures failed to load for {username}")
+    for node in image_nodes:
+        if node.image and node.image.filepath and not node.image.packed_file:
+            image_path = Path(bpy.path.abspath(node.image.filepath))
+            if not image_path.is_file():
+                raise RuntimeError(f"Roblox avatar texture file is missing for {username}: {image_path}")
+
+    bpy.context.view_layer.objects.active = avatar
+    bpy.ops.object.origin_set(type="ORIGIN_GEOMETRY", center="BOUNDS")
+    bpy.context.view_layer.update()
+    original_height = float(avatar.dimensions.z)
+    if original_height <= 0.01:
+        raise RuntimeError(f"Roblox avatar mesh has invalid dimensions for {username}")
+    scale = 4.0 / original_height
+    avatar.scale = (scale, scale, scale)
+    bpy.context.view_layer.update()
+    x, floor_offset, z = position
+    avatar.location = (float(x), float(floor_offset), float(z) + float(avatar.dimensions.z) / 2)
+
+    front = profile.get("front_direction", [0, 0, 1])
+    front_blender = roblox_to_blender(front)
+    if math.hypot(front_blender[0], front_blender[1]) > 1e-5:
+        avatar.rotation_euler.z = math.atan2(-1.0, 0.0) - math.atan2(front_blender[1], front_blender[0])
+    create_avatar_name_tag(username, avatar, float(avatar.dimensions.z), variant,
+                           (front_blender[0], front_blender[1]))
+    print(f"Imported actual full-body Roblox avatar mesh for {username}")
+    return avatar
+
+
+def avatar_motion(animation, avatar, fps, total_frames):
+    """Apply AI-timed full-character turns, leans, and rhythmic body movement to the exact avatar mesh."""
+    keyframes = animation.get("keyframes", [])
+    base_location = avatar.location.copy()
+    base_yaw = avatar.rotation_euler.z
+    for key in keyframes:
+        if not isinstance(key, dict):
+            continue
+        time = key.get("time", 0)
+        if not isinstance(time, (int, float)):
+            continue
+        frame_no = max(0, min(total_frames, round(float(time) * fps)))
+        poses = key.get("poses", {}) if isinstance(key.get("poses", {}), dict) else {}
+
+        def angles(name):
+            value = poses.get(name, [0, 0, 0])
+            if not isinstance(value, list) or len(value) != 3:
+                return (0.0, 0.0, 0.0)
+            try:
+                return tuple(float(v) for v in value)
+            except (TypeError, ValueError):
+                return (0.0, 0.0, 0.0)
+
+        root = angles("HumanoidRootPart")
+        torso = angles("UpperTorso")
+        head = angles("Head")
+        xrot = max(-18, min(18, root[0] + torso[0] * 0.40 + head[0] * 0.12))
+        yrot = max(-18, min(18, root[1] + torso[1] * 0.35 + head[1] * 0.10))
+        zrot = max(-22, min(22, root[2] + torso[2] * 0.40 + head[2] * 0.12))
+        avatar.location = (base_location.x, base_location.y,
+                           base_location.z + 0.045 * math.sin(float(time) * math.pi * 2 / 1.6))
+        avatar.rotation_euler = (math.radians(xrot), math.radians(zrot), base_yaw - math.radians(yrot))
+        avatar.keyframe_insert(data_path="location", frame=frame_no, group="Full Avatar Motion")
+        avatar.keyframe_insert(data_path="rotation_euler", frame=frame_no, group="Full Avatar Motion")
+    action = avatar.animation_data.action if avatar.animation_data else None
+    if action:
+        for curve in action.fcurves:
+            for point in curve.keyframe_points:
+                point.handle_left_type = "AUTO"
+                point.handle_right_type = "AUTO"
+                point.interpolation = "BEZIER"
+
+
+def create_character(username="", position=(0, -24, 1.9), variant=0, avatar_profile=None):
+    palette = [SHIRT, (0.78, 0.12, 0.16, 1), (0.12, 0.58, 0.28, 1), (0.52, 0.18, 0.78, 1), (0.95, 0.48, 0.08, 1), (0.08, 0.62, 0.68, 1)]
+    key = username.casefold().encode("utf-8") if username else str(variant).encode("ascii")
+    palette_index = int.from_bytes(hashlib.sha256(key).digest()[:2], "big") % len(palette)
+    shirt_color = palette[palette_index]
+    avatar_profile = avatar_profile or {}
+
+    def sampled_color(key, fallback):
+        value = avatar_profile.get(key)
+        if isinstance(value, list) and len(value) == 3 and all(isinstance(v, (int, float)) and 0 <= v <= 255 for v in value):
+            return rgb_color(value)
+        return fallback
+
+    label = username[:20] if username else f"Story Character {variant + 1}"
+    skin = make_material(f"Avatar Skin {variant + 1}", sampled_color("skin_rgb", SKIN))
+    shirt = make_material(f"Avatar Shirt {variant + 1}", sampled_color("shirt_rgb", shirt_color))
+    pants = make_material(f"Avatar Pants {variant + 1}", sampled_color("pants_rgb", PANTS))
+    hair = make_material(f"Avatar Hair {variant + 1}", sampled_color("hair_rgb", HAIR))
+    dark = make_material(f"Face Details {variant + 1}", FACE_DARK)
+
+    root = local_empty(f"R15_Root_{variant + 1}")
+    root.location = position
     lower = local_empty("LowerTorso", root)
     make_primitive("Lower Torso", "Block", (0.82, 0.48, 0.56), shirt, lower, (0, 0, 0.04))
     upper = local_empty("UpperTorso", lower, (0, 0, 0.33))
@@ -133,6 +289,8 @@ def create_character():
     smile.location = (0, 0, 0)
     smile.data.materials.append(dark)
     smile.scale = (0.001, 0.001, 0.001)
+
+    create_avatar_name_tag(label, root, 3.6, variant)
 
     joints = {"HumanoidRootPart": root, "LowerTorso": lower, "UpperTorso": upper, "Head": head}
     for side, sign, label in (("Left", -1, "L"), ("Right", 1, "R")):
@@ -166,7 +324,6 @@ def animate_character(animation, joints, face_objects, fps, total_frames):
             if joint not in joints:
                 continue
             rx, ry, rz = (math.radians(float(value)) for value in angles)
-            # Convert Roblox Y-up Euler components into Blender's Z-up axes.
             joints[joint].rotation_euler = (rx, rz, -ry)
             joints[joint].keyframe_insert(data_path="rotation_euler", frame=frame_no, group=joint)
 
@@ -195,6 +352,18 @@ def animate_character(animation, joints, face_objects, fps, total_frames):
             eye_scale_z = 0.004 if blink else (0.066 if current_state == "shocked" else 0.055)
             eye.scale = (0.045, 0.0175, eye_scale_z)
             eye.keyframe_insert(data_path="scale", frame=frame_no)
+
+
+def supporting_animation(duration, variant):
+    """Subtle, staggered idle/reaction acting for cast members without AI tracks."""
+    sign = -1 if variant % 2 else 1
+    return {"keyframes": [
+        {"time": 0, "face": "neutral", "poses": {"Head": [0, 0, 0]}},
+        {"time": duration * 0.22, "face": "talk", "poses": {"Head": [0, sign * 8, 0]}},
+        {"time": duration * 0.48, "face": "shocked", "poses": {"Head": [0, -sign * 7, 0], "RightUpperArm": [-12, 0, 38]}},
+        {"time": duration * 0.66, "face": "smile", "poses": {"Head": [0, sign * 5, 0], "RightUpperArm": [0, 0, 8]}},
+        {"time": duration, "face": "neutral", "poses": {"Head": [0, 0, 0]}},
+    ]}
 
 
 def make_camera(plan, fps, total_frames, duration):
@@ -251,17 +420,33 @@ def main():
     total_frames = duration * fps
     animation = json.loads(Path(args.animation).read_text(encoding="utf-8"))
     map_plan = json.loads(Path(args.map).read_text(encoding="utf-8"))
+    usernames = json.loads(Path(args.characters).read_text(encoding="utf-8")) if args.characters else []
+    if not isinstance(usernames, list) or any(not isinstance(name, str) for name in usernames):
+        raise ValueError("--characters must point to a JSON array of usernames")
+    profiles = json.loads(Path(args.profiles).read_text(encoding="utf-8")) if args.profiles else []
+    profiles_by_name = {item.get("username", "").casefold(): item for item in profiles if isinstance(item, dict)}
+    cast = usernames or [""]
+    placements = {item["username"].casefold(): item["position"]
+                  for item in map_plan.get("character_placements", [])
+                  if isinstance(item, dict) and isinstance(item.get("username"), str)
+                  and isinstance(item.get("position"), list) and len(item["position"]) == 3}
 
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
     scene = bpy.context.scene
     scene.render.engine = "BLENDER_WORKBENCH"
     scene.display.shading.light = "STUDIO"
-    scene.display.shading.color_type = "MATERIAL"
+    scene.display.shading.color_type = "TEXTURE"
     scene.display.shading.show_shadows = True
     scene.display.shading.show_cavity = True
     scene.display.shading.cavity_type = "WORLD"
     scene.display.shading.background_type = "WORLD"
+    try:
+        aa_items = scene.display.bl_rna.properties["render_aa"].enum_items.keys()
+        if "8" in aa_items:
+            scene.display.render_aa = "8"
+    except (AttributeError, KeyError, TypeError):
+        pass
     scene.render.resolution_x = args.width
     scene.render.resolution_y = args.height
     scene.render.resolution_percentage = 100
@@ -272,10 +457,13 @@ def main():
     scene.render.ffmpeg.format = "MPEG4"
     scene.render.ffmpeg.codec = "H264"
     scene.render.ffmpeg.constant_rate_factor = "HIGH"
-    scene.render.ffmpeg.ffmpeg_preset = "GOOD"
+    try:
+        scene.render.ffmpeg.ffmpeg_preset = "REALTIME"
+    except (AttributeError, TypeError, ValueError):
+        scene.render.ffmpeg.ffmpeg_preset = "GOOD"
     # `max_rate` is not exposed by Blender's FFmpegSettings in Blender 4.0.x.
     # Keep to the stable bitrate property shared by the Ubuntu Blender builds.
-    scene.render.ffmpeg.video_bitrate = 16000
+    scene.render.ffmpeg.video_bitrate = 6000
     scene.render.filepath = str(Path(args.output).resolve())
     scene.render.use_file_extension = True
     scene.render.image_settings.color_mode = "RGB"
@@ -287,8 +475,29 @@ def main():
     scene.world.color = rgb_color(map_plan.get("ambient_color", [135, 155, 205]))[:3]
 
     add_world_map(map_plan)
-    joints, face = create_character()
-    animate_character(animation, joints, face, fps, total_frames)
+    default_positions = [[0, 0, 24], [-3, 0, 24], [3, 0, 24], [-6, 0, 29], [6, 0, 29], [0, 0, 34]]
+    character_motions = animation.get("character_motions", {})
+    for index, username in enumerate(cast[:6]):
+        placement = placements.get(username.casefold()) if username else None
+        roblox_position = placement or default_positions[index]
+        x, y, z = roblox_position
+        if index == 0:
+            character_animation = {"keyframes": animation["keyframes"]}
+        else:
+            track = next((frames for name, frames in character_motions.items()
+                          if isinstance(name, str) and name.casefold() == username.casefold()), None) if username else None
+            character_animation = {"keyframes": track} if track else supporting_animation(duration, index)
+
+        if username:
+            profile = profiles_by_name.get(username.casefold(), {})
+            avatar = import_avatar_model(
+                username, profile, (float(x), -float(z), float(y)), index,
+            )
+            avatar_motion(character_animation, avatar, fps, total_frames)
+        else:
+            blender_position = (float(x), -float(z), 1.9 + float(y))
+            joints, face = create_character("", blender_position, index)
+            animate_character(character_animation, joints, face, fps, total_frames)
     make_camera(map_plan, fps, total_frames, duration)
     scene.frame_set(0)
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)

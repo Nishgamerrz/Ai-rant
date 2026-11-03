@@ -22,7 +22,7 @@ def fail(message: str) -> None:
     text = f"SHORT NOT APPROVED: {message}"
     if "GITHUB_STEP_SUMMARY" in os.environ:
         with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
-            summary.write(f"## Short quality gate: NOT APPROVED\\n\\n{message}\\n\\nNo MP4 artifact was uploaded.\\n")
+            summary.write(f"## Short quality gate: NOT APPROVED\n\n{message}\n\nNo MP4 artifact was uploaded.\n")
     print(text, file=sys.stderr)
     raise SystemExit(1)
 
@@ -54,6 +54,9 @@ def main() -> None:
     parser.add_argument("--silent-video", required=True, type=Path)
     parser.add_argument("--narration", required=True, type=Path)
     parser.add_argument("--captions", required=True, type=Path)
+    parser.add_argument("--characters", type=Path)
+    parser.add_argument("--profiles", type=Path)
+    parser.add_argument("--map-plan", type=Path)
     parser.add_argument("--duration", required=True, type=int, choices=(30, 45, 60))
     args = parser.parse_args()
 
@@ -64,11 +67,42 @@ def main() -> None:
     if args.video.stat().st_size < 100_000:
         fail("final MP4 is unexpectedly small")
 
+    cast_count = 0
+    avatar_model_count = 0
+    if args.characters:
+        usernames = json.loads(args.characters.read_text(encoding="utf-8"))
+        if not isinstance(usernames, list) or any(not isinstance(name, str) for name in usernames):
+            fail("cast file is not a JSON array of usernames")
+        cast_count = len(usernames)
+        if cast_count > 6:
+            fail(f"cast has {cast_count} names; the renderer supports at most 6")
+        if usernames:
+            if not args.profiles or not args.profiles.is_file():
+                fail("public Roblox avatar model profiles are missing")
+            profiles = json.loads(args.profiles.read_text(encoding="utf-8"))
+            profiles_by_name = {item.get("username", "").casefold(): item for item in profiles if isinstance(item, dict)}
+            for name in usernames:
+                profile = profiles_by_name.get(name.casefold(), {})
+                model = Path(profile.get("model_obj", ""))
+                material = Path(profile.get("model_mtl", ""))
+                if (not profile.get("model_ready") or not model.is_file() or model.stat().st_size == 0
+                        or not material.is_file() or material.stat().st_size == 0):
+                    fail(f"actual Roblox avatar OBJ/MTL assets are missing for {name}")
+            avatar_model_count = cast_count
+        if args.map_plan:
+            map_plan = json.loads(args.map_plan.read_text(encoding="utf-8"))
+            placed = {item.get("username", "").casefold() for item in map_plan.get("character_placements", [])
+                      if isinstance(item, dict)}
+            missing = [name for name in usernames if name.casefold() not in placed]
+            if missing:
+                fail("map plan does not place all named characters: " + ", ".join(missing))
+
     narration = args.narration.read_text(encoding="utf-8").strip()
     word_count = len(WORD_RE.findall(narration))
+    min_words = max(1, int(args.duration * 1.5))
     max_words = min(100, int(args.duration * 5 / 3))
-    if not word_count or word_count > max_words:
-        fail(f"narration has {word_count} words; maximum for {args.duration}s is {max_words}")
+    if not min_words <= word_count <= max_words:
+        fail(f"narration has {word_count} words; target for {args.duration}s is {min_words}–{max_words}")
     if META_RE.search(narration):
         fail("narration contains forbidden AI/game meta-talk")
 
@@ -128,18 +162,21 @@ def main() -> None:
     print(
         f"SHORT APPROVED: {args.video.name}; 1440x2560, {float(fps):g} fps, "
         f"{video_seconds:.2f}s, H.264/AAC, {word_count} narration words, "
-        f"{len(cues)} caption cues, full decode and 3 visual samples passed."
+        f"{cast_count} named cast member(s), {avatar_model_count} actual avatar mesh(es) verified, "
+        f"{len(cues)} caption cues, "
+        "full decode and 3 visual samples passed."
     )
     if "GITHUB_STEP_SUMMARY" in os.environ:
         summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
-        summary.write_text(
-            f"## Short quality gate: APPROVED\n\n"
-            f"- Video: `{args.video.name}` (1440×2560, 30 fps, {video_seconds:.2f}s)\n"
-            f"- Audio: H.264 video with AAC audio\n"
-            f"- Narration: {word_count}/{max_words} words; {len(cues)} timed caption cues\n"
-            f"- Full decode and 3 nonblank visual samples passed\n",
-            encoding="utf-8",
-        )
+        with summary.open("a", encoding="utf-8") as report:
+            report.write(
+                f"## Short quality gate: APPROVED\n\n"
+                f"- Video: `{args.video.name}` (1440×2560, 30 fps, {video_seconds:.2f}s)\n"
+                f"- Codecs: H.264 video and AAC audio\n"
+                f"- Narration: {word_count}/{max_words} words; {len(cues)} timed caption cues\n"
+                f"- Named cast members: {cast_count}; actual avatar meshes verified: {avatar_model_count}\n"
+                f"- Full decode and 3 nonblank visual samples passed\n"
+            )
 
 
 if __name__ == "__main__":
