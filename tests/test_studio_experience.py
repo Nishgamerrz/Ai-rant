@@ -25,13 +25,29 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn('"${WORLD_THEME:-AUTO FROM STORY}"', workflow)
         self.assertIn("treat the user's cue as a required design constraint", workflow)
         self.assertIn("daylight cue means a clearly bright, naturally sunlit daytime world", workflow)
+        self.assertIn("uses: actions/cache/restore@v4", workflow)
+        self.assertIn("ollama-${{ runner.os }}-${{ inputs.model_quality }}-qwen3-v2", workflow)
+        self.assertIn("fast) SELECTED_MODEL=qwen3:1.7b", workflow)
+        self.assertIn("medium) SELECTED_MODEL=qwen3:4b", workflow)
+        self.assertIn("hard) SELECTED_MODEL=qwen3:14b", workflow)
+        self.assertIn("for attempt in 1 2 3 4; do", workflow)
+        self.assertIn("--min-props 120", workflow)
+        self.assertIn("target 200–500", workflow)
+        self.assertIn("retrying attempt $((attempt + 1))/4", workflow)
+        self.assertIn("Show the public AI build plan and tools", workflow)
+        self.assertIn("not private chain-of-thought", workflow)
 
     def test_mp4_renderer_applies_procedural_motion_to_authentic_avatar_models(self):
         renderer = (ROOT / "tools/video_renderer/render_short.mjs").read_text(encoding="utf-8")
         report = (ROOT / "tools/package_studio_deliverables.py").read_text(encoding="utf-8")
         self.assertIn("function animateActor(actor,t)", renderer)
         self.assertIn("actor.root.rotation.y", renderer)
-        self.assertIn("story-walk root motion", renderer)
+        self.assertIn("story-paced motion", renderer)
+        self.assertIn("await RAPIER.init()", renderer)
+        self.assertIn("physicsWorld.step();physicsWorld.step();", renderer)
+        self.assertIn("dynamicPropInstances", renderer)
+        self.assertIn("DATA.plan.ground_color", renderer)
+        self.assertIn("horizon.position.y=-.08", renderer)
         self.assertIn("rather than native R15 joint animations", report)
 
     def test_builder_packages_playable_place_with_world_cast_and_captions(self):
@@ -43,7 +59,8 @@ class StudioExperienceTests(unittest.TestCase):
                 "ground_color": [20, 20, 20],
                 "props": [
                     {"name": f"AI landmark {index}", "shape": "Block", "material": "Brick",
-                     "position": [index - 3, 5, 0], "size": [8, 10, 8], "color": [80, 140, 220]}
+                     "position": [index - 3, 5, 0], "size": [8, 10, 8], "color": [80, 140, 220],
+                     "physics": "dynamic" if index == 0 else "static"}
                     for index in range(8)
                 ],
                 "character_placements": [
@@ -86,6 +103,12 @@ class StudioExperienceTests(unittest.TestCase):
             self.assertIn('World Title Sign', server.text)
             part_names = {node.text for node in root.findall('.//Item[@class="Part"]/Properties/string[@name="Name"]')}
             self.assertIn('AI landmark 0', part_names)
+            part_by_name = {
+                node.find('Properties/string[@name="Name"]').text: node
+                for node in root.findall('.//Item[@class="Part"]')
+            }
+            self.assertEqual(part_by_name['AI landmark 0'].find('Properties/bool[@name="Anchored"]').text, 'false')
+            self.assertEqual(part_by_name['AI landmark 1'].find('Properties/bool[@name="Anchored"]').text, 'true')
             self.assertIn('NarrationCaption', client.text)
             self.assertIn('A student returns a lost wallet.', client.text)
             self.assertIn('12345', client.text)
@@ -96,21 +119,31 @@ class StudioExperienceTests(unittest.TestCase):
             self.assertTrue((work / "World.lua").exists())
 
     def test_prompt_themed_map_requires_full_ai_authored_scene(self):
-        from tools.build_story_map import validate
+        from tools.build_story_map import emit_lua, validate
 
         props = [
             {"name": f"Theme part {index}", "shape": "Block", "material": "SmoothPlastic",
-             "position": [index - 25, 4, 0], "size": [4, 8, 4], "color": [95, 145, 210]}
+             "position": [index - 25, 4, 0], "size": [4, 8, 4], "color": [95, 145, 210],
+             "physics": "dynamic" if index < 3 else "static"}
             for index in range(120)
         ]
         plan = {"name": "Crystal Reef", "theme": "A luminous underwater crystal kingdom",
-                "ground_material": "Slate", "ground_color": [54, 113, 140], "props": props}
-        normalized = validate(plan, 60, (), min_props=70)
+                "ground_material": "Slate", "ground_color": [54, 113, 140],
+                "ambient_color": [120, 160, 190], "props": props}
+        normalized = validate(plan, 60, (), min_props=120)
         self.assertEqual(normalized["theme"], plan["theme"])
         self.assertEqual(normalized["ground_material"], "Slate")
         self.assertEqual(len(normalized["props"]), 120)
+        self.assertEqual(normalized["props"][0]["physics"], "dynamic")
+        self.assertEqual(normalized["props"][3]["physics"], "static")
+        with tempfile.TemporaryDirectory() as temporary:
+            lua_output = Path(temporary) / "GeneratedStoryWorld.lua"
+            emit_lua(normalized, lua_output)
+            generated_lua = lua_output.read_text(encoding="utf-8")
+            self.assertIn("p.Anchored = physicsMode ~= 'dynamic'", generated_lua)
+            self.assertIn('"dynamic")', generated_lua)
         with self.assertRaises(ValueError):
-            validate({**plan, "props": props[:69]}, 60, (), min_props=70)
+            validate({**plan, "props": props[:119]}, 60, (), min_props=120)
 
     def test_captions_have_valid_subtitle_and_fallback_cues(self):
         from tools.build_studio_experience import fallback_captions, parse_srt

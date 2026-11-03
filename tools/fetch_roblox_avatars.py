@@ -49,11 +49,17 @@ def image_extension(data: bytes) -> str:
     return ".png"
 
 
+def image_pixels(image):
+    # Pillow 13 deprecates getdata(); retain compatibility with older runner versions.
+    flattened = getattr(image, "get_flattened_data", None)
+    return flattened() if callable(flattened) else image.getdata()
+
+
 def sample_color(image, box):
     width, height = image.size
     left, top, right, bottom = box
     crop = image.crop((int(left * width), int(top * height), int(right * width), int(bottom * height)))
-    pixels = [rgba[:3] for rgba in crop.getdata() if rgba[3] > 200 and 18 < sum(rgba[:3]) / 3 < 238]
+    pixels = [rgba[:3] for rgba in image_pixels(crop) if rgba[3] > 200 and 18 < sum(rgba[:3]) / 3 < 238]
     if len(pixels) < 20:
         return None
     return [int(statistics.median(channel)) for channel in zip(*pixels)]
@@ -62,7 +68,7 @@ def sample_color(image, box):
 def sample_hair_color(image):
     width, height = image.size
     crop = image.crop((int(0.35 * width), int(0.10 * height), int(0.65 * width), int(0.25 * height)))
-    pixels = [rgba[:3] for rgba in crop.getdata()
+    pixels = [rgba[:3] for rgba in image_pixels(crop)
               if rgba[3] > 200 and 15 < sum(rgba[:3]) / 3 < 145]
     if len(pixels) < 12:
         return None
@@ -195,7 +201,7 @@ def main() -> None:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(records, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"Prepared {len(records)} actual Roblox avatar model(s) for rendering.")
+    print(f"Prepared {len(records)} authentic Roblox avatar profile(s) for rendering; each uses the account's real mesh when available or its official account thumbnail otherwise.")
 
 
 if __name__ == "__main__":

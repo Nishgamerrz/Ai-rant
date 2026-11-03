@@ -15,6 +15,16 @@ from tools.validate_short import avatar_asset_type
 
 
 class AvatarFallbackTests(unittest.TestCase):
+    def test_pixel_reader_uses_pillows_non_deprecated_api_when_available(self):
+        class ImageWithFlattenedPixels:
+            def get_flattened_data(self):
+                return [(1, 2, 3, 255)]
+
+            def getdata(self):
+                raise AssertionError("deprecated getdata() should not be used when Pillow provides get_flattened_data()")
+
+        self.assertEqual(fetch_roblox_avatars.image_pixels(ImageWithFlattenedPixels()), [(1, 2, 3, 255)])
+
     def test_mesh_403_keeps_the_users_real_roblox_thumbnail(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

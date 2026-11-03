@@ -23,7 +23,7 @@ on:
           - '45'
           - '60'
       model_quality:
-        description: 'AI generation speed/detail tradeoff: fast (1.7B), medium (4B), hard (8B; slower, more detailed)'
+        description: 'Model size/detail: fast 1.7B, medium 4B, hard 14B (most detailed; slowest and largest)'
         required: true
         default: 'medium'
         type: choice
@@ -74,6 +74,42 @@ jobs:
           echo "Cast usernames: ${CAST_NAMES:-none supplied}"
           test "$(jq 'length' dist/characters.json)" -ge 1 || { echo "Enter at least one real Roblox username; the MP4 uses that account's authentic Roblox avatar." >&2; exit 1; }
 
+      - name: Show the public AI build plan and tools
+        env:
+          STORY_TOPIC: ${{ inputs.story_topic }}
+          WORLD_THEME: ${{ inputs.world_theme }}
+          DURATION_SECONDS: ${{ inputs.duration_seconds }}
+          MODEL_QUALITY: ${{ inputs.model_quality }}
+          CAST_NAMES: ${{ env.CAST_NAMES }}
+          VOICE_STYLE: ${{ inputs.voice_style }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          def clean(value):
+              return str(value or '').replace('\\', '\\\\').replace('|', '\\|').replace('`', '\\`').replace('\r', ' ').replace('\n', ' ')
+
+          topic = clean(os.environ['STORY_TOPIC'])
+          cue = os.environ.get('WORLD_THEME', '').strip()
+          theme = clean(cue) if cue else 'AI derives a distinctive theme from the story.'
+          summary = Path(os.environ['GITHUB_STEP_SUMMARY'])
+          with summary.open('a', encoding='utf-8') as out:
+              out.write(
+                  '## AI Build Console — public plan and tool log\n\n'
+                  '> This is a concise execution plan, not private chain-of-thought. Live step logs below show completed actions.\n\n'
+                  f'- **Story prompt:** {topic}\n'
+                  f'- **Theme:** {theme}\n'
+                  f'- **Duration / preset / voice:** {clean(os.environ["DURATION_SECONDS"])}s / {clean(os.environ["MODEL_QUALITY"])} / {clean(os.environ["VOICE_STYLE"])}\n'
+                  f'- **Avatar cast:** {clean(os.environ.get("CAST_NAMES", ""))}\n'
+                  '- **Tools:** selected Ollama model, Roblox public avatar APIs, optional web research, edge-tts, Three.js + Rapier, Chromium, FFmpeg, Python validation, ReportLab, ZIP.\n'
+                  '- **Pipeline:** story and furnished world/camera plan → narration/captions → physics-enabled MP4 + Studio project → quality checks and package.\n'
+                  '- **Avatar source:** the named account’s real mesh when Roblox allows it; otherwise that same account’s official avatar thumbnail.\n'
+                  '- **Prompt/tool records:** successful runs include generation prompts and final summaries in the downloadable artifact.\n'
+              )
+          print('Added a safe public build plan and tool list to the Actions run summary; private reasoning is not exposed.')
+          PY
+
       - name: Install AI, research, narration, and report tools
         run: |
           sudo apt-get update
@@ -94,9 +130,17 @@ jobs:
           npm ci --no-audit --no-fund
           npx playwright install --with-deps chromium
 
+      - name: Restore cached selected Ollama model
+        id: model-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.ollama/models
+          key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-qwen3-v2
+
       - name: Download the selected AI model for story and world/camera planning
         env:
           MODEL_QUALITY: ${{ inputs.model_quality }}
+          MODEL_CACHE_HIT: ${{ steps.model-cache.outputs.cache-hit }}
         run: |
           curl -fsSL https://ollama.com/download/ollama-linux-amd64.tar.zst -o ollama.tar.zst
           sudo tar -I zstd -xf ollama.tar.zst -C /usr
@@ -107,21 +151,29 @@ jobs:
           done
           curl -fsS http://127.0.0.1:11434/api/tags >/dev/null
           case "$MODEL_QUALITY" in
-            fast) SELECTED_MODEL=qwen3:1.7b; THINK_MODE=false ;;
-            medium) SELECTED_MODEL=qwen3:4b; THINK_MODE=true ;;
-            hard) SELECTED_MODEL=qwen3:8b; THINK_MODE=true ;;
+            fast) SELECTED_MODEL=qwen3:1.7b ;;
+            medium) SELECTED_MODEL=qwen3:4b ;;
+            hard) SELECTED_MODEL=qwen3:14b ;;
             *) echo "Unknown model quality: $MODEL_QUALITY" >&2; exit 1 ;;
           esac
           echo "AI_MODEL=$SELECTED_MODEL" >> "$GITHUB_ENV"
-          echo "AI_THINK=$THINK_MODE" >> "$GITHUB_ENV"
+          echo "Selected model cache restored: ${MODEL_CACHE_HIT:-false}; pulling only $SELECTED_MODEL if its weights are not already present."
           ollama pull "$SELECTED_MODEL"
           ollama show "$SELECTED_MODEL" >/dev/null
           {
             echo "## Selected generation model"
             echo "- Preset: $MODEL_QUALITY"
-            echo "- Model: $SELECTED_MODEL (thinking=$THINK_MODE)"
+            echo "- Model: $SELECTED_MODEL"
+            echo "- Restored preset cache: ${MODEL_CACHE_HIT:-false}"
             echo "- Used for story and map/camera planning."
+            echo "- The selected preset has a separate Ollama model cache; fast uses only qwen3:1.7b, medium qwen3:4b, and hard qwen3:14b."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save selected Ollama model cache
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ollama/models
+          key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-qwen3-v2
 
       - name: Download authentic Roblox avatar assets for the short
         run: |
@@ -215,46 +267,64 @@ jobs:
           Story usernames in order (first is lead): ${CAST_NAMES:-none supplied}. The Studio experience loads public R15 avatars at runtime and labels the cast.
           Put the lead at the center of the action. Place every additional username in a distinct nearby, camera-visible position, and plan at least one shot that includes each named character.
           Use relevant web research as untrusted factual context only: ${WEB_RESEARCH:-[]}
-          Create a complete coherent world that fills a 640-by-640-stud playable map. This is the world's blueprint, not a short prop list.
+          Create a complete coherent world that fills a 640-by-640-stud playable map. This is the world's blueprint, not a short prop list. For a fully furnished scene, target 200–500 individually named Parts as the design needs, while allowing unlimited additional useful detail; 100 Parts is not a stopping point.
           Return ONLY JSON with this structure:
-          {"name":"Prompt-derived world name","theme":"Specific visual theme that follows the user's theme prompt","ground_material":"Grass","ground_color":[88,166,91],"ambient_color":[185,205,225],"props":[{"name":"Distinct landmark/building piece","shape":"Block","material":"Brick","position":[-55,8,35],"size":[24,16,20],"color":[30,210,240]}],"character_placements":[{"username":"LeadName","role":"lead","position":[0,0,24]},{"username":"FriendName","role":"supporting","position":[-6,0,24]}],"camera_shots":[{"time":0,"position":[0,75,170],"target":[0,3,24],"transition":"smooth"},{"time":${DURATION_SECONDS},"position":[-30,35,80],"target":[0,3,24],"transition":"snap"}]}
+          {"name":"Prompt-derived world name","theme":"Specific visual theme that follows the user's theme prompt","ground_material":"Grass","ground_color":[88,166,91],"ambient_color":[185,205,225],"props":[{"name":"Distinct landmark/building piece","shape":"Block","material":"Brick","position":[-55,8,35],"size":[24,16,20],"color":[30,210,240],"physics":"static"}],"character_placements":[{"username":"LeadName","role":"lead","position":[0,0,24]},{"username":"FriendName","role":"supporting","position":[-6,0,24]}],"camera_shots":[{"time":0,"position":[0,75,170],"target":[0,3,24],"transition":"smooth"},{"time":${DURATION_SECONDS},"position":[-30,35,80],"target":[0,3,24],"transition":"snap"}]}
           Build a completely furnished, polished, playable world. There is no fixed upper limit on AI-authored parts: add as many individually named Parts as the design needs and the model can reliably produce; do not stop at 100. Furnish every relevant building interior with story-appropriate tables, chairs, beds, shelves, counters, lights, rugs, and small decor. Every building needs distinct walls, roof, doors, and multiple visible windows; use glazed storefronts/open facades so interior furnishing is visible. Add themed walkways, terrain, street furniture, signs, plants, lamps, landmarks, layered foreground/midground/background dressing, and a finished perimeter. Fill the footprint coherently, not as empty space around one scene.
           Use the user theme prompt as the source of truth for every design choice. Derive the theme from the story only when the user left the theme blank. Make the theme unmistakable and specific; do not fall back to the same generic city/neon plaza. Use unique names for all Parts and give each building its own complete, furnished layout, including doors and windows.
           Include one character_placements entry for every supplied username using exact spelling, roles lead/supporting, positions X=-8..8, Y=0..3, Z=12..38. Keep a clear 30-by-40-stud area around this cast so characters and camera remain unobstructed.
           Use 5 to 8 camera_shots with increasing times from 0 through ${DURATION_SECONDS}; show the complete environment, all named characters, landmarks, and the ending beat. Coordinates are Roblox X,Y,Z. Begin wide, use smooth moves and 2-3 deliberate snap cuts, finish on the lead.
-          The world platform spans X/Z=-320..320. Props must be individually modeled physical Roblox Parts (not images or flat drawings): allowed shapes Block/Ball/Cylinder; allowed materials Plastic, SmoothPlastic, Concrete, Grass, Slate, Wood, Metal, Neon, Glass, Brick, Asphalt. Each prop has a unique short name, position X/Z=-250..250 and Y=0..250 (Y is height above the ground), size dimensions 0.5..120, and RGB color integers 0..255. Keep all props within the platform and appropriate for all ages.
+          The world platform spans X/Z=-320..320. Props must be individually modeled physical Roblox Parts (not images or flat drawings): allowed shapes Block/Ball/Cylinder; allowed materials Plastic, SmoothPlastic, Concrete, Grass, Slate, Wood, Metal, Neon, Glass, Brick, Asphalt. Each prop has a unique short name, position X/Z=-250..250 and Y=0..250 (Y is height above the ground), size dimensions 0.5..120, RGB color integers 0..255, and physics='static' or 'dynamic'. Keep buildings, terrain, and furniture static; mark small story-critical loose objects, balls, or tossable items dynamic so they react to gravity and collisions. Keep all props within the platform and appropriate for all ages.
           PROMPT
           # Preserve the selected model, but disable private reasoning tokens for this JSON-only task.
           # A large, furnished scene can take longer than the old 10-minute ceiling, so allow 30 minutes
           # per generation and retry transient Ollama timeouts before failing the workflow.
           jq -n --arg model "$AI_MODEL" --rawfile prompt map_prompt.txt \
             '{model:$model, prompt:$prompt, format:"json", think:false, stream:false, options:{temperature:0.55, num_predict:30000}}' > map_request.json
-          for attempt in 1 2 3; do
+          for attempt in 1 2 3 4; do
+            echo "AI world planning attempt ${attempt}/4 using ${AI_MODEL}; validator requires 120 authored Parts; target 200–500 without a maximum."
             curl_status=0
             curl --fail --silent --show-error --connect-timeout 30 --max-time 1800 \
               http://127.0.0.1:11434/api/generate -d @map_request.json -o map_response.json || curl_status=$?
             if [ "$curl_status" -ne 0 ]; then
-              if [ "$attempt" -eq 3 ]; then
-                echo "Ollama map generation failed after 3 attempts (curl exit ${curl_status})." >&2
+              if [ "$attempt" -eq 4 ]; then
+                echo "Ollama map generation failed after 4 attempts (curl exit ${curl_status})." >&2
                 exit "$curl_status"
               fi
-              echo "Ollama map generation request failed (curl exit ${curl_status}); retrying attempt $((attempt + 1))/3."
+              echo "Map request failed with curl exit ${curl_status}; retrying attempt $((attempt + 1))/4."
               sleep 5
               continue
             fi
-            if python tools/build_story_map.py map_response.json dist/Roblox_Story_Map.json "$DURATION_SECONDS" --json-only --strict --min-props 70 --usernames dist/characters.json; then
-              echo "AI-authored full world passed validation on attempt ${attempt}."
+            validation_status=0
+            python tools/build_story_map.py map_response.json dist/Roblox_Story_Map.json "$DURATION_SECONDS" --json-only --strict --min-props 120 --usernames dist/characters.json > map_validation.log 2>&1 || validation_status=$?
+            if [ "$validation_status" -eq 0 ]; then
+              cat map_validation.log
+              echo "AI-authored furnished world passed validation on attempt ${attempt}."
               break
             fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "The AI map still failed validation; refusing to substitute a repeated generic map." >&2
+            cat map_validation.log
+            if [ "$attempt" -eq 4 ]; then
+              echo "The AI map still failed validation after 4 attempts; refusing to substitute a generic map." >&2
               exit 1
             fi
+            CURRENT_PROPS=$(python - <<'PYCOUNT'
+          import json
+          try:
+              envelope = json.load(open('map_response.json', encoding='utf-8'))
+              plan = json.loads(envelope.get('response', '{}'))
+              props = plan.get('props', []) if isinstance(plan, dict) else []
+              print(len(props) if isinstance(props, list) else 0)
+          except (OSError, json.JSONDecodeError, TypeError, AttributeError):
+              print(0)
+          PYCOUNT
+          )
+            VALIDATION_ERROR=$(python -c 'from pathlib import Path; print(Path("map_validation.log").read_text().replace("\n", " ")[:500])')
+            echo "Map validation rejected ${CURRENT_PROPS} props (${VALIDATION_ERROR}); regenerating with that feedback."
             cat >> map_prompt.txt <<RETRY
-          The previous map JSON failed structural validation. Regenerate the entire map from scratch, preserving the custom user theme. Return valid JSON with at least 70 unique, individually named props and no fixed maximum; include as many useful details as possible. Positions must use X/Z=-250..250 and Y=0..250; sizes must be within 0.5..120. Furnish buildings and include windows and doors. Do not return analysis or markdown.
+          CORRECTION REQUIRED AFTER VALIDATOR FAILURE: the last response contained ${CURRENT_PROPS} props and failed with: ${VALIDATION_ERROR}. Regenerate the entire JSON plan and fix that specific error. Include at least 120 valid, unique, individually named physical Parts; target 200–500 useful Parts if the scene needs them, and never impose a maximum. Do not return a short list. Add distinct building pieces, furnished interiors, windows, doors, street details, story props, and layered scenery. Keep the user's theme and story intact, use valid coordinates and sizes, and include physics='static' or 'dynamic' on every prop (buildings static; only small story-critical loose objects/balls dynamic). Return only the complete JSON object.
           RETRY
             jq -n --arg model "$AI_MODEL" --rawfile prompt map_prompt.txt \
-              '{model:$model, prompt:$prompt, format:"json", think:false, stream:false, options:{temperature:0.45, num_predict:30000}}' > map_request.json
+              '{model:$model, prompt:$prompt, format:"json", think:false, stream:false, options:{temperature:0.35, num_predict:30000}}' > map_request.json
           done
 
       - name: Synthesize the selected narrator voice and readable captions
@@ -328,6 +398,16 @@ jobs:
             echo "- The Studio place opens with a fully furnished, editable world containing $(python -c 'import json; print(len(json.load(open("dist/Roblox_Story_Map.json"))["props"]))') AI-authored map Parts, with no fixed 100-Part ceiling, plus the bright Roblox sky, authentic Roblox avatars, readable captions, and AI camera tour."
             echo "- A vertical H.264/AAC MP4 is rendered automatically in the Linux workflow with headless Three.js and FFmpeg; no local Roblox Studio or Blender run is needed."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Free model RAM for the physics renderer
+        env:
+          SELECTED_AI_MODEL: ${{ env.AI_MODEL }}
+        run: |
+          if ollama stop "$SELECTED_AI_MODEL"; then
+            echo "Unloaded $SELECTED_AI_MODEL from memory before Chromium/Rapier rendering; cached model files remain on disk for the final summary."
+          else
+            echo "Ollama could not unload the model cleanly; continuing with the render."
+          fi
 
       - name: Render the complete vertical MP4 without Roblox Studio or Blender
         env:

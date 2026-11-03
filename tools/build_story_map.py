@@ -195,6 +195,8 @@ def validate(plan, duration=90, usernames=(), min_props=16):
             "position": [round(float(v), 2) for v in pos],
             "size": [round(float(v), 2) for v in size],
             "color": color(prop.get("color"), [120, 145, 180]),
+            "physics": ("dynamic" if prop.get("physics") == "dynamic" and shape in {"Block", "Ball"}
+                        and max(float(v) for v in size) <= 12 else "static"),
         })
     return {
         "name": name, "theme": theme,
@@ -222,10 +224,10 @@ def emit_lua(plan, output):
         "map.Name = 'GeneratedStoryMap'",
         f"map:SetAttribute('DisplayName', {lua_string(plan['name'])})",
         "map.Parent = Workspace",
-        "local function makePart(name, size, position, color, material, shape)",
+        "local function makePart(name, size, position, color, material, shape, physicsMode)",
         "    local p = Instance.new('Part')",
         "    p.Name = name",
-        "    p.Anchored = true",
+        "    p.Anchored = physicsMode ~= 'dynamic'",
         "    p.Size = Vector3.new(size[1], size[2], size[3])",
         "    local transform = CFrame.new(position[1], position[2], position[3])",
         "    if shape == 'Cylinder' then transform = transform * CFrame.Angles(0, 0, math.rad(90)) end",
@@ -253,7 +255,7 @@ def emit_lua(plan, output):
         color = ", ".join(map(str, prop["color"]))
         lines.append(
             f"makePart({lua_string(prop['name'])}, {{{size}}}, {{{pos}}}, {{{color}}}, "
-            f"{lua_string(prop['material'])}, {lua_string(prop['shape'])})"
+            f"{lua_string(prop['material'])}, {lua_string(prop['shape'])}, {lua_string(prop.get('physics', 'static'))})"
         )
     ambient = plan["ambient_color"]
     lines.extend([
