@@ -1,12 +1,17 @@
-name: Generate 2K Vertical YouTube Short
+name: Generate Roblox Studio Story Experience
 
 on:
   workflow_dispatch:
     inputs:
       story_topic:
-        description: 'Real-life story topic to animate in a Roblox-style 3D world'
+        description: 'Real-life story topic for a runnable, AI-built Roblox Studio experience'
         required: true
         default: 'A student finds a lost wallet on the way to school and has to choose what to do'
+        type: string
+      world_theme:
+        description: 'Describe the visual theme/world you want; leave blank to let the AI invent one from the story'
+        required: false
+        default: ''
         type: string
       duration_seconds:
         description: 'Short duration in seconds'
@@ -27,7 +32,12 @@ on:
           - medium
           - hard
       character_usernames:
-        description: 'Comma-separated public Roblox usernames (first is lead, max 6); render their full 3D account avatars'
+        description: 'Comma-separated Roblox usernames (first is lead, max 6); load their live R15 avatars in Studio'
+        required: false
+        default: ''
+        type: string
+      narration_audio_asset_id:
+        description: 'Optional Roblox audio asset ID for in-experience narration playback; upload the generated MP3 first'
         required: false
         default: ''
         type: string
@@ -45,7 +55,7 @@ permissions:
   contents: read
 
 jobs:
-  render_short:
+  build_studio_experience:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -57,14 +67,14 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Blender, FFmpeg, and narration tools
+      - name: Install AI, research, narration, and report tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl jq zstd blender ffmpeg xvfb libgl1-mesa-dri fonts-dejavu-core
+          sudo apt-get install -y curl jq zstd
           python -m pip install --upgrade pip
-          python -m pip install edge-tts mutagen ddgs pillow
+          python -m pip install edge-tts mutagen ddgs reportlab
 
-      - name: Download the selected AI model for stories, animation, and camera plans
+      - name: Download the selected AI model for stories and map/camera plans
         env:
           MODEL_QUALITY: ${{ inputs.model_quality }}
         run: |
@@ -90,7 +100,7 @@ jobs:
             echo "## Selected generation model"
             echo "- Preset: $MODEL_QUALITY"
             echo "- Model: $SELECTED_MODEL (thinking=$THINK_MODE)"
-            echo "- Used for story, character animation, and camera/map planning."
+            echo "- Used for story and map/camera planning."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Parse optional Roblox usernames into a named cast
@@ -103,12 +113,6 @@ jobs:
           echo "CAST_NAMES=$CAST_NAMES" >> "$GITHUB_ENV"
           echo "CHARACTER_USERNAMES_JSON=$(jq -c . dist/characters.json)" >> "$GITHUB_ENV"
           echo "Cast usernames: ${CAST_NAMES:-AI chooses a protagonist}"
-
-      - name: Fetch actual Roblox avatar meshes, textures, and appearance profiles
-        run: |
-          python tools/fetch_roblox_avatars.py dist/characters.json dist/avatar_profiles.json dist/avatar-assets
-          AVATAR_LOOKS=$(jq -c 'map({username, skin_rgb, hair_rgb, shirt_rgb, pants_rgb})' dist/avatar_profiles.json)
-          echo "AVATAR_LOOKS=$AVATAR_LOOKS" >> "$GITHUB_ENV"
 
       - name: Search the web for optional story background
         env:
@@ -181,67 +185,52 @@ jobs:
           done
           test -s dist/narration.txt
 
-      - name: Plan animated character movement
+      - name: Design the complete prompt-themed 3D Roblox world and camera plan
         env:
           STORY_TOPIC: ${{ inputs.story_topic }}
-          DURATION_SECONDS: ${{ inputs.duration_seconds }}
-        run: |
-          NARRATION=$(cat dist/narration.txt)
-          cat > animation_prompt.txt <<PROMPT
-          Think through the story beats and create joint animation data for a cast of blocky R15-style 3D characters.
-          Topic: "${STORY_TOPIC}". Spoken narration: "${NARRATION}"
-          Cast usernames in order (first is lead): ${CAST_NAMES:-none supplied}.
-          Public avatar color references: ${AVATAR_LOOKS:-[]}. The renderer imports each matching Roblox OBJ/MTL model and texture; animate the complete character through story-relevant root turns and gestures.
-          The lead performs the generated keyframes; each other supplied username should have a separate reaction/motion track.
-          Required duration: ${DURATION_SECONDS} seconds. Return ONLY JSON shaped like:
-          {"name":"ShortAnimation","keyframes":[{"time":0,"face":"talk","poses":{"Head":[0,0,0],"UpperTorso":[0,0,0],"RightUpperArm":[0,0,0]}}],"character_motions":{"OtherUsername":[{"time":0,"face":"neutral","poses":{"Head":[0,0,0]}}]}}
-          Lead keyframes: 24 to 42, distributed through the full runtime, starting at 0 and ending near ${DURATION_SECONDS}.
-          Each supporting username track: at least 4, ideally 8–12, story-relevant reaction keyframes from 0 to ${DURATION_SECONDS}.
-          Every keyframe must set face to neutral, talk, smile, shocked, or blink. Pose arrays are [rotationX,rotationY,rotationZ]
-          in degrees; keep each angle within -100 to 100. Poses are sparse; omitted joints are neutral.
-          Allowed joints: HumanoidRootPart, LowerTorso, UpperTorso, Head, LeftUpperArm, LeftLowerArm, LeftHand,
-          RightUpperArm, RightLowerArm, RightHand, LeftUpperLeg, LeftLowerLeg, LeftFoot, RightUpperLeg, RightLowerLeg, RightFoot.
-          Give characters distinct, natural gestures matching their roles; keep everyone in place and finish relaxed.
-          This is animation data only. No dialog about AI, servers, or game mechanics, and no scene layout/images/video/subtitles.
-          PROMPT
-          jq -n --arg model "$AI_MODEL" --argjson think "$AI_THINK" --rawfile prompt animation_prompt.txt \
-            '{model:$model, prompt:$prompt, format:"json", think:$think, stream:false, options:{temperature:0.45, num_predict:6000}}' > animation_request.json
-          curl --fail --silent --show-error --max-time 900 \
-            http://127.0.0.1:11434/api/generate -d @animation_request.json -o animation_response.json
-          jq -r '.response // empty' animation_response.json > ai_animation.json
-          python tools/build_roblox_animation.py ai_animation.json dist/Roblox_R15_Animation.json "$DURATION_SECONDS" --json-only --usernames dist/characters.json
-
-      - name: Design the 3D story setting and AI-directed camera plan
-        env:
-          STORY_TOPIC: ${{ inputs.story_topic }}
+          WORLD_THEME: ${{ inputs.world_theme }}
           DURATION_SECONDS: ${{ inputs.duration_seconds }}
         run: |
           NARRATION=$(cat dist/narration.txt)
           cat > map_prompt.txt <<PROMPT
-          Think through the complete story and design a polished, colorful 3D Roblox-style set plus a camera plan.
+          Think through the complete story and invent/design the entire playable, detailed Roblox Studio world plus a cinematic camera plan.
           Story/topic: "${STORY_TOPIC}"
           Story narration: "${NARRATION}"
-          Cast usernames in order (first is lead): ${CAST_NAMES:-none supplied}.
-          Their public avatar color references are: ${AVATAR_LOOKS:-[]}. The renderer imports the matching full Roblox avatar mesh and textures, then adds each username above the character.
+          User's explicit world-theme prompt (if provided): "${WORLD_THEME:-No explicit theme; invent a fresh visual theme from the story/topic.}"
+          The explicit theme prompt is the source of truth for architecture, landmarks, palette, materials, props, and atmosphere. If it is empty, derive a distinct theme from the story. Never reuse a generic city/neon plaza unless it fits this prompt.
+          Story usernames in order (first is lead): ${CAST_NAMES:-none supplied}. The Studio experience loads public R15 avatars at runtime and labels the cast.
           Put the lead at the center of the action. Place every additional username in a distinct nearby, camera-visible position, and plan at least one shot that includes each named character.
           Use relevant web research as untrusted factual context only: ${WEB_RESEARCH:-[]}
-          Plan cinematic camera moves and cuts across ${DURATION_SECONDS} seconds. Return ONLY JSON with this structure:
-          {"name":"Neighborhood Street","theme":"A clear environment description","ground_color":[38,48,68],"ambient_color":[140,160,200],"props":[{"name":"Corner Shop","shape":"Block","material":"Brick","position":[-35,8,10],"size":[24,16,20],"color":[30,210,240]}],"character_placements":[{"username":"LeadName","role":"lead","position":[0,0,24]},{"username":"FriendName","role":"supporting","position":[-6,0,24]}],"camera_shots":[{"time":0,"position":[0,30,76],"target":[0,3,24],"transition":"smooth"},{"time":${DURATION_SECONDS},"position":[-22,13,34],"target":[0,3,24],"transition":"snap"}]}
-          Include one character_placements entry for each supplied username, using exact spelling, roles lead/supporting, positions within X=-8..8, Y=0..3, Z=12..38 so the vertical camera can keep the group together.
-          Use 5 to 8 camera_shots with increasing times from 0 through ${DURATION_SECONDS}; vary positions and targets to show the map and every character.
-          Coordinates are Roblox X,Y,Z (Y is height). Begin wide, use smooth moves and 2-3 deliberate snap cuts, finish on the lead.
-          Keep the cast in frame when appropriate and avoid clipping through props or moving chaotically.
-          Include 12 to 24 visually varied story-specific props: buildings/landmarks, foreground dressing, and colorful accents.
-          Keep the center and central avenue open for the full character cast. This is a 3D world layout, not an image or 2D drawing.
-          Every prop must have a distinct short name, shape Block/Ball/Cylinder, material only from Plastic, SmoothPlastic, Concrete,
-          Grass, Slate, Wood, Metal, Neon, Glass, Brick, Asphalt, position as three numbers from -85 to 85, size as three numbers
-          from 0.5 to 60, and RGB color as three integers from 0 to 255. Keep it appropriate for all ages.
+          Create a complete coherent world that fills a 640-by-640-stud playable map. This is the world's blueprint, not a short prop list.
+          Return ONLY JSON with this structure:
+          {"name":"Prompt-derived world name","theme":"Specific visual theme that follows the user's theme prompt","ground_material":"Grass","ground_color":[88,166,91],"ambient_color":[185,205,225],"props":[{"name":"Distinct landmark/building piece","shape":"Block","material":"Brick","position":[-55,8,35],"size":[24,16,20],"color":[30,210,240]}],"character_placements":[{"username":"LeadName","role":"lead","position":[0,0,24]},{"username":"FriendName","role":"supporting","position":[-6,0,24]}],"camera_shots":[{"time":0,"position":[0,75,170],"target":[0,3,24],"transition":"smooth"},{"time":${DURATION_SECONDS},"position":[-30,35,80],"target":[0,3,24],"transition":"snap"}]}
+          Build a completely furnished, polished, playable world. There is no fixed upper limit on AI-authored parts: add as many individually named Parts as the design needs and the model can reliably produce; do not stop at 100. Furnish every relevant building interior with story-appropriate tables, chairs, beds, shelves, counters, lights, rugs, and small decor. Every building needs distinct walls, roof, doors, and multiple visible windows; use glazed storefronts/open facades so interior furnishing is visible. Add themed walkways, terrain, street furniture, signs, plants, lamps, landmarks, layered foreground/midground/background dressing, and a finished perimeter. Fill the footprint coherently, not as empty space around one scene.
+          Use the user theme prompt as the source of truth for every design choice. Derive the theme from the story only when the user left the theme blank. Make the theme unmistakable and specific; do not fall back to the same generic city/neon plaza. Use unique names for all Parts and give each building its own complete, furnished layout, including doors and windows.
+          Include one character_placements entry for every supplied username using exact spelling, roles lead/supporting, positions X=-8..8, Y=0..3, Z=12..38. Keep a clear 30-by-40-stud area around this cast so characters and camera remain unobstructed.
+          Use 5 to 8 camera_shots with increasing times from 0 through ${DURATION_SECONDS}; show the complete environment, all named characters, landmarks, and the ending beat. Coordinates are Roblox X,Y,Z. Begin wide, use smooth moves and 2-3 deliberate snap cuts, finish on the lead.
+          The world platform spans X/Z=-320..320. Props must be individually modeled physical Roblox Parts (not images or flat drawings): allowed shapes Block/Ball/Cylinder; allowed materials Plastic, SmoothPlastic, Concrete, Grass, Slate, Wood, Metal, Neon, Glass, Brick, Asphalt. Each prop has a unique short name, position with each coordinate -250..250, size dimensions 0.5..120, and RGB color integers 0..255. Keep all props within the platform and appropriate for all ages.
           PROMPT
           jq -n --arg model "$AI_MODEL" --argjson think "$AI_THINK" --rawfile prompt map_prompt.txt \
-            '{model:$model, prompt:$prompt, format:"json", think:$think, stream:false, options:{temperature:0.55, num_predict:4000}}' > map_request.json
+            '{model:$model, prompt:$prompt, format:"json", think:$think, stream:false, options:{temperature:0.55, num_predict:30000}}' > map_request.json
           curl --fail --silent --show-error --max-time 600 \
             http://127.0.0.1:11434/api/generate -d @map_request.json -o map_response.json
-          python tools/build_story_map.py map_response.json dist/Roblox_Story_Map.json "$DURATION_SECONDS" --json-only --usernames dist/characters.json
+          for attempt in 1 2 3; do
+            if python tools/build_story_map.py map_response.json dist/Roblox_Story_Map.json "$DURATION_SECONDS" --json-only --strict --min-props 70 --usernames dist/characters.json; then
+              echo "AI-authored full world passed validation on attempt ${attempt}."
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "The AI map still failed validation; refusing to substitute a repeated generic map." >&2
+              exit 1
+            fi
+            cat >> map_prompt.txt <<RETRY
+          The previous map JSON failed structural validation. Regenerate the entire map from scratch, preserving the custom user theme. Return valid JSON with at least 70 unique, individually named props and no fixed maximum; include as many useful details as possible. All positions must be within -250..250 and sizes within 0.5..120. Furnish buildings and include windows and doors. Do not return analysis or markdown.
+          RETRY
+            jq -n --arg model "$AI_MODEL" --argjson think "$AI_THINK" --rawfile prompt map_prompt.txt \
+              '{model:$model, prompt:$prompt, format:"json", think:$think, stream:false, options:{temperature:0.45, num_predict:30000}}' > map_request.json
+            curl --fail --silent --show-error --max-time 600 \
+              http://127.0.0.1:11434/api/generate -d @map_request.json -o map_response.json
+          done
 
       - name: Synthesize the selected narrator voice and readable captions
         env:
@@ -249,9 +238,9 @@ jobs:
           VOICE_STYLE: ${{ inputs.voice_style }}
         run: |
           case "$VOICE_STYLE" in
-            male) VOICE=en-US-GuyNeural; RATE=+10%; PITCH=+0Hz ;;
-            female) VOICE=en-US-AriaNeural; RATE=+10%; PITCH=+0Hz ;;
-            thin_male) VOICE=en-US-EricNeural; RATE=+10%; PITCH=+6Hz ;;
+            male) VOICE=en-US-GuyNeural; RATE=-8%; PITCH=+0Hz ;;
+            female) VOICE=en-US-AriaNeural; RATE=-8%; PITCH=+0Hz ;;
+            thin_male) VOICE=en-US-EricNeural; RATE=-8%; PITCH=+6Hz ;;
             *) echo "Unknown voice choice: $VOICE_STYLE" >&2; exit 1 ;;
           esac
           edge-tts --voice "$VOICE" --rate="$RATE" --pitch="$PITCH" \
@@ -261,7 +250,10 @@ jobs:
           {
             echo "## Selected narrator"
             echo "- Style: $VOICE_STYLE ($VOICE, rate $RATE, pitch $PITCH)"
+            echo "- Slower narration rate applied: $RATE"
           } >> "$GITHUB_STEP_SUMMARY"
+          echo "NARRATOR_VOICE=$VOICE" >> "$GITHUB_ENV"
+          echo "NARRATOR_RATE=$RATE" >> "$GITHUB_ENV"
           python - <<'PY'
           from mutagen.mp3 import MP3
           import os
@@ -272,57 +264,131 @@ jobs:
               raise SystemExit('Voiceover duration is empty or exceeds the selected short length.')
           PY
 
-      - name: Generate timed sound effects for story and camera beats
-        run: |
-          python tools/create_sound_bed.py dist/Roblox_Story_Map.json \
-            "${{ inputs.duration_seconds }}" /tmp/short-sound-bed.wav
-
-      - name: Render the final captioned vertical 2K MP4
+      - name: Package the runnable Roblox Studio experience
         env:
           DURATION_SECONDS: ${{ inputs.duration_seconds }}
+          NARRATION_AUDIO_ASSET_ID: ${{ inputs.narration_audio_asset_id }}
         run: |
-          mkdir -p dist /tmp/blender-config
-          BLENDER_USER_CONFIG=/tmp/blender-config xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 \
-            blender -b --threads 4 --python tools/render_short.py -- \
-            --animation dist/Roblox_R15_Animation.json \
+          python tools/build_studio_experience.py \
             --map dist/Roblox_Story_Map.json \
-            --characters dist/characters.json \
-            --profiles dist/avatar_profiles.json \
+            --cast dist/characters.json \
             --duration "$DURATION_SECONDS" \
-            --output "$PWD/dist/short_silent.mp4" \
-            --width 720 --height 1280 --fps 30
-          test -s dist/short_silent.mp4 || { echo "Blender did not produce a silent MP4; stopping before FFmpeg mux." >&2; exit 1; }
-          ffmpeg -hide_banner -y -i dist/short_silent.mp4 -i dist/narration.mp3 -i /tmp/short-sound-bed.wav \
-            -vf "scale=1440:2560:flags=lanczos,subtitles=dist/narration.srt:force_style='FontName=DejaVu Sans,FontSize=64,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00111111,BorderStyle=1,Outline=5,Shadow=1,MarginL=120,MarginR=120,MarginV=300,Alignment=2'" \
-            -filter_complex "[1:a]volume=1.0[voice];[2:a]volume=0.38[effects];[voice][effects]amix=inputs=2:duration=longest:dropout_transition=0,loudnorm=I=-16:TP=-1.5:LRA=11[mix]" \
-            -map 0:v:0 -map '[mix]' -c:v libx264 -preset veryfast -crf 20 \
-            -pix_fmt yuv420p -r 30 -c:a aac -b:a 192k -shortest \
-            -movflags +faststart dist/Roblox_2K_YouTube_Short.mp4
-          python tools/validate_short.py \
-            --video dist/Roblox_2K_YouTube_Short.mp4 \
-            --silent-video dist/short_silent.mp4 \
             --narration dist/narration.txt \
-            --captions dist/narration.srt \
-            --characters dist/characters.json \
-            --profiles dist/avatar_profiles.json \
-            --map-plan dist/Roblox_Story_Map.json \
-            --duration "$DURATION_SECONDS"
+            --srt dist/narration.srt \
+            --audio-asset-id "$NARRATION_AUDIO_ASSET_ID" \
+            --output dist/Roblox_Studio_Experience.rbxlx \
+            --lua-output dist/Generated_Story_World.lua \
+            --readme dist/README_Studio.md
+          test -s dist/Roblox_Studio_Experience.rbxlx
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse('dist/Roblox_Studio_Experience.rbxlx').getroot()
+          classes = [node.get('class') for node in root.iter('Item')]
+          assert 'ServerScriptService' in classes and 'StarterPlayerScripts' in classes
+          assert 'Script' in classes and 'LocalScript' in classes
+          assert classes.count('Part') >= len(__import__('json').load(open('dist/Roblox_Story_Map.json'))['props']) + 2, f"expected all map parts plus foundation and title sign, got {classes.count('Part')} Parts"
+          assert len((root.find('.//Item[@class="Script"]/Properties/ProtectedString')).text) > 1000
+          client = root.find('.//Item[@class="LocalScript"]/Properties/ProtectedString').text
+          assert len(client) > 1000
+          assert 'caption.Visible = true' in client and 'caption.Text = currentCaption' in client
+          assert 'narrationSound.TimePosition' in client
+          from pathlib import Path
+          import sys
+          sys.path.insert(0, 'tools')
+          from build_studio_experience import parse_srt
+          assert parse_srt(Path('dist/narration.srt')), 'generated SRT contains no usable timed caption cues'
+          print(f'Validated Studio XML, {classes.count("Part")} editable Parts, scripts, and visible timed captions.')
+          PY
+          {
+            echo "## Roblox Studio experience ready"
+            echo "- Place: \`Roblox_Studio_Experience.rbxlx\`"
+            echo "- The Studio place opens with a fully furnished, editable world containing $(python -c 'import json; print(len(json.load(open("dist/Roblox_Story_Map.json"))["props"]))') AI-authored map Parts, with no fixed 100-Part ceiling, plus the bright Roblox sky, authentic Roblox avatars, readable captions, and AI camera tour."
+            echo "- Roblox Studio is not installed on the Linux runner, so this workflow produces a runnable Studio place and narration sidecars, not a rendered MP4."
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload only the approved YouTube Short MP4
+      - name: Write AI-generated creation summary and bundle the final deliverables
+        env:
+          DURATION_SECONDS: ${{ inputs.duration_seconds }}
+          VOICE_STYLE: ${{ inputs.voice_style }}
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          plan = json.loads(Path('dist/Roblox_Story_Map.json').read_text(encoding='utf-8'))
+          cast = json.loads(Path('dist/characters.json').read_text(encoding='utf-8'))
+          narration = Path('dist/narration.txt').read_text(encoding='utf-8')
+          context = {
+              'story': narration,
+              'world_name': plan.get('name'),
+              'user_theme': plan.get('theme'),
+              'ai_authored_part_count': len(plan.get('props', [])),
+              'representative_part_names': [p.get('name') for p in plan.get('props', [])[:60]],
+              'camera_shot_count': len(plan.get('camera_shots', [])),
+              'cast_usernames': cast,
+              'duration_seconds': int(__import__('os').environ['DURATION_SECONDS']),
+          }
+          prompt = (
+              'Write a concise, friendly 100–160 word final creation summary for the user. '
+              'Summarize only the completed story, world theme, furnishing, avatars, camera, captions, and deliverables in this data. '
+              'Do not reveal or imitate private chain-of-thought. Do not claim Roblox Studio runtime testing or MP4 rendering. '
+              'Do not invent features not present in the data. Return only JSON with a summary string.\nDATA: '
+              + json.dumps(context, ensure_ascii=False)
+          )
+          Path('creation_summary_prompt.txt').write_text(prompt, encoding='utf-8')
+          PY
+          jq -n --arg model "$AI_MODEL" --rawfile prompt creation_summary_prompt.txt \
+            '{model:$model, prompt:$prompt, format:{type:"object",properties:{summary:{type:"string"}},required:["summary"],additionalProperties:false}, think:false, stream:false, options:{temperature:0.25, num_predict:400}}' > creation_summary_request.json
+          curl --fail --silent --show-error --max-time 180 \
+            http://127.0.0.1:11434/api/generate -d @creation_summary_request.json -o creation_summary_response.json
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          payload = json.loads(Path('creation_summary_response.json').read_text(encoding='utf-8'))
+          try:
+              result = json.loads(payload.get('response', '{}'))
+          except (json.JSONDecodeError, TypeError):
+              result = {}
+          summary = result.get('summary', '') if isinstance(result, dict) else ''
+          if not isinstance(summary, str) or len(summary.split()) < 20:
+              raise SystemExit('The selected AI model did not return a usable creation summary.')
+          Path('dist/AI_Creation_Summary.txt').write_text(summary.strip() + '\n', encoding='utf-8')
+          print(f"AI creation summary generated ({len(summary.split())} words).")
+          PY
+          mkdir -p dist/Generation_Prompts
+          cp narration_prompt.txt map_prompt.txt creation_summary_prompt.txt dist/Generation_Prompts/
+          python tools/package_studio_deliverables.py \
+            --directory dist \
+            --map dist/Roblox_Story_Map.json \
+            --cast dist/characters.json \
+            --research dist/web_research.json \
+            --summary dist/AI_Creation_Summary.txt \
+            --model "$AI_MODEL" \
+            --voice "$NARRATOR_VOICE" \
+            --rate "$NARRATOR_RATE" \
+            --duration "$DURATION_SECONDS"
+          test -s dist/AI_Design_and_Tools_Report.pdf
+          test -s dist/Roblox_Studio_Complete_Package.zip
+          {
+            echo "## Final ZIP bundle"
+            echo "- Includes the editable place, map/story/cast data, narration audio and captions, prompt files, AI creation summary, and tools/design PDF."
+            echo "- The PDF documents high-level design choices and tools; it does not expose private internal chain-of-thought."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the Roblox Studio project and narration assets
         uses: actions/upload-artifact@v4
         with:
-          name: Roblox-2K-YouTube-Short
-          path: dist/Roblox_2K_YouTube_Short.mp4
+          name: Roblox-Studio-Experience
+          path: dist/
           if-no-files-found: error
           retention-days: 14
 
-      - name: Record a repair task if render or quality checks fail
+      - name: Record a repair task if the Studio project fails validation
         if: failure()
         run: |
           {
-            echo '## Short needs a repair pass'
+            echo '## Studio experience needs a repair pass'
             echo
-            echo '- The short was not approved, so no MP4 artifact was uploaded.'
+            echo '- The Studio place failed to build or validate, so no experience artifact was uploaded.'
             echo '- Review the first failed step above, fix that issue, then rerun this workflow.'
             echo "- Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } >> "$GITHUB_STEP_SUMMARY"
