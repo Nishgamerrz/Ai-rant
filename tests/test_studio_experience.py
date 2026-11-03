@@ -25,6 +25,8 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn('"${WORLD_THEME:-AUTO FROM STORY}"', workflow)
         self.assertIn("treat the user's cue as a required design constraint", workflow)
         self.assertIn("daylight cue means a clearly bright, naturally sunlit daytime world", workflow)
+        self.assertIn("ROBLOX_OPEN_CLOUD_API_KEY: ${{ secrets.ROBLOX_OPEN_CLOUD_API_KEY }}", workflow)
+        self.assertIn("Mesh access:", workflow)
         self.assertIn("uses: actions/cache/restore@v4", workflow)
         disk_cleanup_step = workflow.index("- name: Reclaim runner disk space for the selected model")
         cache_restore_step = workflow.index("- name: Restore cached selected Ollama model")
@@ -129,6 +131,7 @@ class StudioExperienceTests(unittest.TestCase):
             self.assertNotIn('motor.Transform', client.text)
             self.assertNotIn('Story Lead Torso', server.text)
             self.assertTrue((work / "README.md").exists())
+            self.assertIn("ROBLOX_OPEN_CLOUD_API_KEY", (work / "README.md").read_text(encoding="utf-8"))
             self.assertTrue((work / "World.lua").exists())
 
     def test_prompt_themed_map_requires_full_ai_authored_scene(self):

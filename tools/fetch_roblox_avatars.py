@@ -14,19 +14,21 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-def request_bytes(url: str, data: dict | None = None) -> bytes:
+def request_bytes(url: str, data: dict | None = None, headers: dict[str, str] | None = None) -> bytes:
     body = json.dumps(data).encode("utf-8") if data is not None else None
-    request = Request(url, data=body, headers={
+    request_headers = {
         "User-Agent": "Ai-rant-short-render/1.0",
         "Accept": "application/json, */*",
         **({"Content-Type": "application/json"} if body else {}),
-    }, method="POST" if body else "GET")
+        **(headers or {}),
+    }
+    request = Request(url, data=body, headers=request_headers, method="POST" if body else "GET")
     with urlopen(request, timeout=25) as response:
         return response.read()
 
 
-def request_json(url: str, data: dict | None = None):
-    return json.loads(request_bytes(url, data).decode("utf-8"))
+def request_json(url: str, data: dict | None = None, headers: dict[str, str] | None = None):
+    return json.loads(request_bytes(url, data, headers).decode("utf-8"))
 
 
 def cdn_url(asset_hash: str) -> str:
@@ -90,8 +92,8 @@ def profile_from_thumbnail(url: str, output: Path):
     }
 
 
-def avatar_model_document_url(user_id: int):
-    """Try Roblox's current endpoint, then its legacy public endpoint without credentials."""
+def avatar_model_document_url(user_id: int, open_cloud_api_key: str = ""):
+    """Try Roblox's current endpoint with an optional scoped API key, then legacy."""
     endpoints = (
         ("avatar-3d", f"https://thumbnails.roblox.com/v1/users/avatar-3d?userId={user_id}"),
         ("legacy-avatar-3d", f"https://www.roblox.com/avatar-thumbnail-3d/json?userId={user_id}"),
@@ -100,7 +102,9 @@ def avatar_model_document_url(user_id: int):
     for source, endpoint in endpoints:
         for attempt in range(6):
             try:
-                response = request_json(endpoint)
+                api_headers = ({"x-api-key": open_cloud_api_key}
+                               if source == "avatar-3d" and open_cloud_api_key else None)
+                response = request_json(endpoint, headers=api_headers) if api_headers else request_json(endpoint)
             except HTTPError as exc:
                 failures.append(f"{source} HTTP {exc.code}")
                 if exc.code in (401, 403, 404) or attempt == 5:
@@ -138,7 +142,8 @@ def avatar_model_document_url(user_id: int):
 
 
 def fetch_avatar_model(user_id: int, output_dir: Path) -> dict:
-    model_source, model_url = avatar_model_document_url(user_id)
+    open_cloud_api_key = os.environ.get("ROBLOX_OPEN_CLOUD_API_KEY", "").strip()
+    model_source, model_url = avatar_model_document_url(user_id, open_cloud_api_key)
     model_data = request_json(model_url)
     obj_hash, mtl_hash = model_data.get("obj"), model_data.get("mtl")
     texture_hashes = model_data.get("textures", [])

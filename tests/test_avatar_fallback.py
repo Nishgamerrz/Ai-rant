@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -54,6 +55,46 @@ class AvatarFallbackTests(unittest.TestCase):
             self.assertTrue(profile["model_ready"])
             self.assertIn("v 0 0 0", Path(profile["model_obj"]).read_text(encoding="utf-8"))
             self.assertTrue(Path(profile["model_mtl"]).is_file())
+
+    def test_scoped_open_cloud_key_authenticates_only_the_official_avatar_mesh_request(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            user_id = 12345
+            endpoint = f"https://thumbnails.roblox.com/v1/users/avatar-3d?userId={user_id}"
+            model_url = "https://t6.rbxcdn.com/avatar-model-json"
+            calls = []
+            model_json = {
+                "obj": "obj-hash", "mtl": "mtl-hash", "textures": [],
+                "camera": {"position": {"x": 0, "y": 3, "z": 6}},
+                "aabb": {"min": {"x": -1, "y": 0, "z": -1},
+                         "max": {"x": 1, "y": 5, "z": 1}},
+            }
+
+            def fake_request_json(url, data=None, headers=None):
+                calls.append((url, headers))
+                if url == endpoint:
+                    return {"state": "Completed", "imageUrl": model_url}
+                if url == model_url:
+                    return model_json
+                raise AssertionError(f"Unexpected JSON request: {url}")
+
+            def fake_request_bytes(url, data=None, headers=None):
+                if url == fetch_roblox_avatars.cdn_url("obj-hash"):
+                    return b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"
+                if url == fetch_roblox_avatars.cdn_url("mtl-hash"):
+                    return b"newmtl avatar\nKd 1 1 1\n"
+                raise AssertionError(f"Unexpected asset request: {url}")
+
+            with (
+                mock.patch.dict(os.environ, {"ROBLOX_OPEN_CLOUD_API_KEY": "unit-test-key"}),
+                mock.patch.object(fetch_roblox_avatars, "request_json", side_effect=fake_request_json),
+                mock.patch.object(fetch_roblox_avatars, "request_bytes", side_effect=fake_request_bytes),
+            ):
+                profile = fetch_roblox_avatars.fetch_avatar_model(user_id, Path(temporary))
+
+            self.assertTrue(profile["model_ready"])
+            self.assertEqual(calls[0], (endpoint, {"x-api-key": "unit-test-key"}))
+            self.assertEqual(calls[1], (model_url, None))
+            self.assertNotIn("unit-test-key", json.dumps(profile))
 
     def test_pixel_reader_uses_pillows_non_deprecated_api_when_available(self):
         class ImageWithFlattenedPixels:
