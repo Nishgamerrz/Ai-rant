@@ -24,7 +24,7 @@ def args_from_blender():
     parser = argparse.ArgumentParser()
     parser.add_argument("--animation", required=True)
     parser.add_argument("--map", required=True)
-    parser.add_argument("--duration", type=int, choices=(60, 90, 120), required=True)
+    parser.add_argument("--duration", type=int, choices=(30, 45, 60), required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--width", type=int, default=1440)
     parser.add_argument("--height", type=int, default=2560)

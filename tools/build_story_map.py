@@ -232,8 +232,8 @@ def main():
         raise SystemExit("usage: build_story_map.py OLLAMA_RESPONSE.json OUTPUT_PATH DURATION_SECONDS [--json-only]")
     source, destination = map(Path, sys.argv[1:3])
     duration = float(sys.argv[3])
-    if not 60 <= duration <= 120:
-        raise SystemExit("duration must be 60 to 120 seconds")
+    if not 30 <= duration <= 60:
+        raise SystemExit("duration must be 30 to 60 seconds")
     try:
         plan = validate(decode_response(source), duration)
     except (OSError, json.JSONDecodeError, ValueError) as exc:

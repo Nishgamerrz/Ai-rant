@@ -13,8 +13,8 @@ def main():
         raise SystemExit("usage: create_sound_bed.py MAP.json DURATION_SECONDS OUTPUT.wav")
     plan_path, output_path = Path(sys.argv[1]), Path(sys.argv[3])
     duration = float(sys.argv[2])
-    if not 60 <= duration <= 120:
-        raise SystemExit("duration must be between 60 and 120 seconds")
+    if not 30 <= duration <= 60:
+        raise SystemExit("duration must be between 30 and 60 seconds")
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
 
     inputs = ["-f", "lavfi", "-i", f"anoisesrc=color=pink:sample_rate=48000:duration={duration:g}"]

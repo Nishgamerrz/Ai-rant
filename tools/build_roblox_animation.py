@@ -181,8 +181,8 @@ def main():
     source, destination = map(Path, sys.argv[1:3])
     try:
         duration = float(sys.argv[3])
-        if not 60 <= duration <= 120:
-            raise ValueError("duration must be 60 to 120 seconds")
+        if not 30 <= duration <= 60:
+            raise ValueError("duration must be 30 to 60 seconds")
         data = json.loads(source.read_text(encoding="utf-8"))
         animation = normalize(data, duration)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
