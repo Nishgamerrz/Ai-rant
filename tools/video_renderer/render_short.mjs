@@ -71,9 +71,34 @@ function buildHtml(data) {
   </style></head><body><div id="frame"><div id="brand"><span id="title"></span><div id="theme"></div></div><div id="caption"></div><div id="credit">STORY WORLD</div></div>
   <script id="render-data" type="application/json">${encoded}</script><script type="module">
   import * as THREE from '/modules/three/build/three.module.js';
+  import RAPIER from '/modules/@dimforge/rapier3d-compat/dist/rapier.mjs';
   import { OBJLoader } from '/modules/three/examples/jsm/loaders/OBJLoader.js';
   import { MTLLoader } from '/modules/three/examples/jsm/loaders/MTLLoader.js';
   const DATA=JSON.parse(document.getElementById('render-data').textContent);
+  await RAPIER.init();
+  const physicsWorld=new RAPIER.World({x:0,y:-18,z:0});physicsWorld.timestep=1/60;
+  const PHYSICS_ROOT_OFFSET=2.9,ACTOR_CAPSULE_HALF_HEIGHT=2.35,ACTOR_CAPSULE_RADIUS=.55;
+  const fixedWorldBody=physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+  const dynamicPropBodies=new Map();let dynamicPropCount=0,staticPropCount=0;
+  physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(320,1,320).setTranslation(0,-1.08,0).setFriction(.9),fixedWorldBody);
+  for(const part of DATA.plan.props||[]){
+    const [x,y,z]=part.position,[sx,sy,sz]=part.size;
+    if(part.physics==='dynamic'&&(part.shape==='Block'||part.shape==='Ball')&&Math.max(sx,sy,sz)<=12){
+      const body=physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(x,y,z)
+        .setLinearDamping(.2).setAngularDamping(.35).setCanSleep(false));
+      const collider=part.shape==='Ball'
+        ? RAPIER.ColliderDesc.ball(Math.max(sx,sy,sz)/2)
+        : RAPIER.ColliderDesc.cuboid(Math.max(.03,sx/2),Math.max(.03,sy/2),Math.max(.03,sz/2));
+      physicsWorld.createCollider(collider.setFriction(.72).setRestitution(.24),body);
+      body.setLinvel({x:((dynamicPropCount%3)-1)*.45,y:.18,z:(dynamicPropCount%2?.4:-.4)},true);
+      dynamicPropBodies.set(part,body);dynamicPropCount+=1;
+    }else{
+      physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(Math.max(.03,sx/2),Math.max(.03,sy/2),Math.max(.03,sz/2))
+        .setTranslation(x,y,z).setFriction(.82).setRestitution(.015),fixedWorldBody);
+      staticPropCount+=1;
+    }
+  }
+  window.physicsSummary={dynamicProps:dynamicPropCount,staticProps:staticPropCount};
   const rgb=(value)=>new THREE.Color(value[0]/255,value[1]/255,value[2]/255);
   const skyColor=rgb(DATA.plan.ambient_color||[180,205,230]).lerp(new THREE.Color(0x93c9f2),.45);
   const scene=new THREE.Scene(); scene.background=skyColor; scene.fog=new THREE.Fog(skyColor,420,1050);
@@ -141,6 +166,7 @@ function buildHtml(data) {
   }
   // Batch ordinary architecture into instanced meshes, so generously furnished AI maps render smoothly.
   const matrix=new THREE.Matrix4(),position=new THREE.Vector3(),scale=new THREE.Vector3(),quaternion=new THREE.Quaternion();
+  const dynamicPropInstances=[];
   for(const group of buckets.values()){
     const [metalness,roughness]=settings[group.mat]||[0,.8];
     const material=new THREE.MeshStandardMaterial({color:0xffffff,vertexColors:true,roughness,metalness,transparent:group.mat==='Glass',opacity:group.mat==='Glass'?.48:1,depthWrite:group.mat!=='Glass',emissive:group.mat==='Neon'?0x15202b:0,emissiveIntensity:group.mat==='Neon'?.8:0});
@@ -151,14 +177,25 @@ function buildHtml(data) {
       quaternion.identity();
       if(part.shape==='Cylinder') quaternion.setFromEuler(new THREE.Euler(0,0,Math.PI/2));
       matrix.compose(position,quaternion,scale); instanced.setMatrixAt(index,matrix); instanced.setColorAt(index,rgb(part.color||[135,165,205]));
+      const body=dynamicPropBodies.get(part);if(body)dynamicPropInstances.push({part,body,mesh:instanced,index});
     });
     instanced.instanceMatrix.needsUpdate=true; scene.add(instanced);
   }
   // Floor tiles and far green terrain soften the map edge without replacing the AI-authored theme.
-  const horizon=new THREE.Mesh(new THREE.PlaneGeometry(2600,2600),new THREE.MeshStandardMaterial({color:0x9ebc82,roughness:1})); horizon.rotation.x=-Math.PI/2; horizon.position.y=-2.25; scene.add(horizon);
+  const horizon=new THREE.Mesh(new THREE.PlaneGeometry(2600,2600),new THREE.MeshStandardMaterial({color:rgb(DATA.plan.ground_color||[88,166,91]),roughness:1})); horizon.rotation.x=-Math.PI/2; horizon.position.y=-.08; scene.add(horizon);
   const title=document.getElementById('title'),theme=document.getElementById('theme'),caption=document.getElementById('caption');
   title.textContent=(DATA.plan.name||'STORY WORLD').toUpperCase(); theme.textContent=DATA.plan.theme||'';
   const actors=[];
+  function registerActor(root,point,index,placement){
+    const lead=placement?.role==='lead'||index===0;
+    const body=physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(Number(point[0]),Number(point[1])+PHYSICS_ROOT_OFFSET,Number(point[2]))
+      .setLinearDamping(3.2).setAngularDamping(8).lockRotations().setCanSleep(false));
+    physicsWorld.createCollider(RAPIER.ColliderDesc.capsule(ACTOR_CAPSULE_HALF_HEIGHT,ACTOR_CAPSULE_RADIUS)
+      .setFriction(.95).setRestitution(0),body);
+    actors.push({root,body,baseX:Number(point[0]),baseY:Number(point[1]),baseZ:Number(point[2]),
+      phase:index*1.73,lead,stride:lead?2.1:1.15,baseYaw:0,jumpApplied:false});
+  }
   function nameSprite(text){
     const canvas=document.createElement('canvas'); canvas.width=512;canvas.height=96;const ctx=canvas.getContext('2d');
     ctx.fillStyle='rgba(8,17,30,.82)';ctx.fillRect(8,8,496,80);ctx.font='bold 38px Arial';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillStyle='#fff';ctx.fillText(text.slice(0,24),256,48,470);
@@ -174,7 +211,7 @@ function buildHtml(data) {
       portrait.colorSpace=THREE.SRGBColorSpace;
       const root=new THREE.Group();root.name='AuthenticRobloxAvatarPortrait_'+username;root.position.set(point[0],point[1],point[2]);
       const image=new THREE.Sprite(new THREE.SpriteMaterial({map:portrait,transparent:true,depthTest:true,depthWrite:false}));image.scale.set(5.4,5.4,1);image.position.y=2.9;root.add(image);
-      const label=nameSprite(username);label.position.y=6.3;root.add(label);scene.add(root);actors.push({root,baseY:point[1]});return;
+      const label=nameSprite(username);label.position.y=6.3;root.add(label);scene.add(root);registerActor(root,point,index,place);return;
     }
     const [objResponse,mtlResponse]=await Promise.all([fetch(path+'avatar.obj'),fetch(path+'avatar.mtl')]);
     if(!objResponse.ok||!mtlResponse.ok) throw new Error('Missing public Roblox avatar model files for '+username);
@@ -194,7 +231,7 @@ function buildHtml(data) {
     const avatarScale=6.2/size.y;model.scale.setScalar(avatarScale);model.position.set(-((bounds.min.x+bounds.max.x)/2)*avatarScale,-bounds.min.y*avatarScale,-((bounds.min.z+bounds.max.z)/2)*avatarScale);
     model.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true;if(o.material){const ms=Array.isArray(o.material)?o.material:[o.material];for(const m of ms){m.side=THREE.DoubleSide;m.needsUpdate=true;}}}});
     pivot.add(model);pivot.position.set(point[0],point[1],point[2]);
-    const label=nameSprite(username);label.position.set(0,7.2,0);pivot.add(label);scene.add(pivot);actors.push({root:pivot,baseY:point[1]});
+    const label=nameSprite(username);label.position.set(0,7.2,0);pivot.add(label);scene.add(pivot);registerActor(pivot,point,index,place);
   }
   const avatarPromise=Promise.all(DATA.profiles.map(loadAvatar));
   const shots=DATA.plan.camera_shots?.length?DATA.plan.camera_shots:[{time:0,position:[0,45,110],target:[0,4,24],transition:'smooth'},{time:DATA.duration,position:[-25,18,50],target:[0,3,24],transition:'smooth'}];
@@ -206,9 +243,32 @@ function buildHtml(data) {
     const mix=(key)=>new THREE.Vector3(...a[key]).lerp(new THREE.Vector3(...b[key]),alpha);
     const pos=mix('position');pos.y=Math.max(2.5,pos.y);const target=mix('target');camera.position.copy(pos);camera.lookAt(target);camera.updateMatrixWorld(true);
   }
+  // Roblox's public OBJ avatar export has no R15 skeleton. Keep each genuine avatar mesh intact,
+  // but drive a capsule through the furnished map with Rapier gravity/collisions and story-paced motion.
+  function animateActor(actor,t){
+    const cycle=t*1.8+actor.phase,progress=Math.max(0,Math.min(1,t/DATA.duration));
+    const vx=Math.cos(cycle*.48)*actor.stride*.48*1.8;
+    const vz=-Math.sin(cycle*.39+actor.phase)*actor.stride*.55*.39*1.8;
+    const current=actor.body.linvel();
+    actor.body.setLinvel({x:vx,y:current.y,z:vz},true);
+    if(actor.lead&&!actor.jumpApplied&&progress>=.88){actor.body.applyImpulse({x:0,y:16,z:0},true);actor.jumpApplied=true;}
+    actor.root.rotation.y=actor.baseYaw+Math.sin(cycle*.48+actor.phase)*.28;
+    actor.root.rotation.z=Math.sin(cycle*3.4+actor.phase)*.035;
+  }
   window.sceneReady=avatarPromise.then(()=>{renderer.compile(scene,camera);return true;});
   window.renderAt=async(t)=>{
-    cameraAt(t);for(const actor of actors)actor.root.position.y=actor.baseY+Math.abs(Math.sin(t*2.2))*.035;
+    cameraAt(t);for(const actor of actors)animateActor(actor,t);
+    physicsWorld.step();physicsWorld.step();
+    for(const actor of actors){
+      const position=actor.body.translation();
+      actor.root.position.set(position.x,position.y-PHYSICS_ROOT_OFFSET,position.z);
+    }
+    for(const item of dynamicPropInstances){
+      const p=item.body.translation(),r=item.body.rotation(),size=item.part.size;
+      position.set(p.x,p.y,p.z);scale.set(Math.max(.03,size[0]),Math.max(.03,size[1]),Math.max(.03,size[2]));
+      quaternion.set(r.x,r.y,r.z,r.w);matrix.compose(position,quaternion,scale);
+      item.mesh.setMatrixAt(item.index,matrix);item.mesh.instanceMatrix.needsUpdate=true;
+    }
     const active=cues.find(c=>t>=c.start&&t<=c.finish);caption.textContent=active?.text||'';
     renderer.render(scene,camera);await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));return true;
   };
@@ -268,10 +328,12 @@ async function main() {
     await page.waitForFunction(()=>Boolean(window.sceneReady),null,{timeout:120000});
     const ready=await page.evaluate(()=>window.sceneReady);
     if(!ready)throw new Error('3D map and actual Roblox avatars failed to load.');
+    const simulation=await page.evaluate(()=>window.physicsSummary);
+    console.log(`Rapier simulation ready: ${orderedProfiles.length} authentic avatar capsule(s), ${simulation.dynamicProps} dynamic AI prop(s), ${simulation.staticProps} static world collider(s).`);
     ffmpeg=spawn('ffmpeg',['-y','-hide_banner','-loglevel','warning','-f','image2pipe','-vcodec','png','-framerate',String(FPS),'-i','pipe:0','-an','-c:v','libx264','-preset','veryfast','-crf','19','-pix_fmt','yuv420p','-vf','scale=1440:2560:flags=lanczos','-r',String(FPS),'-t',String(args.duration),'-movflags','+faststart',args.output],{stdio:['pipe','ignore','inherit']});
     const ffmpegExit=once(ffmpeg,'close');
     const totalFrames=args.duration*FPS;
-    console.log(`Rendering ${totalFrames} headless 3D frames from the furnished AI map and ${orderedProfiles.length} genuine Roblox avatar(s) (mesh or account-thumbnail source).`);
+    console.log(`Rendering ${totalFrames} headless 3D frames with Rapier gravity/collisions and ${orderedProfiles.length} genuine Roblox avatar(s) (mesh or account-thumbnail source).`);
     for(let frame=0;frame<totalFrames;frame++){
       const time=frame/FPS;
       await page.evaluate(t=>window.renderAt(t),time);

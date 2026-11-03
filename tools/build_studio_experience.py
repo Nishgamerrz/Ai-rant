@@ -208,11 +208,11 @@ def build_scene_parts(plan, cast):
     """Create detailed editable Roblox Part geometry; theme-specific pieces come from the AI plan."""
     parts = []
 
-    def add(name, size, position, color, material="Plastic", shape="Block", yaw=0, transparency=0, collidable=True):
+    def add(name, size, position, color, material="Plastic", shape="Block", yaw=0, transparency=0, collidable=True, anchored=True):
         parts.append({
             "name": str(name), "size": list(size), "position": list(position), "color": list(color),
             "material": material, "shape": shape, "yaw": float(yaw),
-            "transparency": float(transparency), "collidable": bool(collidable),
+            "transparency": float(transparency), "collidable": bool(collidable), "anchored": bool(anchored),
         })
 
     # One theme-colored walkable foundation; roads, terrain, landmarks, and decoration are AI-authored.
@@ -222,7 +222,8 @@ def build_scene_parts(plan, cast):
     # Each AI-authored object becomes a named, editable Roblox Part.
     for index, prop in enumerate(plan.get("props", []), 1):
         add(prop.get("name", f"AI Landmark {index}"), prop["size"], prop["position"],
-            prop.get("color", [135, 165, 205]), prop.get("material", "Plastic"), prop.get("shape", "Block"))
+            prop.get("color", [135, 165, 205]), prop.get("material", "Plastic"), prop.get("shape", "Block"),
+            anchored=prop.get("physics") != "dynamic")
 
     # Make AI landmarks readable at Roblox scale with small facade details around the generated layout.
     for index, prop in enumerate(plan.get("props", []), 1):
@@ -280,7 +281,7 @@ def part_instance(part, referent):
                  "Glass": 1568, "Asphalt": 1376, "Slate": 800}
     shapes = {"Ball": 0, "Block": 1, "Cylinder": 2}
     props = [
-        '<bool name="Anchored">true</bool>',
+        f'<bool name="Anchored">{str(part.get("anchored", True)).lower()}</bool>',
         f'<bool name="CanCollide">{str(part.get("collidable", True)).lower()}</bool>',
         '<bool name="CastShadow">true</bool>',
         color3_element("Color", part["color"]),
@@ -623,7 +624,7 @@ def build(args):
             "1. Download and unzip `Roblox_Studio_Complete_Package.zip`.\n"
             "2. Play `Roblox_2K_YouTube_Short.mp4` directly. It is rendered automatically by the workflow with authentic Roblox avatars (3D meshes where accessible, otherwise the account's real avatar thumbnail), world, camera tour, narration, and visible burned-in captions; you do not need to open Roblox Studio.\n"
             "3. The ZIP also includes `AI_Creation_Summary.txt`, `AI_Design_and_Tools_Report.pdf`, narration audio/subtitles, generation prompts, and an optional editable `Roblox_Studio_Experience.rbxlx` project.\n"
-            "4. The real Roblox avatar is loaded from the username entered in the workflow. The MP4 is a headless Three.js rendering of the generated world, not a capture from a running Roblox client.\n\n"
+            "4. The real Roblox avatar is loaded from the username entered in the workflow. The MP4 is a headless Three.js rendering of the generated world, not a capture from a running Roblox client. Its Rapier simulation adds gravity and world collisions to avatar capsules and AI-marked loose props; eligible small loose props are also unanchored in the editable Roblox place. Avatars use procedural whole-avatar walking, turns, and an ending hop. Public avatar OBJ meshes are unrigged, so this is not native R15 joint animation. If Roblox denies the mesh, the MP4 renders the account’s genuine thumbnail as a moving 2D portrait card, not as a full 3D avatar.\n\n"
             "## Notes\n\n"
             "The workflow renders the MP4 automatically using headless Chromium, Three.js, and FFmpeg; neither Roblox Studio nor Blender needs to be installed or launched. The optional `.rbxlx` project remains editable in Studio. Video validation does not claim a Roblox game-client runtime test.\n"
         )

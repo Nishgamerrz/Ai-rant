@@ -22,10 +22,18 @@ jobs:
       - name: Install workflow parser
         run: python -m pip install PyYAML reportlab
 
-      - name: Set up Node for renderer syntax checks
+      - name: Set up Node for renderer and Rapier physics checks
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
+          cache-dependency-path: tools/video_renderer/package-lock.json
+
+      - name: Install renderer dependencies and smoke-test physics
+        working-directory: tools/video_renderer
+        run: |
+          npm ci --no-audit --no-fund
+          npm run test:physics
 
       - name: Compile Python and run experience tests
         run: |
@@ -43,7 +51,8 @@ jobs:
           match = re.search(r'<script type="module">(.*?)</script>', source, re.S)
           if not match:
               raise SystemExit('renderer HTML module was not found')
-          module = match.group(1).replace('${WIDTH}', '720').replace('${HEIGHT}', '1280')
+          module = (match.group(1).replace('${WIDTH}', '720').replace('${HEIGHT}', '1280')
+                   .replace('${FPS}', '30'))
           Path('/tmp/renderer-module-check.mjs').write_text(module, encoding='utf-8')
           PY
           node --check /tmp/renderer-module-check.mjs
