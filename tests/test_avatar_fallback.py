@@ -15,6 +15,46 @@ from tools.validate_short import avatar_asset_type
 
 
 class AvatarFallbackTests(unittest.TestCase):
+    def test_automatic_legacy_mesh_endpoint_is_tried_after_current_endpoint_403(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            user_id = 12345
+            current_endpoint = f"https://thumbnails.roblox.com/v1/users/avatar-3d?userId={user_id}"
+            legacy_endpoint = f"https://www.roblox.com/avatar-thumbnail-3d/json?userId={user_id}"
+            model_url = "https://t6.rbxcdn.com/avatar-model-json"
+            model_json = {
+                "obj": "obj-hash", "mtl": "mtl-hash", "textures": [],
+                "camera": {"position": {"x": 0, "y": 3, "z": 6}},
+                "aabb": {"min": {"x": -1, "y": 0, "z": -1},
+                         "max": {"x": 1, "y": 5, "z": 1}},
+            }
+
+            def fake_request_json(url, data=None):
+                if url == current_endpoint:
+                    raise HTTPError(url, 403, "Forbidden", None, None)
+                if url == legacy_endpoint:
+                    return {"Url": model_url, "Final": True}
+                if url == model_url:
+                    return model_json
+                raise AssertionError(f"Unexpected JSON request: {url}")
+
+            def fake_request_bytes(url, data=None):
+                if url == fetch_roblox_avatars.cdn_url("obj-hash"):
+                    return b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"
+                if url == fetch_roblox_avatars.cdn_url("mtl-hash"):
+                    return b"newmtl avatar\nKd 1 1 1\n"
+                raise AssertionError(f"Unexpected asset request: {url}")
+
+            with (
+                mock.patch.object(fetch_roblox_avatars, "request_json", side_effect=fake_request_json),
+                mock.patch.object(fetch_roblox_avatars, "request_bytes", side_effect=fake_request_bytes),
+            ):
+                profile = fetch_roblox_avatars.fetch_avatar_model(user_id, Path(temporary))
+
+            self.assertEqual(profile["model_source"], "legacy-avatar-3d")
+            self.assertTrue(profile["model_ready"])
+            self.assertIn("v 0 0 0", Path(profile["model_obj"]).read_text(encoding="utf-8"))
+            self.assertTrue(Path(profile["model_mtl"]).is_file())
+
     def test_pixel_reader_uses_pillows_non_deprecated_api_when_available(self):
         class ImageWithFlattenedPixels:
             def get_flattened_data(self):

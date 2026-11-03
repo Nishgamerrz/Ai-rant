@@ -90,18 +90,56 @@ def profile_from_thumbnail(url: str, output: Path):
     }
 
 
-def fetch_avatar_model(user_id: int, output_dir: Path) -> dict:
-    response = None
-    for attempt in range(6):
-        response = request_json(f"https://thumbnails.roblox.com/v1/users/avatar-3d?userId={user_id}")
-        if response.get("state") == "Completed" and response.get("imageUrl"):
-            break
-        if attempt < 5:
-            time.sleep(1)
-    if not response or response.get("state") != "Completed" or not response.get("imageUrl"):
-        raise RuntimeError("Roblox avatar-3d service did not complete")
+def avatar_model_document_url(user_id: int):
+    """Try Roblox's current endpoint, then its legacy public endpoint without credentials."""
+    endpoints = (
+        ("avatar-3d", f"https://thumbnails.roblox.com/v1/users/avatar-3d?userId={user_id}"),
+        ("legacy-avatar-3d", f"https://www.roblox.com/avatar-thumbnail-3d/json?userId={user_id}"),
+    )
+    failures = []
+    for source, endpoint in endpoints:
+        for attempt in range(6):
+            try:
+                response = request_json(endpoint)
+            except HTTPError as exc:
+                failures.append(f"{source} HTTP {exc.code}")
+                if exc.code in (401, 403, 404) or attempt == 5:
+                    break
+                time.sleep(min(2 ** attempt, 8))
+                continue
+            except (URLError, TimeoutError, OSError, ValueError) as exc:
+                failures.append(f"{source} {type(exc).__name__}")
+                if attempt == 5:
+                    break
+                time.sleep(min(2 ** attempt, 8))
+                continue
 
-    model_data = request_json(response["imageUrl"])
+            if isinstance(response, list):
+                response = response[0] if response and isinstance(response[0], dict) else {}
+            if isinstance(response, dict) and isinstance(response.get("data"), list):
+                response = next((item for item in response["data"] if isinstance(item, dict)), {})
+            if not isinstance(response, dict):
+                failures.append(f"{source} returned an invalid response")
+                break
+
+            model_url = response.get("imageUrl") or response.get("Url") or response.get("url")
+            state = str(response.get("state", "")).casefold()
+            pending = state not in ("", "completed") or response.get("Final") is False or response.get("final") is False
+            if model_url and not pending:
+                return source, model_url
+            if not pending:
+                failures.append(f"{source} returned no model URL")
+                break
+            if attempt < 5:
+                time.sleep(1)
+        # An authentication/permission failure on the current endpoint should
+        # not block an automatic attempt through Roblox's alternate endpoint.
+    raise RuntimeError("Roblox did not provide a public 3D avatar mesh (" + "; ".join(failures) + ")")
+
+
+def fetch_avatar_model(user_id: int, output_dir: Path) -> dict:
+    model_source, model_url = avatar_model_document_url(user_id)
+    model_data = request_json(model_url)
     obj_hash, mtl_hash = model_data.get("obj"), model_data.get("mtl")
     texture_hashes = model_data.get("textures", [])
     if not isinstance(obj_hash, str) or not isinstance(mtl_hash, str) or not isinstance(texture_hashes, list):
@@ -147,7 +185,8 @@ def fetch_avatar_model(user_id: int, output_dir: Path) -> dict:
     center = [(float(low.get(axis, 0)) + float(high.get(axis, 0))) / 2 for axis in ("x", "y", "z")]
     front = [float(camera.get(axis, 0)) - center[index] for index, axis in enumerate(("x", "y", "z"))]
     return {"model_obj": str(obj_path.resolve()), "model_mtl": str(mtl_path.resolve()),
-            "model_ready": True, "texture_count": len(texture_files), "front_direction": front}
+            "model_ready": True, "texture_count": len(texture_files), "front_direction": front,
+            "model_source": model_source}
 
 
 def main() -> None:
@@ -183,7 +222,7 @@ def main() -> None:
                 print(f"Avatar thumbnail color sampling failed for {username}: {type(exc).__name__}.", file=sys.stderr)
             try:
                 profile.update(fetch_avatar_model(user_id, asset_root / str(user_id)))
-                print(f"Fetched full public Roblox avatar mesh and textures for {username} ({profile['texture_count']} textures).")
+                print(f"Fetched Roblox avatar mesh and textures for {username} ({profile['texture_count']} textures; source={profile['model_source']}).")
             except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError, RuntimeError) as exc:
                 thumbnail_path = Path(profile.get("thumbnail", ""))
                 if not thumbnail_path.is_file() or thumbnail_path.stat().st_size == 0:
@@ -193,7 +232,7 @@ def main() -> None:
                     "thumbnail_ready": True,
                     "mesh_error": f"{type(exc).__name__}: {exc}",
                 })
-                print(f"Roblox denied the 3D mesh for {username}; using their real Roblox avatar thumbnail, not a generated substitute.", file=sys.stderr)
+                print(f"Roblox automatic 3D mesh lookup failed for {username} ({exc}); using that account's official thumbnail, not a generated substitute.", file=sys.stderr)
             records.append(profile)
             time.sleep(0.12)
     except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError, RuntimeError) as exc:
