@@ -47,7 +47,7 @@ def paragraphs_for_report(args, output_dir: Path, summary: str):
     story = [Paragraph("AI Roblox Short Build Report", styles["ReportTitle"])]
     story += [Paragraph(f"<b>World:</b> {safe(plan.get('name', 'Untitled world'))}", styles["BodyCustom"]),
               Paragraph(f"<b>Prompt theme:</b> {safe(plan.get('theme', 'Not specified'))}", styles["BodyCustom"]),
-              Paragraph(f"<b>Duration:</b> {args.duration} seconds &nbsp;&nbsp; <b>AI map Parts:</b> {len(props)} &nbsp;&nbsp; <b>Camera shots:</b> {len(shots)}", styles["BodyCustom"]),
+              Paragraph(f"<b>Duration:</b> {args.duration} seconds &nbsp;&nbsp; <b>Furnished map Parts:</b> {len(props)} &nbsp;&nbsp; <b>Camera shots:</b> {len(shots)}", styles["BodyCustom"]),
               Paragraph(f"<b>AI model:</b> {safe(args.model)}", styles["BodyCustom"]),
               Paragraph(f"<b>Voice:</b> {safe(args.voice)}; speech rate {safe(args.rate)}", styles["BodyCustom"])]
     story += [Paragraph("AI-generated creation summary", styles["Section"]),
@@ -55,14 +55,14 @@ def paragraphs_for_report(args, output_dir: Path, summary: str):
     story += [Paragraph("Design choices and deliverables", styles["Section"]),
               Paragraph("The final map and camera plan follow the user-provided theme when present, and use story context only when no theme was supplied. The optional Studio world contains editable Roblox Parts already in Workspace; only eligible AI-marked loose props are unanchored, while structures stay fixed. The MP4 uses authentic Roblox avatars for the required usernames, tries Roblox's 3D mesh endpoint with an optional scoped Open Cloud thumbnails-read key, and falls back to that account's genuine Roblox avatar thumbnail if mesh access is denied; no AI-generated character substitutes are used.", styles["BodyCustom"]),
               Paragraph(f"<b>Cast usernames:</b> {safe(', '.join(map(str, cast)) if cast else 'The current Roblox Player avatar')}", styles["BodyCustom"]),
-              Paragraph("<b>Representative authored Parts:</b> " + safe(", ".join(names) if names else "None listed"), styles["BodyCustom"])]
+              Paragraph("<b>Representative world Parts:</b> " + safe(", ".join(names) if names else "None listed"), styles["BodyCustom"])]
     story += [Paragraph("Tools used", styles["Section"]),
               Paragraph(f"1. Ollama with {safe(args.model)}: story/world/camera planning and the final high-level creation summary.<br/>2. ddgs web search: optional story-background references when available.<br/>3. edge-tts ({safe(args.voice)}, {safe(args.rate)}): slower narration audio and timed SRT subtitles.<br/>4. Roblox public avatar APIs: retrieve authentic usernames' OBJ/MTL meshes and textures when available, or their genuine account avatar thumbnails when mesh access is unavailable.<br/>5. Three.js and headless Chromium: render the furnished 3D scene, run Rapier gravity/collisions, automatically skin fetched avatar OBJ meshes to procedural R15-style joints for limb movement, and burn the readable caption HUD into every frame.<br/>6. FFmpeg: encode the 1440x2560 H.264/AAC MP4 and validate playback.<br/>7. Python map validator, Roblox XML serializer, ReportLab, and zipfile: validation, optional editable Studio place, PDF, and ZIP.", styles["BodyCustom"])]
     if research_lines:
         story += [Paragraph("Optional research references", styles["Section"])]
         story.extend(Paragraph(line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"), styles["BodyCustom"]) for line in research_lines)
     story += [Paragraph("Checks and limitations", styles["Section"]),
-              Paragraph("The workflow builds a vertical MP4 automatically with headless Three.js, Chromium, and FFmpeg; it does not require Roblox Studio or Blender. It verifies the H.264/AAC video, duration, frame size/rate, subtitle cues, and public Roblox avatar mesh or authentic account-thumbnail files. The optional .rbxlx project is packaged for Studio, but the MP4 is rendered from the same AI-authored world using a real-time 3D renderer, not captured from a running Roblox client. Rapier simulates gravity and collisions for avatar capsules and AI-marked loose props against the static world Parts. Public avatar OBJ files are unrigged, so the MP4 automatically assigns procedural R15-style joints and animates arms and legs rather than using native Roblox R15 animation clips. When Roblox denies a mesh, the matching genuine account thumbnail is shown as a moving 2D portrait card, not a full 3D body. Roblox's platform and model output budget impose practical limits; there is no fixed 100-Part cap in the map validator.", styles["BodyCustom"]),
+              Paragraph("The workflow builds a vertical MP4 automatically with headless Three.js, Chromium, and FFmpeg; it does not require Roblox Studio or Blender. It verifies the H.264/AAC video, duration, frame size/rate, subtitle cues, and public Roblox avatar mesh or authentic account-thumbnail files. The optional .rbxlx project is packaged for Studio, and the MP4 renders the same AI-planned, procedurally furnished world using a real-time 3D renderer, not a running Roblox client. Rapier simulates gravity and collisions for avatar capsules and AI-marked loose props against the static world Parts. Public avatar OBJ files are unrigged, so the MP4 automatically assigns procedural R15-style joints and animates arms and legs rather than using native Roblox R15 animation clips. When Roblox denies a mesh, the matching genuine account thumbnail is shown as a moving 2D portrait card, not a full 3D body. Roblox's platform and model output budget impose practical limits; there is no fixed 100-Part cap in the map validator.", styles["BodyCustom"]),
               Paragraph("Reasoning note: this report contains a concise summary of the final design and the tools used, not private internal chain-of-thought.", styles["BodyCustom"])]
     return story
 
@@ -103,7 +103,7 @@ def main():
         raise SystemExit("AI creation summary is empty; refusing to package an incomplete report.")
     pdf = create_pdf(args, output_dir, summary)
     archive = create_zip(output_dir)
-    print(f"Created {pdf} and {archive} with {len(load_json(args.map, {}).get('props', []))} AI-authored map Parts.")
+    print(f"Created {pdf} and {archive} with {len(load_json(args.map, {}).get('props', []))} furnished world Parts.")
 
 
 if __name__ == "__main__":

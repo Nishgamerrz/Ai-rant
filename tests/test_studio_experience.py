@@ -26,6 +26,7 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("treat the user's cue as a required design constraint", workflow)
         self.assertIn("daylight cue means a clearly bright, naturally sunlit daytime world", workflow)
         self.assertIn("ROBLOX_OPEN_CLOUD_API_KEY: ${{ secrets.ROBLOX_OPEN_CLOUD_API_KEY }}", workflow)
+        self.assertIn("public Roblox Users API resolves entered usernames to IDs keylessly", workflow)
         self.assertIn("Mesh access:", workflow)
         renderer_tests = (ROOT / ".github/workflows/studio-experience-tests.yml").read_text(encoding="utf-8")
         self.assertIn("npm run test:avatar-rig", renderer_tests)
@@ -47,10 +48,12 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("medium) SELECTED_MODEL=qwen3:4b", workflow)
         self.assertIn("hard) SELECTED_MODEL=qwen3:8b", workflow)
         self.assertNotIn("qwen3:14b", workflow)
-        self.assertIn("for attempt in 1 2 3 4; do", workflow)
-        self.assertIn("--min-props 120", workflow)
-        self.assertIn("target 200–500", workflow)
-        self.assertIn("retrying attempt $((attempt + 1))/4", workflow)
+        self.assertIn("for attempt in 1 2; do", workflow)
+        self.assertIn("--min-props 8 --target-props 220", workflow)
+        self.assertIn("num_predict:6000", workflow)
+        self.assertIn("--max-time 480", workflow)
+        self.assertIn("--fallback --theme", workflow)
+        self.assertIn("producing at least 220 individually named editable Parts", workflow)
         self.assertIn("Show the public AI build plan and tools", workflow)
         self.assertIn("not private chain-of-thought", workflow)
 
@@ -140,6 +143,7 @@ class StudioExperienceTests(unittest.TestCase):
             self.assertTrue((work / "README.md").exists())
             readme = (work / "README.md").read_text(encoding="utf-8")
             self.assertIn("ROBLOX_OPEN_CLOUD_API_KEY", readme)
+            self.assertIn("public Users API", readme)
             self.assertIn("procedural R15-style skeleton", readme)
             self.assertTrue((work / "World.lua").exists())
 
@@ -169,6 +173,60 @@ class StudioExperienceTests(unittest.TestCase):
             self.assertIn('"dynamic")', generated_lua)
         with self.assertRaises(ValueError):
             validate({**plan, "props": props[:119]}, 60, (), min_props=120)
+
+    def test_compact_ai_blueprint_expands_to_a_large_theme_furnished_map(self):
+        from tools.build_story_map import expand_plan, procedural_fallback_plan, validate
+
+        anchors = [
+            {"name": "Coral Market", "shape": "Block", "material": "Brick", "position": [-45, 7, -70],
+             "size": [34, 14, 30], "color": [210, 115, 130]},
+            {"name": "Tide Hall", "shape": "Block", "material": "Slate", "position": [45, 9, -70],
+             "size": [42, 18, 34], "color": [65, 150, 190]},
+            {"name": "Pearl Workshop", "shape": "Block", "material": "SmoothPlastic", "position": [0, 7, 88],
+             "size": [30, 14, 28], "color": [120, 185, 205]},
+        ]
+        anchors.extend(
+            {"name": f"Reef Story Landmark {index}", "shape": "Block", "material": "SmoothPlastic",
+             "position": [index * 5 - 50, 2, 120 - index * 7], "size": [3, 4, 3], "color": [60, 160, 190]}
+            for index in range(19)
+        )
+        blueprint = validate({"name": "Coral Reef", "theme": "Bright daylight underwater coral reef",
+                              "ground_material": "Slate", "ground_color": [45, 125, 150],
+                              "ambient_color": [140, 210, 225], "props": anchors}, 60, (), min_props=8)
+        expanded = validate(expand_plan(blueprint, 220), 60, (), min_props=220)
+        names = [part["name"] for part in expanded["props"]]
+        self.assertGreaterEqual(len(names), 220)
+        self.assertEqual(len(names), len(set(names)))
+        self.assertTrue(any(name == "Coral Market Interior Floor" for name in names))
+        self.assertTrue(any("Wood Entrance Door" in name for name in names))
+        self.assertTrue(any("Glass Window" in name for name in names))
+        self.assertTrue(any("Welcome Rug" in name for name in names))
+        self.assertTrue(any("Sea Floor Stone" in name for name in names))
+        self.assertGreater(max(abs(part["position"][0]) for part in expanded["props"]), 180)
+        self.assertEqual(expanded["theme"], blueprint["theme"])
+        with tempfile.TemporaryDirectory() as temporary:
+            lua_path = Path(temporary) / "ReefWorld.lua"
+            from tools.build_story_map import emit_lua
+            emit_lua(expanded, lua_path)
+            lua = lua_path.read_text(encoding="utf-8")
+            self.assertIn("{640, 2, 640}", lua)
+            self.assertNotIn("Central Avenue", lua)
+
+        sparse_anchors = [{"name": f"Story Landmark {index}", "shape": "Block", "material": "SmoothPlastic",
+                           "position": [index * 4 - 40, 2, 70 - index * 7], "size": [4, 4, 4],
+                           "color": [80, 160, 200]} for index in range(22)]
+        sparse_plan = validate({"name": "Wildwood", "theme": "Mystery forest", "props": sparse_anchors},
+                               60, (), min_props=8)
+        sparse_world = validate(expand_plan(sparse_plan, 220), 60, (), min_props=220)
+        self.assertTrue(all(any(building in part["name"] for part in sparse_world["props"])
+                            for building in ("Forest Market", "Canopy Hall", "Moss Workshop")))
+
+        fallback = procedural_fallback_plan("daylight", "Friends discover a hidden coral reef.", 60, ["Lead", "Friend"])
+        fallback_world = validate(expand_plan(validate(fallback, 60, ["Lead", "Friend"], 8), 220),
+                                  60, ["Lead", "Friend"], 220)
+        self.assertIn("daylight", fallback_world["theme"])
+        self.assertIn("coral reef", fallback_world["theme"])
+        self.assertEqual(len(fallback_world["character_placements"]), 2)
 
     def test_captions_have_valid_subtitle_and_fallback_cues(self):
         from tools.build_studio_experience import fallback_captions, parse_srt
