@@ -32,6 +32,19 @@ def seconds(timestamp: str) -> float:
     return int(hours) * 3600 + int(minutes) * 60 + float(rest)
 
 
+def avatar_asset_type(profile: dict) -> str | None:
+    """Return the available authentic Roblox source: full mesh or public avatar image."""
+    model = Path(profile.get("model_obj", ""))
+    material = Path(profile.get("model_mtl", ""))
+    if (profile.get("model_ready") and model.is_file() and model.stat().st_size > 0
+            and material.is_file() and material.stat().st_size > 0):
+        return "mesh"
+    thumbnail = Path(profile.get("thumbnail", ""))
+    if profile.get("thumbnail_ready") and thumbnail.is_file() and thumbnail.stat().st_size > 0:
+        return "thumbnail"
+    return None
+
+
 def sample_frame(path: Path, at: float, width: int, height: int) -> None:
     command = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{at:.3f}", "-i", str(path),
@@ -69,6 +82,7 @@ def main() -> None:
 
     cast_count = 0
     avatar_model_count = 0
+    avatar_thumbnail_count = 0
     if args.characters:
         usernames = json.loads(args.characters.read_text(encoding="utf-8"))
         if not isinstance(usernames, list) or any(not isinstance(name, str) for name in usernames):
@@ -78,17 +92,18 @@ def main() -> None:
             fail(f"cast has {cast_count} names; the renderer supports at most 6")
         if usernames:
             if not args.profiles or not args.profiles.is_file():
-                fail("public Roblox avatar model profiles are missing")
+                fail("public Roblox avatar profiles are missing")
             profiles = json.loads(args.profiles.read_text(encoding="utf-8"))
             profiles_by_name = {item.get("username", "").casefold(): item for item in profiles if isinstance(item, dict)}
             for name in usernames:
                 profile = profiles_by_name.get(name.casefold(), {})
-                model = Path(profile.get("model_obj", ""))
-                material = Path(profile.get("model_mtl", ""))
-                if (not profile.get("model_ready") or not model.is_file() or model.stat().st_size == 0
-                        or not material.is_file() or material.stat().st_size == 0):
-                    fail(f"actual Roblox avatar OBJ/MTL assets are missing for {name}")
-            avatar_model_count = cast_count
+                source = avatar_asset_type(profile)
+                if source is None:
+                    fail(f"authentic Roblox avatar mesh and thumbnail are both missing for {name}")
+                if source == "mesh":
+                    avatar_model_count += 1
+                else:
+                    avatar_thumbnail_count += 1
         if args.map_plan:
             map_plan = json.loads(args.map_plan.read_text(encoding="utf-8"))
             placed = {item.get("username", "").casefold() for item in map_plan.get("character_placements", [])
@@ -162,7 +177,7 @@ def main() -> None:
     print(
         f"SHORT APPROVED: {args.video.name}; 1440x2560, {float(fps):g} fps, "
         f"{video_seconds:.2f}s, H.264/AAC, {word_count} narration words, "
-        f"{cast_count} named cast member(s), {avatar_model_count} actual avatar mesh(es) verified, "
+        f"{cast_count} named cast member(s), {avatar_model_count} avatar mesh(es) and {avatar_thumbnail_count} Roblox avatar thumbnail(s) verified, "
         f"{len(cues)} caption cues, "
         "full decode and 3 visual samples passed."
     )
@@ -174,7 +189,7 @@ def main() -> None:
                 f"- Video: `{args.video.name}` (1440×2560, 30 fps, {video_seconds:.2f}s)\n"
                 f"- Codecs: H.264 video and AAC audio\n"
                 f"- Narration: {word_count}/{max_words} words; {len(cues)} timed caption cues\n"
-                f"- Named cast members: {cast_count}; actual avatar meshes verified: {avatar_model_count}\n"
+                f"- Named cast members: {cast_count}; authentic avatar meshes: {avatar_model_count}; account thumbnails: {avatar_thumbnail_count}\n"
                 f"- Full decode and 3 nonblank visual samples passed\n"
             )
 

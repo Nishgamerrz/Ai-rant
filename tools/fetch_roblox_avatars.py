@@ -150,10 +150,7 @@ def main() -> None:
     usernames_path, output_path, asset_root = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
     usernames = json.loads(usernames_path.read_text(encoding="utf-8"))
     if not usernames:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text("[]\n", encoding="utf-8")
-        print("No usernames supplied; the renderer will generate a default story character.")
-        return
+        raise SystemExit("At least one public Roblox username is required to render a real avatar in the MP4.")
 
     try:
         result = request_json(
@@ -178,9 +175,20 @@ def main() -> None:
                     profile.update(profile_from_thumbnail(thumb, asset_root / str(user_id) / "avatar.png"))
             except Exception as exc:
                 print(f"Avatar thumbnail color sampling failed for {username}: {type(exc).__name__}.", file=sys.stderr)
-            profile.update(fetch_avatar_model(user_id, asset_root / str(user_id)))
+            try:
+                profile.update(fetch_avatar_model(user_id, asset_root / str(user_id)))
+                print(f"Fetched full public Roblox avatar mesh and textures for {username} ({profile['texture_count']} textures).")
+            except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError, RuntimeError) as exc:
+                thumbnail_path = Path(profile.get("thumbnail", ""))
+                if not thumbnail_path.is_file() or thumbnail_path.stat().st_size == 0:
+                    raise RuntimeError(f"Roblox mesh access failed and no real avatar thumbnail is available for {username}: {exc}") from exc
+                profile.update({
+                    "model_ready": False,
+                    "thumbnail_ready": True,
+                    "mesh_error": f"{type(exc).__name__}: {exc}",
+                })
+                print(f"Roblox denied the 3D mesh for {username}; using their real Roblox avatar thumbnail, not a generated substitute.", file=sys.stderr)
             records.append(profile)
-            print(f"Fetched full public Roblox avatar mesh and textures for {username} ({profile['texture_count']} textures).")
             time.sleep(0.12)
     except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError, RuntimeError) as exc:
         raise SystemExit(f"Could not prepare the actual Roblox avatar(s); no approximate-avatar video will be uploaded: {exc}") from exc
