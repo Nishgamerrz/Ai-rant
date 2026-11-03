@@ -105,6 +105,7 @@ jobs:
                   '- **Tools:** selected Ollama model, Roblox public avatar APIs, optional web research, edge-tts, Three.js + Rapier, Chromium, FFmpeg, Python validation, ReportLab, ZIP.\n'
                   '- **Pipeline:** story and furnished world/camera plan → narration/captions → physics-enabled MP4 + Studio project → quality checks and package.\n'
                   '- **Avatar source:** the named account’s real mesh when Roblox allows it; otherwise that same account’s official avatar thumbnail.\n'
+                  '- **Mesh access:** optional scoped ROBLOX_OPEN_CLOUD_API_KEY secret (Roblox thumbnails read permission); the value is never logged.\n'
                   '- **Prompt/tool records:** successful runs include generation prompts and final summaries in the downloadable artifact.\n'
               )
           print('Added a safe public build plan and tool list to the Actions run summary; private reasoning is not exposed.')
@@ -209,6 +210,8 @@ jobs:
           key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'hard' && 'qwen3-8b-v3' || 'qwen3-v2' }}
 
       - name: Download authentic Roblox avatar assets for the short
+        env:
+          ROBLOX_OPEN_CLOUD_API_KEY: ${{ secrets.ROBLOX_OPEN_CLOUD_API_KEY }}
         run: |
           python tools/fetch_roblox_avatars.py dist/characters.json dist/avatar_profiles.json dist/avatar-assets
           test "$(jq 'length' dist/avatar_profiles.json)" -eq "$(jq 'length' dist/characters.json)"
