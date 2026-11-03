@@ -27,6 +27,8 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("daylight cue means a clearly bright, naturally sunlit daytime world", workflow)
         self.assertIn("ROBLOX_OPEN_CLOUD_API_KEY: ${{ secrets.ROBLOX_OPEN_CLOUD_API_KEY }}", workflow)
         self.assertIn("Mesh access:", workflow)
+        renderer_tests = (ROOT / ".github/workflows/studio-experience-tests.yml").read_text(encoding="utf-8")
+        self.assertIn("npm run test:avatar-rig", renderer_tests)
         self.assertIn("uses: actions/cache/restore@v4", workflow)
         disk_cleanup_step = workflow.index("- name: Reclaim runner disk space for the selected model")
         cache_restore_step = workflow.index("- name: Restore cached selected Ollama model")
@@ -55,15 +57,20 @@ class StudioExperienceTests(unittest.TestCase):
     def test_mp4_renderer_applies_procedural_motion_to_authentic_avatar_models(self):
         renderer = (ROOT / "tools/video_renderer/render_short.mjs").read_text(encoding="utf-8")
         report = (ROOT / "tools/package_studio_deliverables.py").read_text(encoding="utf-8")
+        renderer_package = json.loads((ROOT / "tools/video_renderer/package.json").read_text(encoding="utf-8"))
+        self.assertIn("test:avatar-rig", renderer_package["scripts"])
         self.assertIn("function animateActor(actor,t)", renderer)
         self.assertIn("actor.root.rotation.y", renderer)
         self.assertIn("story-paced motion", renderer)
         self.assertIn("await RAPIER.init()", renderer)
         self.assertIn("physicsWorld.step();physicsWorld.step();", renderer)
         self.assertIn("dynamicPropInstances", renderer)
+        self.assertIn("buildAvatarRig", renderer)
+        self.assertIn("animateAvatarRig", renderer)
+        self.assertIn("Automatic avatar limb rigs", renderer)
         self.assertIn("DATA.plan.ground_color", renderer)
         self.assertIn("horizon.position.y=-.08", renderer)
-        self.assertIn("rather than native R15 joint animations", report)
+        self.assertIn("rather than using native Roblox R15 animation clips", report)
 
     def test_builder_packages_playable_place_with_world_cast_and_captions(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -131,7 +138,9 @@ class StudioExperienceTests(unittest.TestCase):
             self.assertNotIn('motor.Transform', client.text)
             self.assertNotIn('Story Lead Torso', server.text)
             self.assertTrue((work / "README.md").exists())
-            self.assertIn("ROBLOX_OPEN_CLOUD_API_KEY", (work / "README.md").read_text(encoding="utf-8"))
+            readme = (work / "README.md").read_text(encoding="utf-8")
+            self.assertIn("ROBLOX_OPEN_CLOUD_API_KEY", readme)
+            self.assertIn("procedural R15-style skeleton", readme)
             self.assertTrue((work / "World.lua").exists())
 
     def test_prompt_themed_map_requires_full_ai_authored_scene(self):

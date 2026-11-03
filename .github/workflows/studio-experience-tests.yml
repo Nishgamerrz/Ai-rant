@@ -34,6 +34,7 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npm run test:physics
+          npm run test:avatar-rig
 
       - name: Compile Python and run experience tests
         run: |
