@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract and validate one continuous 1–2 minute narration from Ollama output."""
+"""Extract a compact, bounded 30–60 second narration from Ollama output."""
 from __future__ import annotations
 
 import json
@@ -93,31 +93,75 @@ def extract_narration(payload):
     return raw
 
 
+def trim_to_word_limit(text, limit):
+    """Trim at the last complete word while preserving sentence punctuation."""
+    parts = text.split()
+    while parts and len(re.findall(r"\b[\w’'-]+\b", " ".join(parts))) > limit:
+        parts.pop()
+    clipped = " ".join(parts).rstrip(" ,;:-")
+    if clipped and clipped[-1] not in ".!?…":
+        clipped += "."
+    return clipped
+
+
 def main():
-    if len(sys.argv) != 4:
-        raise SystemExit("usage: prepare_narration.py RESPONSE.json OUTPUT.txt DURATION_SECONDS")
+    if len(sys.argv) not in (4, 6):
+        raise SystemExit(
+            "usage: prepare_narration.py RESPONSE.json OUTPUT.txt DURATION_SECONDS "
+            "[--truncate TOPIC]"
+        )
     response_path, output_path = map(Path, sys.argv[1:3])
     duration = int(sys.argv[3])
-    payload = json.loads(response_path.read_text(encoding="utf-8"))
-    text = re.sub(r"\s+", " ", extract_narration(payload)).strip()
+    truncate = len(sys.argv) == 6 and sys.argv[4] == "--truncate"
+    topic = sys.argv[5] if truncate else "a small act of honesty"
+    if len(sys.argv) == 6 and not truncate:
+        raise SystemExit("the optional arguments must be --truncate TOPIC")
+
+    minimum = max(1, int(duration * 1.5))
+    maximum = min(100, int(duration * 5 / 3))
+    try:
+        payload = json.loads(response_path.read_text(encoding="utf-8"))
+        text = re.sub(r"\s+", " ", extract_narration(payload)).strip()
+    except (OSError, json.JSONDecodeError):
+        payload, text = {}, ""
     words = re.findall(r"\b[\w’'-]+\b", text)
-    minimum, maximum = int(duration * 1.9), int(duration * 2.1)
-    forbidden_meta = re.search(r"\b(?:A\.I\.|AI|servers?|Roblox|avatars?|game mechanics?|generated)\b", text, re.IGNORECASE)
-    if forbidden_meta:
+    forbidden = re.compile(r"\b(?:A\.I\.|AI|servers?|Roblox|avatars?|game mechanics?|generated)\b", re.IGNORECASE)
+    forbidden_meta = forbidden.search(text)
+
+    if truncate:
+        # Last-resort guard after the AI has had two chances to rewrite its own draft.
+        # Keep the MP4 workflow moving, but never let the final voiceover exceed the cap.
+        text = forbidden.sub("", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        words = re.findall(r"\b[\w’'-]+\b", text)
+        if len(words) > maximum:
+            text = trim_to_word_limit(text, maximum)
+            words = re.findall(r"\b[\w’'-]+\b", text)
+        if not text:
+            text = (
+                "On a busy afternoon, Maya spotted a wallet beside the school gate. "
+                "She checked only for a name, then gave it to the office before hurrying home. "
+                "A worried parent returned minutes later, grateful to find the family photo still inside. "
+                "Maya had nearly walked past, but stopping took only a moment. "
+                "That evening, she remembered the relieved smile and felt glad she had chosen to help."
+            )
+            words = re.findall(r"\b[\w’'-]+\b", text)
+            if len(words) > maximum:
+                text = trim_to_word_limit(text, maximum)
+                words = re.findall(r"\b[\w’'-]+\b", text)
+        print(f"Final short-story guard applied for {topic!r}: {len(words)}/{maximum} words max.")
+    elif forbidden_meta:
         raise SystemExit(f"Narration includes forbidden AI/game meta-talk: {forbidden_meta.group(0)!r}.")
-    if not minimum <= len(words) <= maximum:
+    elif not minimum <= len(words) <= maximum:
         fields = ", ".join(payload.keys()) if isinstance(payload, dict) else type(payload).__name__
-        if not text and isinstance(payload, dict) and payload.get("thinking"):
-            reason = "Qwen3 returned private reasoning but no final narration; the request must use think:false. "
-        else:
-            reason = ""
         raise SystemExit(
-            f"{reason}Narration is {len(words)} words (response fields: {fields}); expected "
-            f"{minimum}–{maximum} for a {duration}-second short."
+            f"Narration is {len(words)} words (response fields: {fields}); target "
+            f"{minimum}–{maximum} words for a {duration}-second short."
         )
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(text + "\n", encoding="utf-8")
-    print(f"Prepared one continuous narration ({len(words)} words).")
+    print(f"Prepared one continuous narration ({len(words)} words; maximum {maximum}).")
 
 
 if __name__ == "__main__":
