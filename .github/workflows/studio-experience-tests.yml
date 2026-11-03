@@ -1,0 +1,50 @@
+name: Validate Roblox Studio experience generator
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install workflow parser
+        run: python -m pip install PyYAML reportlab
+
+      - name: Compile Python and run experience tests
+        run: |
+          python -m py_compile tools/*.py tests/*.py
+          python -m unittest discover -s tests -v
+          git diff --check
+
+      - name: Validate workflow YAML and embedded Bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          import yaml
+
+          for workflow_path in Path('.github/workflows').glob('*.yml'):
+              workflow = yaml.safe_load(workflow_path.read_text(encoding='utf-8'))
+              for job in workflow.get('jobs', {}).values():
+                  for index, step in enumerate(job.get('steps', [])):
+                      script = step.get('run')
+                      if not script:
+                          continue
+                      result = subprocess.run(['bash', '-n'], input=script, text=True,
+                                              capture_output=True, check=False)
+                      if result.returncode:
+                          raise SystemExit(f'{workflow_path}: step {step.get("name", index)}: {result.stderr}')
+          print('Workflow YAML and embedded Bash syntax passed.')
+          PY

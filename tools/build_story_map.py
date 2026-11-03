@@ -15,9 +15,9 @@ SHAPES = {"Block", "Ball", "Cylinder"}
 def default_plan():
     return {
         "name": "Neon City Plaza",
-        "theme": "A colorful night-time Roblox city plaza with a central showcase stage.",
-        "ground_color": [37, 47, 65],
-        "ambient_color": [135, 155, 205],
+        "theme": "A bright daytime Roblox city plaza with colorful shops, trees, and a central showcase stage.",
+        "ground_color": [88, 166, 91],
+        "ambient_color": [185, 205, 225],
         "props": [
             {"name": "North Tower", "shape": "Block", "material": "Glass", "position": [-55, 20, -58], "size": [24, 40, 24], "color": [65, 100, 160]},
             {"name": "South Tower", "shape": "Block", "material": "Glass", "position": [58, 25, -50], "size": [28, 50, 26], "color": [90, 75, 160]},
@@ -74,9 +74,9 @@ def normalize_camera_shots(shots, duration):
         for vector in (pos, target):
             if (not isinstance(vector, list) or len(vector) != 3
                     or any(isinstance(v, bool) or not isinstance(v, (int, float))
-                           or not -120 <= v <= 120 for v in vector)):
+                           or not -300 <= v <= 300 for v in vector)):
                 return default_camera_shots(duration)
-        if transition not in {"smooth", "snap"}:
+        if not isinstance(transition, str) or transition not in {"smooth", "snap"}:
             transition = "smooth"
         clean.append({
             "time": round(float(time), 2),
@@ -141,12 +141,12 @@ def normalize_character_placements(raw, usernames):
     return placements
 
 
-def validate(plan, duration=90, usernames=()):
+def validate(plan, duration=90, usernames=(), min_props=16):
     if not isinstance(plan, dict):
         raise ValueError("map plan must be an object")
     props = plan.get("props")
-    if not isinstance(props, list) or not 10 <= len(props) <= 36:
-        raise ValueError("map must contain 10 to 36 props")
+    if not isinstance(props, list) or len(props) < min_props:
+        raise ValueError(f"map must contain at least {min_props} detailed props; there is no fixed upper cap")
     name = plan.get("name", "Roblox Story Map")
     if not isinstance(name, str):
         name = "Roblox Story Map"
@@ -163,26 +163,31 @@ def validate(plan, duration=90, usernames=()):
         return value
 
     clean_props = []
+    unique_prop_names = set()
     for index, prop in enumerate(props):
         if not isinstance(prop, dict):
             raise ValueError("every map prop must be an object")
         shape = prop.get("shape", "Block")
         material = prop.get("material", "SmoothPlastic")
         pos, size = prop.get("position"), prop.get("size")
-        if shape not in SHAPES or material not in MATERIALS:
+        if not isinstance(shape, str) or shape not in SHAPES or not isinstance(material, str) or material not in MATERIALS:
             raise ValueError("map prop has an unsupported shape or material")
         if (not isinstance(pos, list) or len(pos) != 3
-                or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not -85 <= v <= 85 for v in pos)):
-            raise ValueError("prop position must be three coordinates from -85 to 85")
+                or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not -250 <= v <= 250 for v in pos)):
+            raise ValueError("prop position must be three coordinates from -250 to 250")
         if (not isinstance(size, list) or len(size) != 3
-                or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.5 <= v <= 60 for v in size)):
-            raise ValueError("prop size must be three dimensions from 0.5 to 60")
-        if abs(pos[0]) + size[0] / 2 > 89 or abs(pos[2]) + size[2] / 2 > 89:
-            raise ValueError("prop footprint must fit on the walkable map platform")
+                or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.5 <= v <= 120 for v in size)):
+            raise ValueError("prop size must be three dimensions from 0.5 to 120")
+        if abs(pos[0]) + size[0] / 2 > 320 or abs(pos[2]) + size[2] / 2 > 320:
+            raise ValueError("prop footprint must fit on the 640-stud world platform")
         prop_name = prop.get("name", f"Map Prop {index + 1}")
         if not isinstance(prop_name, str):
             prop_name = f"Map Prop {index + 1}"
         prop_name = re.sub(r"[^A-Za-z0-9 _-]", "", prop_name).strip()[:40] or f"Map Prop {index + 1}"
+        name_key = prop_name.casefold()
+        if name_key in unique_prop_names:
+            raise ValueError(f"map prop names must be unique: {prop_name!r}")
+        unique_prop_names.add(name_key)
         clean_props.append({
             "name": prop_name, "shape": shape, "material": material,
             "position": [round(float(v), 2) for v in pos],
@@ -191,8 +196,9 @@ def validate(plan, duration=90, usernames=()):
         })
     return {
         "name": name, "theme": theme,
-        "ground_color": color(plan.get("ground_color"), [50, 60, 75]),
-        "ambient_color": color(plan.get("ambient_color"), [145, 160, 195]),
+        "ground_color": color(plan.get("ground_color"), [88, 166, 91]),
+        "ground_material": plan.get("ground_material") if isinstance(plan.get("ground_material"), str) and plan.get("ground_material") in MATERIALS else "Grass",
+        "ambient_color": color(plan.get("ambient_color"), [185, 205, 225]),
         "props": clean_props,
         "camera_shots": normalize_camera_shots(plan.get("camera_shots"), duration),
         "character_placements": normalize_character_placements(plan.get("character_placements"), usernames),
@@ -271,6 +277,8 @@ def main():
     parser.add_argument("destination", type=Path)
     parser.add_argument("duration", type=float)
     parser.add_argument("--json-only", action="store_true")
+    parser.add_argument("--strict", action="store_true", help="fail instead of silently substituting the fallback map")
+    parser.add_argument("--min-props", type=int, default=16, help="minimum AI-authored props required")
     parser.add_argument("--usernames", type=Path, help="JSON file containing the ordered Roblox cast")
     args = parser.parse_args()
     source, destination, duration = args.source, args.destination, args.duration
@@ -281,9 +289,14 @@ def main():
     if not 30 <= duration <= 60:
         raise SystemExit("duration must be 30 to 60 seconds")
     try:
-        plan = validate(decode_response(source), duration, usernames)
+        raw_plan = decode_response(source)
+        if args.strict and (not isinstance(raw_plan, dict) or not isinstance(raw_plan.get("theme"), str) or not raw_plan["theme"].strip()):
+            raise ValueError("AI map must include a non-empty prompt-specific theme description")
+        plan = validate(raw_plan, duration, usernames, args.min_props)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
-        print(f"Invalid AI map plan ({exc}); using a complete Roblox city-plaza map.", file=sys.stderr)
+        if args.strict:
+            raise SystemExit(f"Invalid AI map plan: {exc}") from exc
+        print(f"Invalid AI map plan ({exc}); using the complete fallback map.", file=sys.stderr)
         plan = validate(default_plan(), duration, usernames)
     json_path = destination if json_only else destination.with_suffix(".json")
     if not json_only:
