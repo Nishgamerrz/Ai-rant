@@ -32,8 +32,8 @@ on:
           - medium
           - hard
       character_usernames:
-        description: 'Required: comma-separated Roblox usernames for authentic avatar meshes or account thumbnails (first is lead; max 6)'
-        required: true
+        description: 'Enter 1–6 Roblox usernames (required for authentic MP4 avatars; first is lead).'
+        required: false
         default: ''
         type: string
       voice_style:
@@ -61,6 +61,18 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Require a real Roblox username for the MP4 avatar cast
+        env:
+          ROBLOX_USERNAMES: ${{ inputs.character_usernames }}
+        run: |
+          mkdir -p dist
+          python tools/parse_roblox_usernames.py "$ROBLOX_USERNAMES" dist/characters.json
+          CAST_NAMES=$(jq -r 'join(", ")' dist/characters.json)
+          echo "CAST_NAMES=$CAST_NAMES" >> "$GITHUB_ENV"
+          echo "CHARACTER_USERNAMES_JSON=$(jq -c . dist/characters.json)" >> "$GITHUB_ENV"
+          echo "Cast usernames: ${CAST_NAMES:-none supplied}"
+          test "$(jq 'length' dist/characters.json)" -ge 1 || { echo "Enter at least one real Roblox username; the MP4 uses that account's authentic Roblox avatar." >&2; exit 1; }
 
       - name: Install AI, research, narration, and report tools
         run: |
@@ -110,18 +122,6 @@ jobs:
             echo "- Model: $SELECTED_MODEL (thinking=$THINK_MODE)"
             echo "- Used for story and map/camera planning."
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Require a real Roblox username for the MP4 avatar cast
-        env:
-          ROBLOX_USERNAMES: ${{ inputs.character_usernames }}
-        run: |
-          mkdir -p dist
-          python tools/parse_roblox_usernames.py "$ROBLOX_USERNAMES" dist/characters.json
-          CAST_NAMES=$(jq -r 'join(", ")' dist/characters.json)
-          echo "CAST_NAMES=$CAST_NAMES" >> "$GITHUB_ENV"
-          echo "CHARACTER_USERNAMES_JSON=$(jq -c . dist/characters.json)" >> "$GITHUB_ENV"
-          echo "Cast usernames: ${CAST_NAMES:-none supplied}"
-          test "$(jq 'length' dist/characters.json)" -ge 1 || { echo "Enter at least one real Roblox username; the MP4 uses that account's authentic Roblox avatar." >&2; exit 1; }
 
       - name: Download authentic Roblox avatar assets for the short
         run: |
