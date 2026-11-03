@@ -13,6 +13,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class StudioExperienceTests(unittest.TestCase):
+    def test_mobile_workflow_form_hides_manual_audio_id_and_supports_auto_or_explicit_theme(self):
+        workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
+        self.assertNotIn("narration_audio_asset_id", workflow)
+        self.assertNotIn("--audio-asset-id \"$NARRATION_AUDIO_ASSET_ID\"", workflow)
+        self.assertIn("Optional theme cue (e.g., daylight); blank = AI derives it from your story.", workflow)
+        self.assertIn('"${WORLD_THEME:-AUTO FROM STORY}"', workflow)
+        self.assertIn("treat the user's cue as a required design constraint", workflow)
+        self.assertIn("daylight cue means a clearly bright, naturally sunlit daytime world", workflow)
+
     def test_builder_packages_playable_place_with_world_cast_and_captions(self):
         with tempfile.TemporaryDirectory() as temporary:
             work = Path(temporary)
