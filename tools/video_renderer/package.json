@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "render": "node render_short.mjs",
-    "test:physics": "node physics_smoke_test.mjs"
+    "test:physics": "node physics_smoke_test.mjs",
+    "test:avatar-rig": "node avatar_rig_smoke_test.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "0.21.0",

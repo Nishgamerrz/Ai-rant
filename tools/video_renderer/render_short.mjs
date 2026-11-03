@@ -74,6 +74,7 @@ function buildHtml(data) {
   import RAPIER from '/modules/@dimforge/rapier3d-compat/dist/rapier.mjs';
   import { OBJLoader } from '/modules/three/examples/jsm/loaders/OBJLoader.js';
   import { MTLLoader } from '/modules/three/examples/jsm/loaders/MTLLoader.js';
+  import { animateAvatarRig, buildAvatarRig } from '/avatar_rig.mjs';
   const DATA=JSON.parse(document.getElementById('render-data').textContent);
   await RAPIER.init();
   const physicsWorld=new RAPIER.World({x:0,y:-18,z:0});physicsWorld.timestep=1/60;
@@ -186,7 +187,7 @@ function buildHtml(data) {
   const title=document.getElementById('title'),theme=document.getElementById('theme'),caption=document.getElementById('caption');
   title.textContent=(DATA.plan.name||'STORY WORLD').toUpperCase(); theme.textContent=DATA.plan.theme||'';
   const actors=[];
-  function registerActor(root,point,index,placement){
+  function registerActor(root,point,index,placement,rig=null){
     const lead=placement?.role==='lead'||index===0;
     const body=physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
       .setTranslation(Number(point[0]),Number(point[1])+PHYSICS_ROOT_OFFSET,Number(point[2]))
@@ -194,7 +195,7 @@ function buildHtml(data) {
     physicsWorld.createCollider(RAPIER.ColliderDesc.capsule(ACTOR_CAPSULE_HALF_HEIGHT,ACTOR_CAPSULE_RADIUS)
       .setFriction(.95).setRestitution(0),body);
     actors.push({root,body,baseX:Number(point[0]),baseY:Number(point[1]),baseZ:Number(point[2]),
-      phase:index*1.73,lead,stride:lead?2.1:1.15,baseYaw:0,jumpApplied:false});
+      phase:index*1.73,lead,stride:lead?2.1:1.15,baseYaw:0,jumpApplied:false,rig});
   }
   function nameSprite(text){
     const canvas=document.createElement('canvas'); canvas.width=512;canvas.height=96;const ctx=canvas.getContext('2d');
@@ -230,8 +231,17 @@ function buildHtml(data) {
     const pivot=new THREE.Group();pivot.name='AuthenticRobloxAvatar_'+username;
     const avatarScale=6.2/size.y;model.scale.setScalar(avatarScale);model.position.set(-((bounds.min.x+bounds.max.x)/2)*avatarScale,-bounds.min.y*avatarScale,-((bounds.min.z+bounds.max.z)/2)*avatarScale);
     model.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true;if(o.material){const ms=Array.isArray(o.material)?o.material:[o.material];for(const m of ms){m.side=THREE.DoubleSide;m.needsUpdate=true;}}}});
-    pivot.add(model);pivot.position.set(point[0],point[1],point[2]);
-    const label=nameSprite(username);label.position.set(0,7.2,0);pivot.add(label);scene.add(pivot);registerActor(pivot,point,index,place);
+    let avatarRig=null;
+    try{
+      avatarRig=buildAvatarRig(THREE,model);
+      pivot.add(avatarRig.root);
+      console.log('Automatically skinned '+username+' authentic Roblox mesh to '+avatarRig.skeleton.bones.length+' procedural joints.');
+    }catch(error){
+      console.warn('Automatic limb rig failed for '+username+'; keeping the authentic mesh with whole-avatar motion:',error.message);
+      pivot.add(model);
+    }
+    pivot.position.set(point[0],point[1],point[2]);
+    const label=nameSprite(username);label.position.set(0,7.2,0);pivot.add(label);scene.add(pivot);registerActor(pivot,point,index,place,avatarRig?.bones||null);
   }
   const avatarPromise=Promise.all(DATA.profiles.map(loadAvatar));
   const shots=DATA.plan.camera_shots?.length?DATA.plan.camera_shots:[{time:0,position:[0,45,110],target:[0,4,24],transition:'smooth'},{time:DATA.duration,position:[-25,18,50],target:[0,3,24],transition:'smooth'}];
@@ -254,8 +264,13 @@ function buildHtml(data) {
     if(actor.lead&&!actor.jumpApplied&&progress>=.88){actor.body.applyImpulse({x:0,y:16,z:0},true);actor.jumpApplied=true;}
     actor.root.rotation.y=actor.baseYaw+Math.sin(cycle*.48+actor.phase)*.28;
     actor.root.rotation.z=Math.sin(cycle*3.4+actor.phase)*.035;
+    const jumpPose=actor.lead?Math.max(0,Math.sin(Math.PI*Math.max(0,Math.min(1,(progress-.88)/.12)))):0;
+    if(actor.rig)animateAvatarRig(actor.rig,t,actor.phase,jumpPose);
   }
-  window.sceneReady=avatarPromise.then(()=>{renderer.compile(scene,camera);return true;});
+  window.sceneReady=avatarPromise.then(()=>{
+    window.avatarRigSummary={total:actors.length,rigged:actors.filter(actor=>actor.rig).length};
+    renderer.compile(scene,camera);return true;
+  });
   window.renderAt=async(t)=>{
     cameraAt(t);for(const actor of actors)animateActor(actor,t);
     physicsWorld.step();physicsWorld.step();
@@ -285,6 +300,7 @@ function createStaticServer(html, avatarRoot) {
   return createServer((request, response) => {
     const pathname = decodeURIComponent(new URL(request.url, 'http://127.0.0.1').pathname);
     if (pathname === '/') { response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); response.end(html); return; }
+    if (pathname === '/avatar_rig.mjs') { serveFile(response, join(ROOT, 'avatar_rig.mjs')); return; }
     if (pathname.startsWith('/modules/')) {
       const path = resolve(ROOT, 'node_modules', normalize(pathname.slice('/modules/'.length)));
       if (!path.startsWith(resolve(ROOT, 'node_modules') + '/')) { response.writeHead(403); response.end(); return; }
@@ -329,7 +345,9 @@ async function main() {
     const ready=await page.evaluate(()=>window.sceneReady);
     if(!ready)throw new Error('3D map and actual Roblox avatars failed to load.');
     const simulation=await page.evaluate(()=>window.physicsSummary);
+    const avatarRigging=await page.evaluate(()=>window.avatarRigSummary);
     console.log(`Rapier simulation ready: ${orderedProfiles.length} authentic avatar capsule(s), ${simulation.dynamicProps} dynamic AI prop(s), ${simulation.staticProps} static world collider(s).`);
+    console.log(`Automatic avatar limb rigs: ${avatarRigging.rigged}/${avatarRigging.total} authentic 3D mesh(es) skinned to procedural R15-style joints; portrait fallbacks cannot animate limbs.`);
     ffmpeg=spawn('ffmpeg',['-y','-hide_banner','-loglevel','warning','-f','image2pipe','-vcodec','png','-framerate',String(FPS),'-i','pipe:0','-an','-c:v','libx264','-preset','veryfast','-crf','19','-pix_fmt','yuv420p','-vf','scale=1440:2560:flags=lanczos','-r',String(FPS),'-t',String(args.duration),'-movflags','+faststart',args.output],{stdio:['pipe','ignore','inherit']});
     const ffmpegExit=once(ffmpeg,'close');
     const totalFrames=args.duration*FPS;
