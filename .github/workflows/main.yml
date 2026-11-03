@@ -23,7 +23,7 @@ on:
           - '45'
           - '60'
       model_quality:
-        description: 'Model size/detail: fast 1.7B, medium 4B, hard 14B (most detailed; slowest and largest)'
+        description: 'Model size/detail: fast 1.7B, medium 4B, hard 8B (most detailed; slower than fast/medium)'
         required: true
         default: 'medium'
         type: choice
@@ -149,13 +149,13 @@ jobs:
           echo "Free storage after cleanup: ${AVAILABLE_GIB} GiB."
           CACHE_RESTORE_ALLOWED=true
           if [ "$MODEL_QUALITY" = "hard" ]; then
-            if [ "$AVAILABLE_KB" -lt $((12 * 1024 * 1024)) ]; then
-              echo "Only ${AVAILABLE_GIB} GiB is free after cleanup; the 9.3 GB hard model needs at least 12 GiB for download and working files." >&2
+            if [ "$AVAILABLE_KB" -lt $((8 * 1024 * 1024)) ]; then
+              echo "Only ${AVAILABLE_GIB} GiB is free after cleanup; the 5.2 GB hard model needs at least 8 GiB for download and working files." >&2
               exit 1
             fi
-            if [ "$AVAILABLE_KB" -lt $((20 * 1024 * 1024)) ]; then
+            if [ "$AVAILABLE_KB" -lt $((12 * 1024 * 1024)) ]; then
               CACHE_RESTORE_ALLOWED=false
-              echo "Less than 20 GiB is free; skipping the large model-cache archive to avoid exhausting runner storage."
+              echo "Less than 12 GiB is free; skipping the hard-model cache archive to avoid exhausting runner storage."
             fi
           fi
           echo "cache_restore_allowed=$CACHE_RESTORE_ALLOWED" >> "$GITHUB_OUTPUT"
@@ -166,7 +166,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.ollama/models
-          key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-qwen3-v2
+          key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'hard' && 'qwen3-8b-v3' || 'qwen3-v2' }}
 
       - name: Download the selected AI model for story and world/camera planning
         env:
@@ -185,7 +185,7 @@ jobs:
           case "$MODEL_QUALITY" in
             fast) SELECTED_MODEL=qwen3:1.7b ;;
             medium) SELECTED_MODEL=qwen3:4b ;;
-            hard) SELECTED_MODEL=qwen3:14b ;;
+            hard) SELECTED_MODEL=qwen3:8b ;;
             *) echo "Unknown model quality: $MODEL_QUALITY" >&2; exit 1 ;;
           esac
           echo "AI_MODEL=$SELECTED_MODEL" >> "$GITHUB_ENV"
@@ -198,7 +198,7 @@ jobs:
             echo "- Model: $SELECTED_MODEL"
             echo "- Restored preset cache: ${MODEL_CACHE_HIT:-false}"
             echo "- Used for story and map/camera planning."
-            echo "- The selected preset has a separate Ollama model cache; fast uses only qwen3:1.7b, medium qwen3:4b, and hard qwen3:14b."
+            echo "- The selected preset has a separate Ollama model cache; fast uses only qwen3:1.7b, medium qwen3:4b, and hard qwen3:8b."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save selected Ollama model cache
@@ -206,7 +206,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ~/.ollama/models
-          key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-qwen3-v2
+          key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'hard' && 'qwen3-8b-v3' || 'qwen3-v2' }}
 
       - name: Download authentic Roblox avatar assets for the short
         run: |
