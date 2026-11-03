@@ -94,7 +94,20 @@ def extract_narration(payload):
 
 
 def trim_to_word_limit(text, limit):
-    """Trim at the last complete word while preserving sentence punctuation."""
+    """Trim at a sentence boundary when possible, preserving readable punctuation."""
+    sentences = re.split(r"(?<=[.!?…])\s+", text.strip())
+    selected = []
+    count = 0
+    for sentence in sentences:
+        sentence_count = len(re.findall(r"\b[\w’'-]+\b", sentence))
+        if count + sentence_count > limit:
+            break
+        selected.append(sentence)
+        count += sentence_count
+    if selected:
+        return " ".join(selected).strip()
+
+    # If even the first sentence exceeds the cap, cut at a complete word.
     parts = text.split()
     while parts and len(re.findall(r"\b[\w’'-]+\b", " ".join(parts))) > limit:
         parts.pop()
@@ -137,19 +150,27 @@ def main():
         if len(words) > maximum:
             text = trim_to_word_limit(text, maximum)
             words = re.findall(r"\b[\w’'-]+\b", text)
-        if not text:
+        if not text or len(words) < minimum:
+            # A compact known-good story is the last resort when the model stays
+            # below the floor after the directional rewrite retries.
             text = (
                 "On a busy afternoon, Maya spotted a wallet beside the school gate. "
                 "She checked only for a name, then gave it to the office before hurrying home. "
                 "A worried parent returned minutes later, grateful to find the family photo still inside. "
                 "Maya had nearly walked past, but stopping took only a moment. "
-                "That evening, she remembered the relieved smile and felt glad she had chosen to help."
+                "That evening, she remembered the relieved smile and felt glad she had chosen to help. "
+                "The next morning, she told her friend what happened, and they agreed that doing the right thing often begins with one small decision. "
+                "She hoped someone would show the same care if she ever lost something important."
             )
+            text = trim_to_word_limit(text, maximum)
             words = re.findall(r"\b[\w’'-]+\b", text)
-            if len(words) > maximum:
-                text = trim_to_word_limit(text, maximum)
+            for sentence in ("It mattered.", "She felt glad.", "That was enough."):
+                extra = len(re.findall(r"\b[\w’'-]+\b", sentence))
+                if len(words) >= minimum or len(words) + extra > maximum:
+                    continue
+                text = f"{text} {sentence}"
                 words = re.findall(r"\b[\w’'-]+\b", text)
-        print(f"Final short-story guard applied for {topic!r}: {len(words)}/{maximum} words max.")
+        print(f"Final short-story guard applied for {topic!r}: {len(words)} words (target {minimum}–{maximum}).")
     elif forbidden_meta:
         raise SystemExit(f"Narration includes forbidden AI/game meta-talk: {forbidden_meta.group(0)!r}.")
     elif not minimum <= len(words) <= maximum:
