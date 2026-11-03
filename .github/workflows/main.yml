@@ -17,9 +17,15 @@ on:
           - '30'
           - '45'
           - '60'
-
-env:
-  AI_MODEL: qwen3:4b
+      model_quality:
+        description: 'AI generation speed/detail tradeoff: fast (1.7B), medium (4B), hard (8B; slower, more detailed)'
+        required: true
+        default: 'medium'
+        type: choice
+        options:
+          - fast
+          - medium
+          - hard
 
 permissions:
   contents: read
@@ -44,7 +50,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install edge-tts mutagen
 
-      - name: Start local story and animation model
+      - name: Download the selected AI model for stories, animation, and camera plans
+        env:
+          MODEL_QUALITY: ${{ inputs.model_quality }}
         run: |
           curl -fsSL https://ollama.com/download/ollama-linux-amd64.tar.zst -o ollama.tar.zst
           sudo tar -I zstd -xf ollama.tar.zst -C /usr
@@ -54,7 +62,21 @@ jobs:
             sleep 2
           done
           curl -fsS http://127.0.0.1:11434/api/tags >/dev/null
-          ollama pull "$AI_MODEL"
+          case "$MODEL_QUALITY" in
+            fast) SELECTED_MODEL=qwen3:1.7b ;;
+            medium) SELECTED_MODEL=qwen3:4b ;;
+            hard) SELECTED_MODEL=qwen3:8b ;;
+            *) echo "Unknown model quality: $MODEL_QUALITY" >&2; exit 1 ;;
+          esac
+          echo "AI_MODEL=$SELECTED_MODEL" >> "$GITHUB_ENV"
+          ollama pull "$SELECTED_MODEL"
+          ollama show "$SELECTED_MODEL" >/dev/null
+          {
+            echo "## Selected generation model"
+            echo "- Preset: $MODEL_QUALITY"
+            echo "- Model: $SELECTED_MODEL"
+            echo "- Used for story, character animation, and camera/map planning."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Write a believable real-life story
         env:
