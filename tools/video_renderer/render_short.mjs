@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Headless Three.js renderer: AI-authored Roblox Parts + authentic Roblox avatar OBJ meshes. */
+/** Headless Three.js renderer: theme-furnished Roblox-style Parts + authentic Roblox avatar OBJ meshes. */
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join, normalize, resolve } from 'node:path';

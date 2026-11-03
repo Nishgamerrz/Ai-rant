@@ -115,8 +115,8 @@ class AvatarFallbackTests(unittest.TestCase):
             assets = root / "avatar-assets"
             calls = []
 
-            def fake_request_json(url, data=None):
-                calls.append(url)
+            def fake_request_json(url, data=None, headers=None):
+                calls.append((url, data, headers))
                 if url == "https://users.roblox.com/v1/usernames/users":
                     return {"data": [{"requestedUsername": "RealUser", "id": 12345}]}
                 if url.startswith("https://thumbnails.roblox.com/v1/users/avatar?"):
@@ -148,6 +148,8 @@ class AvatarFallbackTests(unittest.TestCase):
             self.assertIn("403", profile["mesh_error"])
             self.assertEqual(Path(profile["thumbnail"]).read_bytes(), b"actual Roblox thumbnail bytes")
             self.assertIn("not a generated substitute", stderr.getvalue())
+            self.assertEqual(calls[0], ("https://users.roblox.com/v1/usernames/users",
+                                       {"usernames": ["RealUser"], "excludeBannedUsers": True}, None))
             self.assertEqual(len(calls), 2)
 
     def test_validator_accepts_existing_thumbnail_when_mesh_is_unavailable(self):

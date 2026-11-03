@@ -198,7 +198,7 @@ for _, castMember in ipairs(CONFIG.cast or {}) do
         end
     end)
 end
-print(string.format("Ready: '%s', %d AI-authored map pieces, %d live avatar(s).",
+print(string.format("Ready: '%s', %d furnished world Parts, %d live avatar(s).",
     plan.name or "AI Story World", #map:GetDescendants(), #(CONFIG.cast or {})))
 '''
     return source.replace("__CONFIG_JSON__", cfg)
@@ -215,11 +215,11 @@ def build_scene_parts(plan, cast):
             "transparency": float(transparency), "collidable": bool(collidable), "anchored": bool(anchored),
         })
 
-    # One theme-colored walkable foundation; roads, terrain, landmarks, and decoration are AI-authored.
+    # One theme-colored walkable foundation; the AI landmark plan is expanded with matching structural and scenic details.
     add("World Foundation", (640, 2, 640), (0, -1.1, 0), plan.get("ground_color", [88, 166, 91]), plan.get("ground_material", "Grass"))
     add("World Title Sign", (30, 7, 0.6), (0, 10, 74), [35, 48, 72], "SmoothPlastic")
 
-    # Each AI-authored object becomes a named, editable Roblox Part.
+    # Each planned or procedurally expanded map object becomes a named, editable Roblox Part.
     for index, prop in enumerate(plan.get("props", []), 1):
         add(prop.get("name", f"AI Landmark {index}"), prop["size"], prop["position"],
             prop.get("color", [135, 165, 205]), prop.get("material", "Plastic"), prop.get("shape", "Block"),
@@ -618,7 +618,7 @@ def build(args):
             f"**World:** {plan.get('name', 'AI Story World')}  \n"
             f"**Theme:** {plan.get('theme', '')}  \n"
             f"**Duration:** {args.duration} seconds  \n"
-            f"**AI-designed props:** {len(plan.get('props', []))}  \n"
+            f"**Furnished world Parts:** {len(plan.get('props', []))}  \n"
             f"**Cast:** {cast_label}\n\n"
             "## Watch the short\n\n"
             "1. Download and unzip `Roblox_Studio_Complete_Package.zip`.\n"
@@ -628,10 +628,10 @@ def build(args):
             "## Notes\n\n"
             "The workflow renders the MP4 automatically using headless Chromium, Three.js, and FFmpeg; neither Roblox Studio nor Blender needs to be installed or launched. The optional `.rbxlx` project remains editable in Studio. Video validation does not claim a Roblox game-client runtime test.\n\n"
             "## Automatic 3D avatar mesh access\n\n"
-            "Roblox now requires authentication for 3D thumbnails. To let the workflow fetch a full mesh automatically, add the optional GitHub Actions repository secret `ROBLOX_OPEN_CLOUD_API_KEY` using a Roblox Open Cloud key scoped to Thumbnails read access. Never paste the key into prompts or chat; the workflow passes it only to the mesh-fetch step and never prints it. If the secret is absent or Roblox rejects the key, the MP4 uses the account’s official thumbnail instead.\n"
+            "The workflow accepts usernames and automatically resolves each one to a numeric ID through Roblox's public Users API; that lookup is keyless, so there is no need to find or enter an ID. Roblox separately requires authentication for the 3D avatar-mesh thumbnail endpoint. To fetch a full mesh, add the optional GitHub Actions repository secret `ROBLOX_OPEN_CLOUD_API_KEY` using a Roblox Open Cloud key scoped to Thumbnails read access. Never paste a key into prompts or chat; the workflow passes it only to the mesh-fetch step and never prints it. If the secret is absent or Roblox rejects the key, the MP4 uses the account's official thumbnail instead.\n"
         )
         args.readme.write_text(guide, encoding="utf-8")
-    print(f"Created runnable Roblox Studio place {args.output} with {len(plan.get('props', []))} AI props and {len(cast)} Roblox avatar(s).")
+    print(f"Created runnable Roblox Studio place {args.output} with {len(plan.get('props', []))} furnished world Parts and {len(cast)} Roblox avatar(s).")
 
 
 def main():
