@@ -1,12 +1,12 @@
-name: Generate Roblox R15 Animated Short
+name: Generate 2K Vertical YouTube Short
 
 on:
   workflow_dispatch:
     inputs:
       story_topic:
-        description: 'What should the Roblox character talk about or act out?'
+        description: 'Real-life story topic to animate in a Roblox-style 3D world'
         required: true
-        default: 'A confident avatar explains how they outsmarted a hacker'
+        default: 'A student finds a lost wallet on the way to school and has to choose what to do'
         type: string
       duration_seconds:
         description: 'Short duration in seconds'
@@ -17,11 +17,6 @@ on:
           - '60'
           - '90'
           - '120'
-      avatar_username:
-        description: 'Optional Roblox username whose R15 avatar should be loaded in Studio'
-        required: false
-        default: ''
-        type: string
 
 env:
   AI_MODEL: qwen3:4b
@@ -30,9 +25,9 @@ permissions:
   contents: read
 
 jobs:
-  generate_animation_and_voice:
+  render_short:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 360
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -42,14 +37,14 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install animation and neural voice tooling
+      - name: Install Blender, FFmpeg, and narration tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl jq zstd zip blender ffmpeg xvfb libgl1-mesa-dri fonts-dejavu-core
+          sudo apt-get install -y curl jq zstd blender ffmpeg xvfb libgl1-mesa-dri fonts-dejavu-core
           python -m pip install --upgrade pip
           python -m pip install edge-tts mutagen
 
-      - name: Start local AI model
+      - name: Start local story and animation model
         run: |
           curl -fsSL https://ollama.com/download/ollama-linux-amd64.tar.zst -o ollama.tar.zst
           sudo tar -I zstd -xf ollama.tar.zst -C /usr
@@ -61,20 +56,20 @@ jobs:
           curl -fsS http://127.0.0.1:11434/api/tags >/dev/null
           ollama pull "$AI_MODEL"
 
-      - name: Write a full-length short script
+      - name: Write a believable real-life story
         env:
           STORY_TOPIC: ${{ inputs.story_topic }}
           DURATION_SECONDS: ${{ inputs.duration_seconds }}
         run: |
-          TARGET_WORDS=$((DURATION_SECONDS * 17 / 10))
+          TARGET_WORDS=$((DURATION_SECONDS * 2))
           cat > narration_prompt.txt <<PROMPT
-          Write a lively, polished, natural ENGLISH voiceover script for a Roblox short about: "${STORY_TOPIC}".
-          The target runtime is ${DURATION_SECONDS} seconds. Return ONLY valid JSON in this shape:
-          {"narration":"The complete spoken narration goes here."}
-          Aim for about ${TARGET_WORDS} spoken words (roughly 102 words per minute, matching the clear female voice pace).
-          Make it a coherent mini-story with a strong hook, conversational pacing, and a satisfying ending.
-          Use correct, fluent English, varied sentence lengths, and natural contractions. No stage directions, speaker labels,
-          sound effects, timestamps, or artificial pauses. Keep it appropriate for a general audience.
+          Write a vivid, believable real-life mini-story in polished natural English, to be narrated over a 3D animated short.
+          Topic: "${STORY_TOPIC}". Target runtime: ${DURATION_SECONDS} seconds. Aim for about ${TARGET_WORDS} spoken words.
+          Make it feel like a real event that could happen to ordinary people: a strong opening, clear problem, meaningful choice,
+          and satisfying ending. Use accurate grammar, natural contractions, varied sentences, and concrete everyday details.
+          Do NOT mention AI, servers, Roblox, avatars, game mechanics, glitches, or that the story is generated.
+          Characters must not say anything about AI or servers. Do not include stage directions, speaker labels, timestamps,
+          sound effects, or artificial pauses. Return ONLY JSON: {"narration":"the complete spoken story"}.
           PROMPT
           jq -n --arg model "$AI_MODEL" --rawfile prompt narration_prompt.txt \
             '{model:$model, prompt:$prompt, format:{type:"object",properties:{narration:{type:"string"}},required:["narration"],additionalProperties:false}, think:false, stream:false, options:{temperature:0.6, num_predict:700}}' > narration_request.json
@@ -85,23 +80,22 @@ jobs:
             DRAFT=$(jq -r '.response // ""' narration_response.json)
             jq -n --arg model "$AI_MODEL" --arg draft "$DRAFT" \
               --arg topic "$STORY_TOPIC" --arg duration "$DURATION_SECONDS" --arg words "$TARGET_WORDS" \
-              '{model:$model, format:{type:"object",properties:{narration:{type:"string"}},required:["narration"],additionalProperties:false}, think:false, stream:false, options:{temperature:0.55, num_predict:700}, prompt:("Rewrite this narration as a complete, natural English mini-story for a Roblox short about: " + $topic + ". It must be about " + $words + " words, for a " + $duration + " second voiceover at a clear, steady pace. Return a JSON object containing only the narration field. Draft to rewrite: " + $draft)}' \
+              '{model:$model, format:{type:"object",properties:{narration:{type:"string"}},required:["narration"],additionalProperties:false}, think:false, stream:false, options:{temperature:0.55, num_predict:700}, prompt:("Rewrite this as a polished, believable real-life story in natural English about: " + $topic + ". Aim for " + $words + " words for a " + $duration + "-second voiceover at a brisk but clear pace. Do not mention AI, servers, Roblox, avatars, game mechanics, or that it is generated. Return only a JSON object with a narration field. Draft: " + $draft)}' \
               > narration_repair_request.json
             curl --fail --silent --show-error --max-time 600 \
               http://127.0.0.1:11434/api/generate -d @narration_repair_request.json -o narration_response.json
             python tools/prepare_narration.py narration_response.json dist/narration.txt "$DURATION_SECONDS"
           fi
 
-      - name: Generate a matching long-form R15 animation
+      - name: Plan animated character movement
         env:
           STORY_TOPIC: ${{ inputs.story_topic }}
           DURATION_SECONDS: ${{ inputs.duration_seconds }}
         run: |
           NARRATION=$(cat dist/narration.txt)
           cat > animation_prompt.txt <<PROMPT
-          Create keyframes for a REAL Roblox R15 character animation that acts out this short.
-          The character is speaking this story: "${NARRATION}"
-          General action/topic: "${STORY_TOPIC}"
+          Create keyframes for the blocky 3D character acting out this real-life story: "${STORY_TOPIC}"
+          Spoken narration: "${NARRATION}"
           Required animation duration: ${DURATION_SECONDS} seconds. Return ONLY valid JSON:
           {"name":"ShortAnimation","keyframes":[{"time":0,"face":"talk","poses":{"Head":[0,0,0],"UpperTorso":[0,0,0],"RightUpperArm":[0,0,0]}}]}
           Every keyframe must also set face to one of: neutral, talk, smile, shocked, blink.
@@ -112,54 +106,48 @@ jobs:
           Allowed joint names: HumanoidRootPart, LowerTorso, UpperTorso, Head, LeftUpperArm,
           LeftLowerArm, LeftHand, RightUpperArm, RightLowerArm, RightHand, LeftUpperLeg,
           LeftLowerLeg, LeftFoot, RightUpperLeg, RightLowerLeg, RightFoot.
-          Animate natural speaking gestures and reactions that change with the story. Alternate
-          gestures, avoid holding one pose for long, keep the avatar in place, and end at a relaxed pose.
-          Do not make a 2D image, video, scene layout, or subtitles. This is joint motion data only.
+          Animate natural speaking gestures and story reactions that change over time. Alternate gestures, avoid holding
+          one pose for long, keep the avatar in place, and end relaxed. This is motion data only; no dialog about AI,
+          servers, or game mechanics, and no scene layout, images, video, or subtitles.
           PROMPT
           jq -n --arg model "$AI_MODEL" --rawfile prompt animation_prompt.txt \
             '{model:$model, prompt:$prompt, format:"json", think:false, stream:false, options:{temperature:0.55, num_predict:3000}}' > animation_request.json
           curl --fail --silent --show-error --max-time 900 \
             http://127.0.0.1:11434/api/generate -d @animation_request.json -o animation_response.json
           jq -r '.response // empty' animation_response.json > ai_animation.json
-          python tools/build_roblox_animation.py ai_animation.json dist/Roblox_R15_Animation.rbxmx "$DURATION_SECONDS"
+          python tools/build_roblox_animation.py ai_animation.json dist/Roblox_R15_Animation.json "$DURATION_SECONDS" --json-only
 
-      - name: Design a matching 3D Roblox story map
+      - name: Design the 3D story setting and AI-directed camera plan
         env:
           STORY_TOPIC: ${{ inputs.story_topic }}
-          AVATAR_USERNAME: ${{ inputs.avatar_username }}
           DURATION_SECONDS: ${{ inputs.duration_seconds }}
         run: |
           NARRATION=$(cat dist/narration.txt)
           cat > map_prompt.txt <<PROMPT
-          Design a polished, colorful 3D Roblox set that matches this short story.
+          Design a polished, colorful 3D Roblox-style set that visually supports this believable real-life short story.
           Story/topic: "${STORY_TOPIC}"
           Story narration: "${NARRATION}"
-          Build the camera plan across ${DURATION_SECONDS} seconds. Return ONLY valid JSON with this structure:
-          {"name":"Neon Plaza","theme":"A clear environment description","ground_color":[38,48,68],"ambient_color":[140,160,200],"props":[{"name":"Arcade","shape":"Block","material":"Neon","position":[-35,8,10],"size":[24,16,20],"color":[30,210,240]}],"camera_shots":[{"time":0,"position":[0,30,76],"target":[0,3,24],"transition":"smooth"},{"time":${DURATION_SECONDS},"position":[-22,13,34],"target":[0,3,24],"transition":"snap"}]}
-          Use 5 to 8 camera_shots with increasing times from 0 through ${DURATION_SECONDS}; vary positions and targets to show the map/character.
+          Plan cinematic camera moves and cuts across ${DURATION_SECONDS} seconds. Return ONLY valid JSON with this structure:
+          {"name":"Neighborhood Street","theme":"A clear environment description","ground_color":[38,48,68],"ambient_color":[140,160,200],"props":[{"name":"Corner Shop","shape":"Block","material":"Brick","position":[-35,8,10],"size":[24,16,20],"color":[30,210,240]}],"camera_shots":[{"time":0,"position":[0,30,76],"target":[0,3,24],"transition":"smooth"},{"time":${DURATION_SECONDS},"position":[-22,13,34],"target":[0,3,24],"transition":"snap"}]}
+          Use 5 to 8 camera_shots with increasing times from 0 through ${DURATION_SECONDS}; vary positions and targets to show the map and character.
           Coordinates are Roblox X,Y,Z (Y is height). Aim close shots near [0,3,24], begin wide, finish on the avatar.
           Use 2 wide views about 45-65 studs away and 2 close views about 10-18 studs away; mix smooth cinematic moves with 2-3 deliberate snap cuts.
           Keep the avatar in frame and avoid clipping through props or moving chaotically.
-          Include 12 to 24 thoughtfully arranged, visually varied props that make a readable,
-          walkable set: buildings/landmarks, foreground set dressing, and a few colorful accents.
-          Use a strong palette that fits the story, and leave the central avenue and center of the
-          map open enough for an R15 character to perform. This is a real 3D Roblox map layout,
-          not an image, screenshot, or 2D drawing.
-          Every prop must have a distinct short name, shape Block/Ball/Cylinder, material chosen
-          only from Plastic, SmoothPlastic, Concrete, Grass, Slate, Wood, Metal, Neon, Glass,
-          Brick, Asphalt, position as three numbers from -85 to 85, size as three numbers from
-          0.5 to 60, and RGB color as three integers from 0 to 255. Keep it appropriate for all ages.
+          Include 12 to 24 visually varied story-specific props: buildings/landmarks, foreground dressing, and colorful accents.
+          Leave the center and central avenue open for the character. This is a 3D world layout, not an image or 2D drawing.
+          Every prop must have a distinct short name, shape Block/Ball/Cylinder, material only from Plastic, SmoothPlastic, Concrete,
+          Grass, Slate, Wood, Metal, Neon, Glass, Brick, Asphalt, position as three numbers from -85 to 85, size as three numbers
+          from 0.5 to 60, and RGB color as three integers from 0 to 255. Keep it appropriate for all ages.
           PROMPT
           jq -n --arg model "$AI_MODEL" --rawfile prompt map_prompt.txt \
             '{model:$model, prompt:$prompt, format:"json", think:false, stream:false, options:{temperature:0.65, num_predict:3000}}' > map_request.json
           curl --fail --silent --show-error --max-time 600 \
             http://127.0.0.1:11434/api/generate -d @map_request.json -o map_response.json
-          python tools/build_story_map.py map_response.json dist/Roblox_Story_Map.lua "$DURATION_SECONDS"
-          python tools/build_avatar_setup.py "$AVATAR_USERNAME" dist/Roblox_Avatar_Setup.lua
+          python tools/build_story_map.py map_response.json dist/Roblox_Story_Map.json "$DURATION_SECONDS" --json-only
 
-      - name: Synthesize one continuous natural female voiceover
+      - name: Synthesize brisk, clear male narration and readable captions
         run: |
-          edge-tts --voice en-US-AriaNeural --rate=-8% \
+          edge-tts --voice en-US-GuyNeural --rate=+10% \
             --file dist/narration.txt --write-media dist/narration.mp3 \
             --write-subtitles dist/narration.srt
           test -s dist/narration.srt
@@ -167,12 +155,17 @@ jobs:
           from mutagen.mp3 import MP3
           path = 'dist/narration.mp3'
           seconds = MP3(path).info.length
-          print(f'Neural voiceover duration: {seconds:.1f} seconds')
-          if not 55 <= seconds <= 125:
-              raise SystemExit('Voiceover must be 55–125 seconds; rerun with a fresh narration.')
+          print(f'Male voiceover duration: {seconds:.1f} seconds')
+          if not 45 <= seconds <= 130:
+              raise SystemExit('Voiceover must be clear and fit a 1–2 minute short; narration duration was out of bounds.')
           PY
 
-      - name: Render a 2K vertical 3D MP4 with camera moves and burned-in captions
+      - name: Generate timed sound effects for story and camera beats
+        run: |
+          python tools/create_sound_bed.py dist/Roblox_Story_Map.json \
+            "${{ inputs.duration_seconds }}" /tmp/short-sound-bed.wav
+
+      - name: Render the final captioned vertical 2K MP4
         env:
           DURATION_SECONDS: ${{ inputs.duration_seconds }}
         run: |
@@ -184,11 +177,11 @@ jobs:
             --duration "$DURATION_SECONDS" \
             --output "$PWD/dist/short_silent.mp4" \
             --width 1440 --height 2560 --fps 30
-          ffmpeg -hide_banner -y -i dist/short_silent.mp4 -i dist/narration.mp3 \
+          ffmpeg -hide_banner -y -i dist/short_silent.mp4 -i dist/narration.mp3 -i /tmp/short-sound-bed.wav \
             -vf "subtitles=dist/narration.srt:force_style='FontName=DejaVu Sans,FontSize=64,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00111111,BorderStyle=1,Outline=5,Shadow=1,MarginL=120,MarginR=120,MarginV=300,Alignment=2'" \
-            -map 0:v:0 -map 1:a:0 -c:v libx264 -preset fast -crf 20 \
-            -pix_fmt yuv420p -r 30 -c:a aac -b:a 192k \
-            -af loudnorm=I=-16:TP=-1.5:LRA=11 -shortest \
+            -filter_complex "[1:a]volume=1.0[voice];[2:a]volume=0.38[effects];[voice][effects]amix=inputs=2:duration=longest:dropout_transition=0,loudnorm=I=-16:TP=-1.5:LRA=11[mix]" \
+            -map 0:v:0 -map '[mix]' -c:v libx264 -preset fast -crf 20 \
+            -pix_fmt yuv420p -r 30 -c:a aac -b:a 192k -shortest \
             -movflags +faststart dist/Roblox_2K_YouTube_Short.mp4
           python - <<'PY'
           import json, subprocess
@@ -199,54 +192,16 @@ jobs:
           video = next(s for s in info['streams'] if s['codec_type'] == 'video')
           audio = next(s for s in info['streams'] if s['codec_type'] == 'audio')
           seconds = float(info['format']['duration'])
-          print(f"MP4 verified: {video['width']}x{video['height']} {video['avg_frame_rate']} fps, {seconds:.1f}s, audio={audio['codec_name']}")
-          if (video['width'], video['height']) != (1440, 2560) or audio['codec_name'] != 'aac' or not 55 <= seconds <= 125:
-              raise SystemExit('MP4 failed 2K portrait/voice/duration validation.')
+          print(f"Verified final MP4: {video['width']}x{video['height']} {video['avg_frame_rate']} fps, {seconds:.1f}s, {audio['codec_name']} audio")
+          expected = int(__import__('os').environ['DURATION_SECONDS'])
+          if (video['width'], video['height']) != (1440, 2560) or audio['codec_name'] != 'aac' or not expected - 2 <= seconds <= expected + 2:
+              raise SystemExit('Final MP4 failed vertical 2K, AAC audio, or selected-duration validation.')
           PY
 
-      - name: Package direct MP4 and Roblox source assets
-        env:
-          DURATION_SECONDS: ${{ inputs.duration_seconds }}
-        run: |
-          cat > dist/README.txt <<EOF
-          FINISHED 2K VERTICAL SHORT - ${DURATION_SECONDS} SECONDS
-
-          Roblox_2K_YouTube_Short.mp4 is the ready-to-watch 1440x2560 (vertical 2K), 30 fps,
-          H.264 MP4. It includes a real 3D Roblox-style block avatar, story map, AI-directed
-          smooth camera moves and snap cuts, animated face/mouth, continuous female narration,
-          and lower-third captions burned into the video. No editing or Studio step is required
-          to watch/upload the MP4.
-
-          The MP4 is rendered in Blender as a Roblox-style 3D scene; it is not captured from a
-          live Roblox game. Roblox_R15_Animation.rbxmx is also supplied as a native Roblox
-          KeyframeSequence, and Roblox_Story_Map.lua builds the matching map inside Studio.
-          Roblox_Avatar_Setup.lua fetches the supplied account's current R15 avatar for Studio.
-          The MP4 uses a generated blocky avatar; use the Studio assets if you need the exact
-          Roblox account avatar in a game capture.
-
-          FILES
-          - Roblox_2K_YouTube_Short.mp4: final vertical 2K video with captions and audio.
-          - narration.mp3 / narration.srt / narration.txt: continuous voiceover and captions.
-          - Roblox_R15_Animation.rbxmx / .json: native pose animation and source keyframes.
-          - Roblox_Story_Map.lua / .json: Studio map builder and AI map/camera plan.
-          - Roblox_Avatar_Setup.lua: loads the optional Roblox username's avatar in Studio.
-
-          OPTIONAL ROBLOX STUDIO USE
-          Run Roblox_Story_Map.lua and Roblox_Avatar_Setup.lua from Studio's Command Bar,
-          then import Roblox_R15_Animation.rbxmx and publish from the Animation Editor.
-          GitHub Actions cannot publish Roblox animation/audio assets on your behalf.
-          Story, poses, map, and camera plan use Qwen3:4b; the local model does not web-browse.
-          EOF
-          (cd dist && zip -q Roblox_R15_Animated_Short.zip Roblox_2K_YouTube_Short.mp4 \
-            Roblox_R15_Animation.rbxmx Roblox_R15_Animation.json Roblox_Story_Map.lua \
-            Roblox_Story_Map.json Roblox_Avatar_Setup.lua narration.mp3 narration.srt narration.txt README.txt)
-
-      - name: Upload finished 2K MP4 and source pack
+      - name: Upload only the finished YouTube Short MP4
         uses: actions/upload-artifact@v4
         with:
           name: Roblox-2K-YouTube-Short
-          path: |
-            dist/Roblox_2K_YouTube_Short.mp4
-            dist/Roblox_R15_Animated_Short.zip
+          path: dist/Roblox_2K_YouTube_Short.mp4
           if-no-files-found: error
           retention-days: 14

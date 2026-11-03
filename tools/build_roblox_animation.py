@@ -175,8 +175,9 @@ def create_rbxmx(animation, output):
 
 
 def main():
-    if len(sys.argv) != 4:
-        raise SystemExit("usage: build_roblox_animation.py INPUT.json OUTPUT.rbxmx DURATION_SECONDS")
+    json_only = len(sys.argv) == 5 and sys.argv[4] == "--json-only"
+    if len(sys.argv) not in (4, 5) or (len(sys.argv) == 5 and not json_only):
+        raise SystemExit("usage: build_roblox_animation.py INPUT.json OUTPUT_PATH DURATION_SECONDS [--json-only]")
     source, destination = map(Path, sys.argv[1:3])
     try:
         duration = float(sys.argv[3])
@@ -189,9 +190,11 @@ def main():
         duration = float(sys.argv[3])
         animation = normalize(default_animation(duration), duration)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    create_rbxmx(animation, destination)
-    destination.with_suffix(".json").write_text(json.dumps(animation, indent=2) + "\n", encoding="utf-8")
-    print(f"Created {destination}: {duration:g} seconds, {len(animation['keyframes'])} R15 keyframes.")
+    json_path = destination if json_only else destination.with_suffix(".json")
+    if not json_only:
+        create_rbxmx(animation, destination)
+    json_path.write_text(json.dumps(animation, indent=2) + "\n", encoding="utf-8")
+    print(f"Created animation data {json_path}: {duration:g} seconds, {len(animation['keyframes'])} R15 keyframes.")
 
 
 if __name__ == "__main__":

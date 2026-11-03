@@ -101,7 +101,10 @@ def main():
     payload = json.loads(response_path.read_text(encoding="utf-8"))
     text = re.sub(r"\s+", " ", extract_narration(payload)).strip()
     words = re.findall(r"\b[\w’'-]+\b", text)
-    minimum, maximum = int(duration * 1.6), int(duration * 1.75)
+    minimum, maximum = int(duration * 1.9), int(duration * 2.1)
+    forbidden_meta = re.search(r"\b(?:A\.I\.|AI|servers?|Roblox|avatars?|game mechanics?|generated)\b", text, re.IGNORECASE)
+    if forbidden_meta:
+        raise SystemExit(f"Narration includes forbidden AI/game meta-talk: {forbidden_meta.group(0)!r}.")
     if not minimum <= len(words) <= maximum:
         fields = ", ".join(payload.keys()) if isinstance(payload, dict) else type(payload).__name__
         if not text and isinstance(payload, dict) and payload.get("thinking"):
@@ -114,7 +117,7 @@ def main():
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(text + "\n", encoding="utf-8")
-    print(f"Prepared one continuous female-voice narration ({len(words)} words).")
+    print(f"Prepared one continuous narration ({len(words)} words).")
 
 
 if __name__ == "__main__":

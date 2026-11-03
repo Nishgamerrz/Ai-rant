@@ -227,8 +227,9 @@ def emit_lua(plan, output):
 
 
 def main():
-    if len(sys.argv) != 4:
-        raise SystemExit("usage: build_story_map.py OLLAMA_RESPONSE.json OUTPUT.lua DURATION_SECONDS")
+    json_only = len(sys.argv) == 5 and sys.argv[4] == "--json-only"
+    if len(sys.argv) not in (4, 5) or (len(sys.argv) == 5 and not json_only):
+        raise SystemExit("usage: build_story_map.py OLLAMA_RESPONSE.json OUTPUT_PATH DURATION_SECONDS [--json-only]")
     source, destination = map(Path, sys.argv[1:3])
     duration = float(sys.argv[3])
     if not 60 <= duration <= 120:
@@ -238,9 +239,12 @@ def main():
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"Invalid AI map plan ({exc}); using a complete Roblox city-plaza map.", file=sys.stderr)
         plan = validate(default_plan(), duration)
-    emit_lua(plan, destination)
-    destination.with_suffix(".json").write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
-    print(f"Created {destination}: {plan['name']} with {len(plan['props'])} 3D props.")
+    json_path = destination if json_only else destination.with_suffix(".json")
+    if not json_only:
+        emit_lua(plan, destination)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+    print(f"Created map data {json_path}: {plan['name']} with {len(plan['props'])} 3D props.")
 
 
 if __name__ == "__main__":
