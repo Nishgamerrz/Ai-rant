@@ -117,6 +117,8 @@ class StudioExperienceTests(unittest.TestCase):
             (work / "summary.txt").write_text("A crystal garden with a glass arch and a gentle camera tour.", encoding="utf-8")
             (dist / "Roblox_Studio_Experience.rbxlx").write_text("<roblox/>", encoding="utf-8")
             (dist / "narration.srt").write_text("1\\ncue", encoding="utf-8")
+            (dist / "Roblox_2K_YouTube_Short.mp4").write_bytes(b"mp4 test fixture")
+            (dist / "short_silent.mp4").write_bytes(b"temporary silent video")
             subprocess.run([
                 sys.executable, str(ROOT / "tools/package_studio_deliverables.py"),
                 "--directory", str(dist), "--map", str(work / "map.json"),
@@ -130,6 +132,8 @@ class StudioExperienceTests(unittest.TestCase):
             with zipfile.ZipFile(bundle) as archive:
                 self.assertIn("AI_Design_and_Tools_Report.pdf", archive.namelist())
                 self.assertIn("Roblox_Studio_Experience.rbxlx", archive.namelist())
+                self.assertIn("Roblox_2K_YouTube_Short.mp4", archive.namelist())
+                self.assertNotIn("short_silent.mp4", archive.namelist())
                 self.assertNotIn("Roblox_Studio_Complete_Package.zip", archive.namelist())
 
     def test_long_bracket_avoids_closing_delimiter_collision(self):

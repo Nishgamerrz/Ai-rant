@@ -173,8 +173,10 @@ def validate(plan, duration=90, usernames=(), min_props=16):
         if not isinstance(shape, str) or shape not in SHAPES or not isinstance(material, str) or material not in MATERIALS:
             raise ValueError("map prop has an unsupported shape or material")
         if (not isinstance(pos, list) or len(pos) != 3
-                or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not -250 <= v <= 250 for v in pos)):
-            raise ValueError("prop position must be three coordinates from -250 to 250")
+                or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in pos)
+                or not -250 <= pos[0] <= 250 or not 0 <= pos[1] <= 250
+                or not -250 <= pos[2] <= 250):
+            raise ValueError("prop position must use X/Z from -250 to 250 and a nonnegative Y height up to 250")
         if (not isinstance(size, list) or len(size) != 3
                 or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.5 <= v <= 120 for v in size)):
             raise ValueError("prop size must be three dimensions from 0.5 to 120")

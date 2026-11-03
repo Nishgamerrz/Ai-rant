@@ -1,10 +1,10 @@
-name: Generate Roblox Studio Story Experience
+name: Generate Furnished Roblox-Style Short (MP4)
 
 on:
   workflow_dispatch:
     inputs:
       story_topic:
-        description: 'Real-life story topic for a runnable, AI-built Roblox Studio experience'
+        description: 'Real-life story topic for a fully furnished Roblox-themed short video and Studio project'
         required: true
         default: 'A student finds a lost wallet on the way to school and has to choose what to do'
         type: string
@@ -32,8 +32,8 @@ on:
           - medium
           - hard
       character_usernames:
-        description: 'Comma-separated Roblox usernames (first is lead, max 6); load their live R15 avatars in Studio'
-        required: false
+        description: 'Required: comma-separated real Roblox usernames for authentic avatar meshes (first is lead; max 6)'
+        required: true
         default: ''
         type: string
       narration_audio_asset_id:
@@ -55,7 +55,7 @@ permissions:
   contents: read
 
 jobs:
-  build_studio_experience:
+  generate_roblox_short:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -70,11 +70,24 @@ jobs:
       - name: Install AI, research, narration, and report tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl jq zstd
+          sudo apt-get install -y curl jq zstd ffmpeg fonts-dejavu-core
           python -m pip install --upgrade pip
-          python -m pip install edge-tts mutagen ddgs reportlab
+          python -m pip install edge-tts mutagen ddgs reportlab pillow
 
-      - name: Download the selected AI model for stories and map/camera plans
+      - name: Set up Node for headless 3D rendering
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tools/video_renderer/package-lock.json
+
+      - name: Install headless Three.js renderer and Chromium
+        working-directory: tools/video_renderer
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Download the selected AI model for story and world/camera planning
         env:
           MODEL_QUALITY: ${{ inputs.model_quality }}
         run: |
@@ -103,7 +116,7 @@ jobs:
             echo "- Used for story and map/camera planning."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Parse optional Roblox usernames into a named cast
+      - name: Require a real Roblox username for the MP4 avatar cast
         env:
           ROBLOX_USERNAMES: ${{ inputs.character_usernames }}
         run: |
@@ -112,7 +125,13 @@ jobs:
           CAST_NAMES=$(jq -r 'join(", ")' dist/characters.json)
           echo "CAST_NAMES=$CAST_NAMES" >> "$GITHUB_ENV"
           echo "CHARACTER_USERNAMES_JSON=$(jq -c . dist/characters.json)" >> "$GITHUB_ENV"
-          echo "Cast usernames: ${CAST_NAMES:-AI chooses a protagonist}"
+          echo "Cast usernames: ${CAST_NAMES:-none supplied}"
+          test "$(jq 'length' dist/characters.json)" -ge 1 || { echo "Enter at least one real Roblox username; the MP4 uses the real Roblox avatar mesh." >&2; exit 1; }
+
+      - name: Download authentic Roblox avatar meshes for the short
+        run: |
+          python tools/fetch_roblox_avatars.py dist/characters.json dist/avatar_profiles.json dist/avatar-assets
+          test "$(jq 'length' dist/avatar_profiles.json)" -eq "$(jq 'length' dist/characters.json)"
 
       - name: Search the web for optional story background
         env:
@@ -208,7 +227,7 @@ jobs:
           Use the user theme prompt as the source of truth for every design choice. Derive the theme from the story only when the user left the theme blank. Make the theme unmistakable and specific; do not fall back to the same generic city/neon plaza. Use unique names for all Parts and give each building its own complete, furnished layout, including doors and windows.
           Include one character_placements entry for every supplied username using exact spelling, roles lead/supporting, positions X=-8..8, Y=0..3, Z=12..38. Keep a clear 30-by-40-stud area around this cast so characters and camera remain unobstructed.
           Use 5 to 8 camera_shots with increasing times from 0 through ${DURATION_SECONDS}; show the complete environment, all named characters, landmarks, and the ending beat. Coordinates are Roblox X,Y,Z. Begin wide, use smooth moves and 2-3 deliberate snap cuts, finish on the lead.
-          The world platform spans X/Z=-320..320. Props must be individually modeled physical Roblox Parts (not images or flat drawings): allowed shapes Block/Ball/Cylinder; allowed materials Plastic, SmoothPlastic, Concrete, Grass, Slate, Wood, Metal, Neon, Glass, Brick, Asphalt. Each prop has a unique short name, position with each coordinate -250..250, size dimensions 0.5..120, and RGB color integers 0..255. Keep all props within the platform and appropriate for all ages.
+          The world platform spans X/Z=-320..320. Props must be individually modeled physical Roblox Parts (not images or flat drawings): allowed shapes Block/Ball/Cylinder; allowed materials Plastic, SmoothPlastic, Concrete, Grass, Slate, Wood, Metal, Neon, Glass, Brick, Asphalt. Each prop has a unique short name, position X/Z=-250..250 and Y=0..250 (Y is height above the ground), size dimensions 0.5..120, and RGB color integers 0..255. Keep all props within the platform and appropriate for all ages.
           PROMPT
           jq -n --arg model "$AI_MODEL" --argjson think "$AI_THINK" --rawfile prompt map_prompt.txt \
             '{model:$model, prompt:$prompt, format:"json", think:$think, stream:false, options:{temperature:0.55, num_predict:30000}}' > map_request.json
@@ -224,7 +243,7 @@ jobs:
               exit 1
             fi
             cat >> map_prompt.txt <<RETRY
-          The previous map JSON failed structural validation. Regenerate the entire map from scratch, preserving the custom user theme. Return valid JSON with at least 70 unique, individually named props and no fixed maximum; include as many useful details as possible. All positions must be within -250..250 and sizes within 0.5..120. Furnish buildings and include windows and doors. Do not return analysis or markdown.
+          The previous map JSON failed structural validation. Regenerate the entire map from scratch, preserving the custom user theme. Return valid JSON with at least 70 unique, individually named props and no fixed maximum; include as many useful details as possible. Positions must use X/Z=-250..250 and Y=0..250; sizes must be within 0.5..120. Furnish buildings and include windows and doors. Do not return analysis or markdown.
           RETRY
             jq -n --arg model "$AI_MODEL" --argjson think "$AI_THINK" --rawfile prompt map_prompt.txt \
               '{model:$model, prompt:$prompt, format:"json", think:$think, stream:false, options:{temperature:0.45, num_predict:30000}}' > map_request.json
@@ -300,11 +319,37 @@ jobs:
           print(f'Validated Studio XML, {classes.count("Part")} editable Parts, scripts, and visible timed captions.')
           PY
           {
-            echo "## Roblox Studio experience ready"
+            echo "## Roblox short video and optional Studio project ready"
             echo "- Place: \`Roblox_Studio_Experience.rbxlx\`"
             echo "- The Studio place opens with a fully furnished, editable world containing $(python -c 'import json; print(len(json.load(open("dist/Roblox_Story_Map.json"))["props"]))') AI-authored map Parts, with no fixed 100-Part ceiling, plus the bright Roblox sky, authentic Roblox avatars, readable captions, and AI camera tour."
-            echo "- Roblox Studio is not installed on the Linux runner, so this workflow produces a runnable Studio place and narration sidecars, not a rendered MP4."
+            echo "- A vertical H.264/AAC MP4 is rendered automatically in the Linux workflow with headless Three.js and FFmpeg; no local Roblox Studio or Blender run is needed."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Render the complete vertical MP4 without Roblox Studio or Blender
+        env:
+          DURATION_SECONDS: ${{ inputs.duration_seconds }}
+        run: |
+          node tools/video_renderer/render_short.mjs \
+            --map dist/Roblox_Story_Map.json \
+            --characters dist/characters.json \
+            --profiles dist/avatar_profiles.json \
+            --captions dist/narration.srt \
+            --duration "$DURATION_SECONDS" \
+            --output dist/short_silent.mp4
+          test -s dist/short_silent.mp4
+          ffmpeg -hide_banner -y -i dist/short_silent.mp4 -i dist/narration.mp3 \
+            -filter_complex "[1:a]apad=whole_dur=${DURATION_SECONDS},atrim=duration=${DURATION_SECONDS},loudnorm=I=-16:TP=-1.5:LRA=11[a]" \
+            -map 0:v:0 -map '[a]' -c:v copy -c:a aac -b:a 192k -t "$DURATION_SECONDS" \
+            -movflags +faststart dist/Roblox_2K_YouTube_Short.mp4
+          python tools/validate_short.py \
+            --video dist/Roblox_2K_YouTube_Short.mp4 \
+            --silent-video dist/short_silent.mp4 \
+            --narration dist/narration.txt \
+            --captions dist/narration.srt \
+            --characters dist/characters.json \
+            --profiles dist/avatar_profiles.json \
+            --map-plan dist/Roblox_Story_Map.json \
+            --duration "$DURATION_SECONDS"
 
       - name: Write AI-generated creation summary and bundle the final deliverables
         env:
@@ -326,11 +371,14 @@ jobs:
               'camera_shot_count': len(plan.get('camera_shots', [])),
               'cast_usernames': cast,
               'duration_seconds': int(__import__('os').environ['DURATION_SECONDS']),
+              'rendered_video': 'Roblox_2K_YouTube_Short.mp4',
+              'video_resolution': '1440x2560 at 30 fps',
+              'rendering_requires_local_studio': False,
           }
           prompt = (
               'Write a concise, friendly 100–160 word final creation summary for the user. '
-              'Summarize only the completed story, world theme, furnishing, avatars, camera, captions, and deliverables in this data. '
-              'Do not reveal or imitate private chain-of-thought. Do not claim Roblox Studio runtime testing or MP4 rendering. '
+              'Summarize only the completed story, world theme, furnishing, real Roblox avatars, camera, captions, and the rendered MP4 deliverables in this data. '
+              'Do not reveal or imitate private chain-of-thought. Do not claim Roblox Studio runtime testing. '
               'Do not invent features not present in the data. Return only JSON with a summary string.\nDATA: '
               + json.dumps(context, ensure_ascii=False)
           )
@@ -370,25 +418,25 @@ jobs:
           test -s dist/Roblox_Studio_Complete_Package.zip
           {
             echo "## Final ZIP bundle"
-            echo "- Includes the editable place, map/story/cast data, narration audio and captions, prompt files, AI creation summary, and tools/design PDF."
-            echo "- The PDF documents high-level design choices and tools; it does not expose private internal chain-of-thought."
+            echo "- Includes the rendered vertical MP4, editable place, map/story/cast and real avatar data, narration/audio captions, prompts, AI creation summary, and tools/design PDF."
+            echo "- The PDF documents the high-level design and tools (not private chain-of-thought); the video passed the MP4 quality gate."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the Roblox Studio project and narration assets
         uses: actions/upload-artifact@v4
         with:
-          name: Roblox-Studio-Experience
+          name: Roblox-Story-Short-MP4
           path: dist/
           if-no-files-found: error
           retention-days: 14
 
-      - name: Record a repair task if the Studio project fails validation
+      - name: Record a repair task if short or project validation fails
         if: failure()
         run: |
           {
-            echo '## Studio experience needs a repair pass'
+            echo '## Roblox short generation needs a repair pass'
             echo
-            echo '- The Studio place failed to build or validate, so no experience artifact was uploaded.'
+            echo '- The MP4, avatar, narration, Studio project, or ZIP/PDF failed to build or validate, so no complete short package was uploaded.'
             echo '- Review the first failed step above, fix that issue, then rerun this workflow.'
             echo "- Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } >> "$GITHUB_STEP_SUMMARY"
