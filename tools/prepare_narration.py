@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -153,14 +154,16 @@ def main():
         if not text or len(words) < minimum:
             # A compact known-good story is the last resort when the model stays
             # below the floor after the directional rewrite retries.
+            cast = [name.strip() for name in os.environ.get("CAST_NAMES", "").split(",") if name.strip()]
+            lead = cast[0] if cast else "Maya"
+            group = lead if len(cast) == 1 else f"{', '.join(cast[:-1])} and {cast[-1]}" if cast else lead
             text = (
-                "On a busy afternoon, Maya spotted a wallet beside the school gate. "
-                "She checked only for a name, then gave it to the office before hurrying home. "
+                f"On a busy afternoon, {group} spotted a wallet beside the school gate. "
+                f"{lead} checked only for a name, then brought it to the office before hurrying home. "
                 "A worried parent returned minutes later, grateful to find the family photo still inside. "
-                "Maya had nearly walked past, but stopping took only a moment. "
-                "That evening, she remembered the relieved smile and felt glad she had chosen to help. "
-                "The next morning, she told her friend what happened, and they agreed that doing the right thing often begins with one small decision. "
-                "She hoped someone would show the same care if she ever lost something important."
+                f"{lead} had nearly walked past, but stopping took only a moment. "
+                "That evening, the relieved smile reminded everyone that doing the right thing often begins with one small decision. "
+                "They hoped someone would show the same care if they ever lost something important."
             )
             text = trim_to_word_limit(text, maximum)
             words = re.findall(r"\b[\w’'-]+\b", text)
