@@ -194,31 +194,35 @@ jobs:
             --duration "$DURATION_SECONDS" \
             --output "$PWD/dist/short_silent.mp4" \
             --width 1440 --height 2560 --fps 30
+          test -s dist/short_silent.mp4 || { echo "Blender did not produce a silent MP4; stopping before FFmpeg mux." >&2; exit 1; }
           ffmpeg -hide_banner -y -i dist/short_silent.mp4 -i dist/narration.mp3 -i /tmp/short-sound-bed.wav \
             -vf "subtitles=dist/narration.srt:force_style='FontName=DejaVu Sans,FontSize=64,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00111111,BorderStyle=1,Outline=5,Shadow=1,MarginL=120,MarginR=120,MarginV=300,Alignment=2'" \
             -filter_complex "[1:a]volume=1.0[voice];[2:a]volume=0.38[effects];[voice][effects]amix=inputs=2:duration=longest:dropout_transition=0,loudnorm=I=-16:TP=-1.5:LRA=11[mix]" \
             -map 0:v:0 -map '[mix]' -c:v libx264 -preset fast -crf 20 \
             -pix_fmt yuv420p -r 30 -c:a aac -b:a 192k -shortest \
             -movflags +faststart dist/Roblox_2K_YouTube_Short.mp4
-          python - <<'PY'
-          import json, subprocess
-          path = 'dist/Roblox_2K_YouTube_Short.mp4'
-          info = json.loads(subprocess.check_output([
-              'ffprobe', '-v', 'error', '-show_streams', '-show_format', '-of', 'json', path
-          ], text=True))
-          video = next(s for s in info['streams'] if s['codec_type'] == 'video')
-          audio = next(s for s in info['streams'] if s['codec_type'] == 'audio')
-          seconds = float(info['format']['duration'])
-          print(f"Verified final MP4: {video['width']}x{video['height']} {video['avg_frame_rate']} fps, {seconds:.1f}s, {audio['codec_name']} audio")
-          expected = int(__import__('os').environ['DURATION_SECONDS'])
-          if (video['width'], video['height']) != (1440, 2560) or audio['codec_name'] != 'aac' or not expected - 2 <= seconds <= expected + 2:
-              raise SystemExit('Final MP4 failed vertical 2K, AAC audio, or selected-duration validation.')
-          PY
+          python tools/validate_short.py \
+            --video dist/Roblox_2K_YouTube_Short.mp4 \
+            --silent-video dist/short_silent.mp4 \
+            --narration dist/narration.txt \
+            --captions dist/narration.srt \
+            --duration "$DURATION_SECONDS"
 
-      - name: Upload only the finished YouTube Short MP4
+      - name: Upload only the approved YouTube Short MP4
         uses: actions/upload-artifact@v4
         with:
           name: Roblox-2K-YouTube-Short
           path: dist/Roblox_2K_YouTube_Short.mp4
           if-no-files-found: error
           retention-days: 14
+
+      - name: Record a repair task if render or quality checks fail
+        if: failure()
+        run: |
+          {
+            echo '## Short needs a repair pass'
+            echo
+            echo '- The short was not approved, so no MP4 artifact was uploaded.'
+            echo '- Review the first failed step above, fix that issue, then rerun this workflow.'
+            echo "- Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } >> "$GITHUB_STEP_SUMMARY"

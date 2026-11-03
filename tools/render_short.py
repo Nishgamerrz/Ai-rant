@@ -273,8 +273,9 @@ def main():
     scene.render.ffmpeg.codec = "H264"
     scene.render.ffmpeg.constant_rate_factor = "HIGH"
     scene.render.ffmpeg.ffmpeg_preset = "GOOD"
+    # `max_rate` is not exposed by Blender's FFmpegSettings in Blender 4.0.x.
+    # Keep to the stable bitrate property shared by the Ubuntu Blender builds.
     scene.render.ffmpeg.video_bitrate = 16000
-    scene.render.ffmpeg.max_rate = 20000
     scene.render.filepath = str(Path(args.output).resolve())
     scene.render.use_file_extension = True
     scene.render.image_settings.color_mode = "RGB"
