@@ -130,8 +130,39 @@ jobs:
           npm ci --no-audit --no-fund
           npx playwright install --with-deps chromium
 
+      - name: Reclaim runner disk space for the selected model
+        id: disk-space
+        env:
+          MODEL_QUALITY: ${{ inputs.model_quality }}
+        run: |
+          echo "Runner storage before cleanup:"
+          df -h "$GITHUB_WORKSPACE"
+          # These large preinstalled SDKs are unused by this Python/Node workflow.
+          sudo rm -rf /usr/local/lib/android/sdk /usr/share/dotnet /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/share/boost
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          rm -rf "$HOME/.cache/pip" "$HOME/.npm/_cacache"
+          echo "Runner storage after cleanup:"
+          df -h "$GITHUB_WORKSPACE"
+          AVAILABLE_KB=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}')
+          AVAILABLE_GIB=$((AVAILABLE_KB / 1024 / 1024))
+          echo "Free storage after cleanup: ${AVAILABLE_GIB} GiB."
+          CACHE_RESTORE_ALLOWED=true
+          if [ "$MODEL_QUALITY" = "hard" ]; then
+            if [ "$AVAILABLE_KB" -lt $((12 * 1024 * 1024)) ]; then
+              echo "Only ${AVAILABLE_GIB} GiB is free after cleanup; the 9.3 GB hard model needs at least 12 GiB for download and working files." >&2
+              exit 1
+            fi
+            if [ "$AVAILABLE_KB" -lt $((20 * 1024 * 1024)) ]; then
+              CACHE_RESTORE_ALLOWED=false
+              echo "Less than 20 GiB is free; skipping the large model-cache archive to avoid exhausting runner storage."
+            fi
+          fi
+          echo "cache_restore_allowed=$CACHE_RESTORE_ALLOWED" >> "$GITHUB_OUTPUT"
+
       - name: Restore cached selected Ollama model
         id: model-cache
+        if: steps.disk-space.outputs.cache_restore_allowed == 'true'
         uses: actions/cache/restore@v4
         with:
           path: ~/.ollama/models
@@ -144,6 +175,7 @@ jobs:
         run: |
           curl -fsSL https://ollama.com/download/ollama-linux-amd64.tar.zst -o ollama.tar.zst
           sudo tar -I zstd -xf ollama.tar.zst -C /usr
+          rm -f ollama.tar.zst
           ollama serve > ollama.log 2>&1 &
           for attempt in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then break; fi
@@ -170,6 +202,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save selected Ollama model cache
+        if: steps.disk-space.outputs.cache_restore_allowed == 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.ollama/models
