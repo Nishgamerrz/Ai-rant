@@ -169,6 +169,13 @@ function buildHtml(data) {
     const username=profile.username,place=placements.get(username.toLowerCase());
     const fallback=[[0,0,24],[-4,0,25],[4,0,25],[-7,0,31],[7,0,31],[0,0,36]][index];
     const point=place?.position||fallback; const path='/avatar-assets/'+profile.user_id+'/';
+    if(!profile.model_ready){
+      const portrait=await new Promise((resolve,reject)=>new THREE.TextureLoader().load(path+'avatar.png',resolve,undefined,reject));
+      portrait.colorSpace=THREE.SRGBColorSpace;
+      const root=new THREE.Group();root.name='AuthenticRobloxAvatarPortrait_'+username;root.position.set(point[0],point[1],point[2]);
+      const image=new THREE.Sprite(new THREE.SpriteMaterial({map:portrait,transparent:true,depthTest:true,depthWrite:false}));image.scale.set(5.4,5.4,1);image.position.y=2.9;root.add(image);
+      const label=nameSprite(username);label.position.y=6.3;root.add(label);scene.add(root);actors.push({root,baseY:point[1]});return;
+    }
     const [objResponse,mtlResponse]=await Promise.all([fetch(path+'avatar.obj'),fetch(path+'avatar.mtl')]);
     if(!objResponse.ok||!mtlResponse.ok) throw new Error('Missing public Roblox avatar model files for '+username);
     const [objText,mtlText]=await Promise.all([objResponse.text(),mtlResponse.text()]);
@@ -244,7 +251,7 @@ async function main() {
   if(!Array.isArray(usernames)||usernames.length===0) throw new Error('Provide at least one actual Roblox username for the lead avatar.');
   if(!Array.isArray(profiles)||profiles.length!==usernames.length) throw new Error('Actual Roblox avatar profiles do not match the username cast.');
   const profileByName=new Map(profiles.map(p=>[p.username.toLowerCase(),p]));
-  const orderedProfiles=usernames.map(name=>{const p=profileByName.get(name.toLowerCase());if(!p?.model_ready||!p.user_id)throw new Error('Authentic Roblox avatar mesh missing for '+name);return p;});
+  const orderedProfiles=usernames.map(name=>{const p=profileByName.get(name.toLowerCase());if(!p?.user_id||(!p.model_ready&&!p.thumbnail_ready))throw new Error('Authentic Roblox avatar mesh or thumbnail missing for '+name);return p;});
   const captions=parseSrt(readFileSync(args.captions,'utf8'));
   if(!captions.length) throw new Error('SRT contains no caption cues; refusing to make an uncaptioned MP4.');
   const data={plan,profiles:orderedProfiles,captions,duration:args.duration};
@@ -264,7 +271,7 @@ async function main() {
     ffmpeg=spawn('ffmpeg',['-y','-hide_banner','-loglevel','warning','-f','image2pipe','-vcodec','png','-framerate',String(FPS),'-i','pipe:0','-an','-c:v','libx264','-preset','veryfast','-crf','19','-pix_fmt','yuv420p','-vf','scale=1440:2560:flags=lanczos','-r',String(FPS),'-t',String(args.duration),'-movflags','+faststart',args.output],{stdio:['pipe','ignore','inherit']});
     const ffmpegExit=once(ffmpeg,'close');
     const totalFrames=args.duration*FPS;
-    console.log(`Rendering ${totalFrames} headless 3D frames from the furnished AI map and ${orderedProfiles.length} genuine Roblox avatar mesh(es).`);
+    console.log(`Rendering ${totalFrames} headless 3D frames from the furnished AI map and ${orderedProfiles.length} genuine Roblox avatar(s) (mesh or account-thumbnail source).`);
     for(let frame=0;frame<totalFrames;frame++){
       const time=frame/FPS;
       await page.evaluate(t=>window.renderAt(t),time);

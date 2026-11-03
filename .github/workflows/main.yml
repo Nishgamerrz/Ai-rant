@@ -32,7 +32,7 @@ on:
           - medium
           - hard
       character_usernames:
-        description: 'Required: comma-separated real Roblox usernames for authentic avatar meshes (first is lead; max 6)'
+        description: 'Required: comma-separated Roblox usernames for authentic avatar meshes or account thumbnails (first is lead; max 6)'
         required: true
         default: ''
         type: string
@@ -126,9 +126,9 @@ jobs:
           echo "CAST_NAMES=$CAST_NAMES" >> "$GITHUB_ENV"
           echo "CHARACTER_USERNAMES_JSON=$(jq -c . dist/characters.json)" >> "$GITHUB_ENV"
           echo "Cast usernames: ${CAST_NAMES:-none supplied}"
-          test "$(jq 'length' dist/characters.json)" -ge 1 || { echo "Enter at least one real Roblox username; the MP4 uses the real Roblox avatar mesh." >&2; exit 1; }
+          test "$(jq 'length' dist/characters.json)" -ge 1 || { echo "Enter at least one real Roblox username; the MP4 uses that account's authentic Roblox avatar." >&2; exit 1; }
 
-      - name: Download authentic Roblox avatar meshes for the short
+      - name: Download authentic Roblox avatar assets for the short
         run: |
           python tools/fetch_roblox_avatars.py dist/characters.json dist/avatar_profiles.json dist/avatar-assets
           test "$(jq 'length' dist/avatar_profiles.json)" -eq "$(jq 'length' dist/characters.json)"
@@ -229,11 +229,24 @@ jobs:
           Use 5 to 8 camera_shots with increasing times from 0 through ${DURATION_SECONDS}; show the complete environment, all named characters, landmarks, and the ending beat. Coordinates are Roblox X,Y,Z. Begin wide, use smooth moves and 2-3 deliberate snap cuts, finish on the lead.
           The world platform spans X/Z=-320..320. Props must be individually modeled physical Roblox Parts (not images or flat drawings): allowed shapes Block/Ball/Cylinder; allowed materials Plastic, SmoothPlastic, Concrete, Grass, Slate, Wood, Metal, Neon, Glass, Brick, Asphalt. Each prop has a unique short name, position X/Z=-250..250 and Y=0..250 (Y is height above the ground), size dimensions 0.5..120, and RGB color integers 0..255. Keep all props within the platform and appropriate for all ages.
           PROMPT
-          jq -n --arg model "$AI_MODEL" --argjson think "$AI_THINK" --rawfile prompt map_prompt.txt \
-            '{model:$model, prompt:$prompt, format:"json", think:$think, stream:false, options:{temperature:0.55, num_predict:30000}}' > map_request.json
-          curl --fail --silent --show-error --max-time 600 \
-            http://127.0.0.1:11434/api/generate -d @map_request.json -o map_response.json
+          # Preserve the selected model, but disable private reasoning tokens for this JSON-only task.
+          # A large, furnished scene can take longer than the old 10-minute ceiling, so allow 30 minutes
+          # per generation and retry transient Ollama timeouts before failing the workflow.
+          jq -n --arg model "$AI_MODEL" --rawfile prompt map_prompt.txt \
+            '{model:$model, prompt:$prompt, format:"json", think:false, stream:false, options:{temperature:0.55, num_predict:30000}}' > map_request.json
           for attempt in 1 2 3; do
+            curl_status=0
+            curl --fail --silent --show-error --connect-timeout 30 --max-time 1800 \
+              http://127.0.0.1:11434/api/generate -d @map_request.json -o map_response.json || curl_status=$?
+            if [ "$curl_status" -ne 0 ]; then
+              if [ "$attempt" -eq 3 ]; then
+                echo "Ollama map generation failed after 3 attempts (curl exit ${curl_status})." >&2
+                exit "$curl_status"
+              fi
+              echo "Ollama map generation request failed (curl exit ${curl_status}); retrying attempt $((attempt + 1))/3."
+              sleep 5
+              continue
+            fi
             if python tools/build_story_map.py map_response.json dist/Roblox_Story_Map.json "$DURATION_SECONDS" --json-only --strict --min-props 70 --usernames dist/characters.json; then
               echo "AI-authored full world passed validation on attempt ${attempt}."
               break
@@ -245,10 +258,8 @@ jobs:
             cat >> map_prompt.txt <<RETRY
           The previous map JSON failed structural validation. Regenerate the entire map from scratch, preserving the custom user theme. Return valid JSON with at least 70 unique, individually named props and no fixed maximum; include as many useful details as possible. Positions must use X/Z=-250..250 and Y=0..250; sizes must be within 0.5..120. Furnish buildings and include windows and doors. Do not return analysis or markdown.
           RETRY
-            jq -n --arg model "$AI_MODEL" --argjson think "$AI_THINK" --rawfile prompt map_prompt.txt \
-              '{model:$model, prompt:$prompt, format:"json", think:$think, stream:false, options:{temperature:0.45, num_predict:30000}}' > map_request.json
-            curl --fail --silent --show-error --max-time 600 \
-              http://127.0.0.1:11434/api/generate -d @map_request.json -o map_response.json
+            jq -n --arg model "$AI_MODEL" --rawfile prompt map_prompt.txt \
+              '{model:$model, prompt:$prompt, format:"json", think:false, stream:false, options:{temperature:0.45, num_predict:30000}}' > map_request.json
           done
 
       - name: Synthesize the selected narrator voice and readable captions
