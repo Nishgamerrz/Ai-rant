@@ -623,7 +623,7 @@ def build(args):
             "1. Download and unzip `Roblox_Studio_Complete_Package.zip`.\n"
             "2. Play `Roblox_2K_YouTube_Short.mp4` directly. It is rendered automatically by the workflow with authentic Roblox avatars (3D meshes where accessible, otherwise the account's real avatar thumbnail), world, camera tour, narration, and visible burned-in captions; you do not need to open Roblox Studio.\n"
             "3. The ZIP also includes `AI_Creation_Summary.txt`, `AI_Design_and_Tools_Report.pdf`, narration audio/subtitles, generation prompts, and an optional editable `Roblox_Studio_Experience.rbxlx` project.\n"
-            "4. The real Roblox avatar is loaded from the username entered in the workflow. The MP4 is a headless Three.js rendering of the generated world, not a capture from a running Roblox client.\n\n"
+            "4. The real Roblox avatar is loaded from the username entered in the workflow. The MP4 is a headless Three.js rendering of the generated world, not a capture from a running Roblox client. Its authentic avatar OBJ meshes receive procedural whole-avatar movement; they are not rigged for native R15 joint animations.\n\n"
             "## Notes\n\n"
             "The workflow renders the MP4 automatically using headless Chromium, Three.js, and FFmpeg; neither Roblox Studio nor Blender needs to be installed or launched. The optional `.rbxlx` project remains editable in Studio. Video validation does not claim a Roblox game-client runtime test.\n"
         )

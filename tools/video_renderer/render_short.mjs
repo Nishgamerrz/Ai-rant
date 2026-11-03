@@ -159,6 +159,11 @@ function buildHtml(data) {
   const title=document.getElementById('title'),theme=document.getElementById('theme'),caption=document.getElementById('caption');
   title.textContent=(DATA.plan.name||'STORY WORLD').toUpperCase(); theme.textContent=DATA.plan.theme||'';
   const actors=[];
+  function registerActor(root,point,index,placement){
+    const lead=placement?.role==='lead'||index===0;
+    actors.push({root,baseX:Number(point[0]),baseY:Number(point[1]),baseZ:Number(point[2]),
+      phase:index*1.73,lead,stride:lead?2.1:1.15,baseYaw:0});
+  }
   function nameSprite(text){
     const canvas=document.createElement('canvas'); canvas.width=512;canvas.height=96;const ctx=canvas.getContext('2d');
     ctx.fillStyle='rgba(8,17,30,.82)';ctx.fillRect(8,8,496,80);ctx.font='bold 38px Arial';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillStyle='#fff';ctx.fillText(text.slice(0,24),256,48,470);
@@ -174,7 +179,7 @@ function buildHtml(data) {
       portrait.colorSpace=THREE.SRGBColorSpace;
       const root=new THREE.Group();root.name='AuthenticRobloxAvatarPortrait_'+username;root.position.set(point[0],point[1],point[2]);
       const image=new THREE.Sprite(new THREE.SpriteMaterial({map:portrait,transparent:true,depthTest:true,depthWrite:false}));image.scale.set(5.4,5.4,1);image.position.y=2.9;root.add(image);
-      const label=nameSprite(username);label.position.y=6.3;root.add(label);scene.add(root);actors.push({root,baseY:point[1]});return;
+      const label=nameSprite(username);label.position.y=6.3;root.add(label);scene.add(root);registerActor(root,point,index,place);return;
     }
     const [objResponse,mtlResponse]=await Promise.all([fetch(path+'avatar.obj'),fetch(path+'avatar.mtl')]);
     if(!objResponse.ok||!mtlResponse.ok) throw new Error('Missing public Roblox avatar model files for '+username);
@@ -194,7 +199,7 @@ function buildHtml(data) {
     const avatarScale=6.2/size.y;model.scale.setScalar(avatarScale);model.position.set(-((bounds.min.x+bounds.max.x)/2)*avatarScale,-bounds.min.y*avatarScale,-((bounds.min.z+bounds.max.z)/2)*avatarScale);
     model.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true;if(o.material){const ms=Array.isArray(o.material)?o.material:[o.material];for(const m of ms){m.side=THREE.DoubleSide;m.needsUpdate=true;}}}});
     pivot.add(model);pivot.position.set(point[0],point[1],point[2]);
-    const label=nameSprite(username);label.position.set(0,7.2,0);pivot.add(label);scene.add(pivot);actors.push({root:pivot,baseY:point[1]});
+    const label=nameSprite(username);label.position.set(0,7.2,0);pivot.add(label);scene.add(pivot);registerActor(pivot,point,index,place);
   }
   const avatarPromise=Promise.all(DATA.profiles.map(loadAvatar));
   const shots=DATA.plan.camera_shots?.length?DATA.plan.camera_shots:[{time:0,position:[0,45,110],target:[0,4,24],transition:'smooth'},{time:DATA.duration,position:[-25,18,50],target:[0,3,24],transition:'smooth'}];
@@ -206,9 +211,20 @@ function buildHtml(data) {
     const mix=(key)=>new THREE.Vector3(...a[key]).lerp(new THREE.Vector3(...b[key]),alpha);
     const pos=mix('position');pos.y=Math.max(2.5,pos.y);const target=mix('target');camera.position.copy(pos);camera.lookAt(target);camera.updateMatrixWorld(true);
   }
+  // Roblox's public OBJ avatar export has no R15 skeleton, so animate the authentic model as a whole:
+  // gentle story-walk root motion, turns, footfall bounce, and a small lead-character ending beat.
+  function animateActor(actor,t){
+    const cycle=t*1.8+actor.phase,progress=Math.max(0,Math.min(1,t/DATA.duration));
+    const ending=Math.max(0,Math.sin(Math.PI*Math.max(0,Math.min(1,(progress-.78)/.22))));
+    actor.root.position.x=actor.baseX+Math.sin(cycle*.48)*actor.stride;
+    actor.root.position.z=actor.baseZ+Math.cos(cycle*.39+actor.phase)*actor.stride*.55;
+    actor.root.position.y=actor.baseY+Math.max(0,Math.sin(cycle*3.4))*.14+ending*(actor.lead?.34:.08);
+    actor.root.rotation.y=actor.baseYaw+Math.sin(cycle*.48+actor.phase)*.28+ending*(actor.lead?.22:0);
+    actor.root.rotation.z=Math.sin(cycle*3.4+actor.phase)*.035;
+  }
   window.sceneReady=avatarPromise.then(()=>{renderer.compile(scene,camera);return true;});
   window.renderAt=async(t)=>{
-    cameraAt(t);for(const actor of actors)actor.root.position.y=actor.baseY+Math.abs(Math.sin(t*2.2))*.035;
+    cameraAt(t);for(const actor of actors)animateActor(actor,t);
     const active=cues.find(c=>t>=c.start&&t<=c.finish);caption.textContent=active?.text||'';
     renderer.render(scene,camera);await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));return true;
   };

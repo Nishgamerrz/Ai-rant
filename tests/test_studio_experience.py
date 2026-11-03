@@ -26,6 +26,14 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("treat the user's cue as a required design constraint", workflow)
         self.assertIn("daylight cue means a clearly bright, naturally sunlit daytime world", workflow)
 
+    def test_mp4_renderer_applies_procedural_motion_to_authentic_avatar_models(self):
+        renderer = (ROOT / "tools/video_renderer/render_short.mjs").read_text(encoding="utf-8")
+        report = (ROOT / "tools/package_studio_deliverables.py").read_text(encoding="utf-8")
+        self.assertIn("function animateActor(actor,t)", renderer)
+        self.assertIn("actor.root.rotation.y", renderer)
+        self.assertIn("story-walk root motion", renderer)
+        self.assertIn("rather than native R15 joint animations", report)
+
     def test_builder_packages_playable_place_with_world_cast_and_captions(self):
         with tempfile.TemporaryDirectory() as temporary:
             work = Path(temporary)
