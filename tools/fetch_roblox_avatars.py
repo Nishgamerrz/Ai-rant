@@ -8,10 +8,14 @@ import re
 import statistics
 import sys
 import time
+import shutil
 from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+USERS_ROOT = Path(__file__).resolve().parents[1] / "users"
+LOCAL_ASSET_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
 
 def request_bytes(url: str, data: dict | None = None, headers: dict[str, str] | None = None) -> bytes:
@@ -194,6 +198,75 @@ def fetch_avatar_model(user_id: int, output_dir: Path) -> dict:
             "model_source": model_source}
 
 
+def find_local_avatar_folder(username: str, users_root: Path = USERS_ROOT) -> Path | None:
+    """Find users/<username> case-insensitively without allowing path traversal."""
+    if not re.fullmatch(r"[A-Za-z0-9_]{3,20}", username) or not users_root.is_dir() or users_root.is_symlink():
+        return None
+    root = users_root.resolve()
+    for candidate in users_root.iterdir():
+        if (candidate.is_dir() and not candidate.is_symlink()
+                and candidate.name.casefold() == username.casefold()
+                and candidate.resolve().is_relative_to(root)):
+            return candidate
+    return None
+
+
+def has_local_avatar_obj(username: str, users_root: Path = USERS_ROOT) -> bool:
+    folder = find_local_avatar_folder(username, users_root)
+    if folder is None:
+        return False
+    return any(path.is_file() and not path.is_symlink() and path.name.casefold() == "avatar.obj"
+               for path in folder.iterdir())
+
+
+def load_local_avatar_model(username: str, user_id: int | str, users_root: Path, output_dir: Path) -> dict | None:
+    """Use a staged users/<username>/avatar.obj before making an authenticated network request."""
+    user_folder = find_local_avatar_folder(username, users_root)
+    if user_folder is None:
+        return None
+
+    candidates = {path.name.casefold(): path for path in user_folder.iterdir()
+                  if path.is_file() and not path.is_symlink()}
+    source_obj = candidates.get("avatar.obj")
+    if source_obj is None:
+        return None
+    obj_text = source_obj.read_text(encoding="utf-8", errors="replace")
+    if not re.search(r"(?m)^\s*v\s", obj_text) or not re.search(r"(?m)^\s*f\s", obj_text):
+        raise ValueError(f"{user_folder}/avatar.obj does not contain a readable OBJ mesh")
+
+    source_mtl = candidates.get("avatar.mtl") or next(
+        (path for path in user_folder.iterdir()
+         if path.is_file() and not path.is_symlink() and path.suffix.casefold() == ".mtl"),
+        None,
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    copied_textures = 0
+    for source in user_folder.rglob("*"):
+        if (source.is_symlink() or not source.is_file()
+                or source.suffix.casefold() not in LOCAL_ASSET_SUFFIXES):
+            continue
+        relative = source.relative_to(user_folder)
+        destination = output_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        copied_textures += 1
+
+    obj_path = output_dir / "avatar.obj"
+    obj_text = re.sub(r"(?m)^\s*mtllib\s+.*$", "mtllib avatar.mtl", obj_text)
+    if not re.search(r"(?m)^\s*mtllib\s", obj_text):
+        obj_text = "mtllib avatar.mtl\n" + obj_text
+    obj_path.write_text(obj_text, encoding="utf-8")
+    mtl_path = output_dir / "avatar.mtl"
+    if source_mtl is not None:
+        shutil.copyfile(source_mtl, mtl_path)
+    else:
+        mtl_path.write_text("newmtl LocalAvatar\nKd 0.72 0.72 0.72\n", encoding="utf-8")
+
+    return {"model_obj": str(obj_path.resolve()), "model_mtl": str(mtl_path.resolve()),
+            "model_ready": True, "texture_count": copied_textures,
+            "front_direction": [0, 0, 1], "model_source": "users-folder"}
+
+
 def main() -> None:
     if len(sys.argv) != 4:
         raise SystemExit("usage: fetch_roblox_avatars.py USERNAMES.json OUTPUT_PROFILES.json ASSET_DIR")
@@ -203,35 +276,59 @@ def main() -> None:
         raise SystemExit("At least one public Roblox username is required to render a real avatar in the MP4.")
 
     try:
-        result = request_json(
-            "https://users.roblox.com/v1/usernames/users",
-            {"usernames": usernames, "excludeBannedUsers": True},
-        )
-        by_name = {item.get("requestedUsername", "").casefold(): item for item in result.get("data", [])}
+        try:
+            result = request_json(
+                "https://users.roblox.com/v1/usernames/users",
+                {"usernames": usernames, "excludeBannedUsers": False},
+            )
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError) as lookup_error:
+            print(f"Roblox username lookup failed ({type(lookup_error).__name__}); checking local users/<username>/avatar.obj files.", file=sys.stderr)
+            result = {}
+        data = result.get("data", []) if isinstance(result, dict) else []
+        by_name = {item.get("requestedUsername", "").casefold(): item
+                   for item in data if isinstance(item, dict) and isinstance(item.get("requestedUsername"), str)}
         records = []
         for username in usernames:
             item = by_name.get(username.casefold())
-            if not item or not item.get("id"):
-                raise RuntimeError(f"Roblox username {username!r} was not found")
-            user_id = int(item["id"])
+            local_only = False
+            if item and item.get("id"):
+                user_id: int | str = int(item["id"])
+            elif has_local_avatar_obj(username, USERS_ROOT):
+                user_id = f"local-{username.casefold()}"
+                local_only = True
+                print(f"Roblox did not resolve {username}; using the matching local users/{username}/avatar.obj.")
+            else:
+                raise RuntimeError(f"Roblox username {username!r} was not found and no local users/{username}/avatar.obj exists")
             profile = {"username": username, "user_id": user_id}
+            if not local_only:
+                try:
+                    thumbs = request_json(
+                        "https://thumbnails.roblox.com/v1/users/avatar?"
+                        f"userIds={user_id}&size=420x420&format=Png&isCircular=false"
+                    )
+                    thumb = next((t.get("imageUrl") for t in thumbs.get("data", []) if t.get("imageUrl")), None)
+                    if thumb:
+                        profile.update(profile_from_thumbnail(thumb, asset_root / str(user_id) / "avatar.png"))
+                except Exception as exc:
+                    print(f"Avatar thumbnail color sampling failed for {username}: {type(exc).__name__}.", file=sys.stderr)
             try:
-                thumbs = request_json(
-                    "https://thumbnails.roblox.com/v1/users/avatar?"
-                    f"userIds={user_id}&size=420x420&format=Png&isCircular=false"
-                )
-                thumb = next((t.get("imageUrl") for t in thumbs.get("data", []) if t.get("imageUrl")), None)
-                if thumb:
-                    profile.update(profile_from_thumbnail(thumb, asset_root / str(user_id) / "avatar.png"))
-            except Exception as exc:
-                print(f"Avatar thumbnail color sampling failed for {username}: {type(exc).__name__}.", file=sys.stderr)
-            try:
-                profile.update(fetch_avatar_model(user_id, asset_root / str(user_id)))
-                print(f"Fetched Roblox avatar mesh and textures for {username} ({profile['texture_count']} textures; source={profile['model_source']}).")
+                try:
+                    local_model = load_local_avatar_model(username, user_id, USERS_ROOT, asset_root / str(user_id))
+                except (OSError, ValueError) as local_error:
+                    print(f"Local users/{username}/avatar.obj could not be used ({local_error}).", file=sys.stderr)
+                    local_model = None
+                if local_model:
+                    profile.update(local_model)
+                    print(f"Loaded local avatar OBJ for {username} from users/{username}/avatar.obj ({local_model['texture_count']} local texture files).")
+                elif local_only:
+                    raise RuntimeError(f"Local avatar mesh for {username} is unreadable")
+                else:
+                    profile.update(fetch_avatar_model(int(user_id), asset_root / str(user_id)))
+                    print(f"Fetched Roblox avatar mesh and textures for {username} ({profile['texture_count']} textures; source={profile['model_source']}).")
             except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError, RuntimeError) as exc:
                 thumbnail_path = Path(profile.get("thumbnail", ""))
-                if not thumbnail_path.is_file() or thumbnail_path.stat().st_size == 0:
-                    raise RuntimeError(f"Roblox mesh access failed and no real avatar thumbnail is available for {username}: {exc}") from exc
+                if local_only or not thumbnail_path.is_file() or thumbnail_path.stat().st_size == 0:
+                    raise RuntimeError(f"Avatar mesh access failed and no usable official thumbnail is available for {username}: {exc}") from exc
                 profile.update({
                     "model_ready": False,
                     "thumbnail_ready": True,
@@ -245,7 +342,7 @@ def main() -> None:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(records, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"Prepared {len(records)} authentic Roblox avatar profile(s) for rendering; each uses the account's real mesh when available or its official account thumbnail otherwise.")
+    print(f"Prepared {len(records)} avatar profile(s) for the requested Roblox usernames; source details are reported per profile.")
 
 
 if __name__ == "__main__":
