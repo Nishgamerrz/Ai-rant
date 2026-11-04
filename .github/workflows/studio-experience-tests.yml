@@ -29,12 +29,14 @@ jobs:
           cache: npm
           cache-dependency-path: tools/video_renderer/package-lock.json
 
-      - name: Install renderer dependencies and smoke-test physics
+      - name: Install renderer dependencies and smoke-test browser imports
         working-directory: tools/video_renderer
         run: |
           npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
           npm run test:physics
           npm run test:avatar-rig
+          npm run test:module-resolution
 
       - name: Compile Python and run experience tests
         run: |

@@ -32,7 +32,7 @@ on:
           - medium
           - hard
       character_usernames:
-        description: 'Enter 1–6 Roblox usernames (required for authentic MP4 avatars; first is lead).'
+        description: 'Enter 1–6 Roblox usernames (first is lead); optional local mesh: users/<username>/avatar.obj.'
         required: false
         default: ''
         type: string
@@ -104,8 +104,9 @@ jobs:
                   f'- **Avatar cast:** {clean(os.environ.get("CAST_NAMES", ""))}\n'
                   '- **Tools:** selected Ollama model, Roblox public avatar APIs, optional web research, edge-tts, Three.js + Rapier, Chromium, FFmpeg, Python validation, ReportLab, ZIP.\n'
                   '- **Pipeline:** story and furnished world/camera plan → narration/captions → physics-enabled MP4 + Studio project → quality checks and package.\n'
-                  '- **Username lookup:** the public Roblox Users API resolves entered usernames to IDs keylessly; no manual ID or uploaded model is needed.\n'
-                  '- **Avatar source:** the named account’s real mesh when Roblox allows it; otherwise that same account’s official avatar thumbnail.\n'
+                  '- **Username lookup:** the public Roblox Users API resolves entered usernames to IDs keylessly; no manual ID is needed.\n'
+                  '- **Local mesh folder:** the workflow first checks the optional users/<username>/avatar.obj path with its MTL and textures.\n'
+                  '- **Avatar source:** a matching local mesh, Roblox mesh when authorized, or that same account’s official avatar thumbnail.\n'
                   '- **Mesh access:** Roblox requires a scoped ROBLOX_OPEN_CLOUD_API_KEY secret for 3D meshes; the value is never logged.\n'
                   '- **Prompt/tool records:** successful runs include generation prompts and final summaries in the downloadable artifact.\n'
               )
@@ -131,6 +132,7 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npx playwright install --with-deps chromium
+          npm run test:module-resolution
 
       - name: Reclaim runner disk space for the selected model
         id: disk-space
@@ -210,7 +212,7 @@ jobs:
           path: ~/.ollama/models
           key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'hard' && 'qwen3-8b-v3' || 'qwen3-v2' }}
 
-      - name: Download authentic Roblox avatar assets for the short
+      - name: Load local or download authentic Roblox avatar assets for the short
         env:
           ROBLOX_OPEN_CLOUD_API_KEY: ${{ secrets.ROBLOX_OPEN_CLOUD_API_KEY }}
         run: |

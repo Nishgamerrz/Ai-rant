@@ -69,7 +69,7 @@ function buildHtml(data) {
   #caption{position:absolute;left:4%;bottom:92px;width:92%;min-height:112px;padding:18px 22px;border:2px solid rgba(255,255,255,.45);border-radius:18px;background:rgba(4,10,20,.88);color:#fff;text-align:center;font-size:30px;line-height:1.22;font-weight:800;text-shadow:0 2px 5px #000;display:flex;align-items:center;justify-content:center}
   #credit{position:absolute;right:24px;bottom:37px;color:#fff;font-size:15px;text-shadow:0 2px 4px #000}
   </style></head><body><div id="frame"><div id="brand"><span id="title"></span><div id="theme"></div></div><div id="caption"></div><div id="credit">STORY WORLD</div></div>
-  <script id="render-data" type="application/json">${encoded}</script><script type="module">
+  <script id="render-data" type="application/json">${encoded}</script><script type="importmap">{"imports":{"three":"/modules/three/build/three.module.js"}}</script><script type="module">
   import * as THREE from '/modules/three/build/three.module.js';
   import RAPIER from '/modules/@dimforge/rapier3d-compat/dist/rapier.mjs';
   import { OBJLoader } from '/modules/three/examples/jsm/loaders/OBJLoader.js';
