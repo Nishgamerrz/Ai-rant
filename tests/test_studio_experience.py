@@ -62,6 +62,14 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("Show the public AI build plan and tools", workflow)
         self.assertIn("not private chain-of-thought", workflow)
 
+    def test_workflow_uses_higher_creative_model_temperatures(self):
+        workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
+        self.assertIn("options:{temperature:0.75, num_predict:600}", workflow)
+        self.assertIn("options:{temperature:0.75, num_predict:6000}", workflow)
+        self.assertIn("options:{temperature:0.45, num_predict:1000}", workflow)
+        self.assertIn("options:{temperature:0.55, num_predict:6000}", workflow)
+        self.assertIn("options:{temperature:0.6, num_predict:400}", workflow)
+
     def test_studio_runtime_uses_native_rbxm_animation_tracks(self):
         from tools.build_studio_experience import make_config, server_lua
 
