@@ -2,6 +2,7 @@
 """Validate an AI map layout and emit a runnable Roblox Studio Lua map builder."""
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -41,7 +42,7 @@ def default_plan():
     }
 
 
-def default_camera_shots(duration):
+def default_camera_shots(duration, usernames=()):
     """A mix of smooth camera sweeps and story-beat snap cuts for the rendered short."""
     beats = [0, .16, .32, .48, .64, .80, 1.0]
     views = [
@@ -54,39 +55,49 @@ def default_camera_shots(duration):
         ([0, 28, 84], [0, 3, 24], "smooth"),
     ]
     return [
-        {"time": round(duration * ratio, 2), "position": pos, "target": target, "transition": mode}
-        for ratio, (pos, target, mode) in zip(beats, views)
+        {"time": round(duration * ratio, 2), "position": pos, "target": target, "transition": mode,
+         "focus_username": usernames[index % len(usernames)] if usernames else "world"}
+        for index, (ratio, (pos, target, mode)) in enumerate(zip(beats, views))
     ]
 
 
-def normalize_camera_shots(shots, duration):
+def normalize_camera_shots(shots, duration, usernames=()):
     if not isinstance(shots, list) or not 4 <= len(shots) <= 12:
-        return default_camera_shots(duration)
+        return default_camera_shots(duration, usernames)
     clean, previous = [], -1.0
-    for shot in shots:
+    valid_names = {name.casefold(): name for name in usernames}
+    for index, shot in enumerate(shots):
         if not isinstance(shot, dict):
-            return default_camera_shots(duration)
+            return default_camera_shots(duration, usernames)
         time, pos, target = shot.get("time"), shot.get("position"), shot.get("target")
         transition = shot.get("transition", "smooth")
         if (isinstance(time, bool) or not isinstance(time, (int, float))
                 or not 0 <= time <= duration or time <= previous):
-            return default_camera_shots(duration)
+            return default_camera_shots(duration, usernames)
         for vector in (pos, target):
             if (not isinstance(vector, list) or len(vector) != 3
                     or any(isinstance(v, bool) or not isinstance(v, (int, float))
                            or not -300 <= v <= 300 for v in vector)):
-                return default_camera_shots(duration)
+                return default_camera_shots(duration, usernames)
         if not isinstance(transition, str) or transition not in {"smooth", "snap"}:
             transition = "smooth"
+        focus = shot.get("focus_username", shot.get("focus", ""))
+        if isinstance(focus, str) and focus.casefold() in {"world", "none"}:
+            focus = "world"
+        elif isinstance(focus, str) and focus.casefold() in valid_names:
+            focus = valid_names[focus.casefold()]
+        else:
+            focus = usernames[index % len(usernames)] if usernames else "world"
         clean.append({
             "time": round(float(time), 2),
             "position": [round(float(v), 2) for v in pos],
             "target": [round(float(v), 2) for v in target],
             "transition": transition,
+            "focus_username": focus,
         })
         previous = time
     if clean[0]["time"] != 0:
-        clean.insert(0, default_camera_shots(duration)[0])
+        clean.insert(0, default_camera_shots(duration, usernames)[0])
     if clean[-1]["time"] < duration:
         last = dict(clean[-1])
         last["time"] = float(duration)
@@ -131,12 +142,19 @@ def normalize_character_placements(raw, usernames):
                 continue
             by_name[name] = [round(float(v), 2) for v in pos]
     placements = []
+    used_strengths = set()
     for index, default in enumerate(defaults):
         name = default["username"]
+        digest = hashlib.sha256(name.casefold().encode("utf-8")).digest()
+        strength = 10 + int.from_bytes(digest[:4], "big") % 90
+        while strength in used_strengths:
+            strength = 10 + ((strength - 9) % 90)
+        used_strengths.add(strength)
         placements.append({
             "username": name,
             "role": "lead" if index == 0 else "supporting",
             "position": by_name.get(name.casefold(), default["position"]),
+            "strength": strength,
         })
     return placements
 
@@ -233,12 +251,12 @@ def procedural_fallback_plan(theme, story, duration, usernames=()):
         "ground_color": ground,
         "ambient_color": ambient,
         "props": props,
-        "camera_shots": default_camera_shots(duration),
+        "camera_shots": default_camera_shots(duration, usernames),
         "character_placements": default_character_placements(usernames),
     }
 
 
-def expand_plan(plan, target_props=220):
+def expand_plan(plan, target_props=420):
     """Turn a compact AI landmark blueprint into a full, themed furnished build."""
     source_props = list(plan.get("props", []))
     if len(source_props) >= target_props:
@@ -310,7 +328,7 @@ def expand_plan(plan, target_props=220):
             suffix += 1
         try:
             p = [round(float(value), 2) for value in position]
-            s = [round(max(0.5, min(120.0, float(value))), 2) for value in size]
+            s = [round(max(0.5, min(64.0, float(value))), 2) for value in size]
             c = [max(0, min(255, int(value))) for value in color]
         except (TypeError, ValueError):
             return False
@@ -412,6 +430,46 @@ def expand_plan(plan, target_props=220):
         add(f"{name} Roof Trim Front", "Block", "SmoothPlastic", [x, top + 0.3, z + sz * 0.49],
             [sx, 0.45, 0.55], roof)
 
+    # Build a walkable, furnished central plaza instead of leaving the cast on an empty patch.
+    paving_material = "Slate" if family in {"castle", "space", "snow"} else "Concrete"
+    paving = [186, 195, 202] if family == "snow" else [146, 153, 164]
+    paving_alt = [min(255, c + 18) for c in paving]
+
+    def plaza_clear(x, z, half_x=3.5, half_z=3.5):
+        return not any(abs(x - b["position"][0]) < b["size"][0] / 2 + half_x
+                       and abs(z - b["position"][2]) < b["size"][2] / 2 + half_z
+                       for b in building_cores)
+
+    plaza_index = 0
+    for z in (4, 12, 20, 28, 36, 44, 52):
+        for x in (-28, -20, -12, -4, 4, 12, 20, 28):
+            if plaza_clear(x, z, 3.8, 3.8):
+                tile_color = paving if plaza_index % 3 else paving_alt
+                add("Plaza Paving Tile", "Block", paving_material, [x, 0.08, z], [7.8, 0.16, 7.8], tile_color)
+                plaza_index += 1
+
+    # Benches, planted beds and lamp posts dress the plaza perimeter without blocking the cast lane.
+    for side, sign in (("West", -1), ("East", 1)):
+        for z in (14, 38):
+            x = sign * 16
+            if not plaza_clear(x, z, 3.0, 2.2):
+                continue
+            add(f"{side} Plaza Bench Seat", "Block", "Wood", [x, 0.72, z], [5.5, 0.45, 1.5], [142, 91, 56])
+            add(f"{side} Plaza Bench Back", "Block", "Wood", [x, 1.45, z - 0.55], [5.5, 1.05, 0.28], [112, 72, 48])
+            for leg_x in (x - 2.15, x + 2.15):
+                add(f"{side} Plaza Bench Leg", "Block", "Metal", [leg_x, 0.35, z], [0.28, 0.75, 1.2], [72, 83, 97])
+        for z in (6, 50):
+            x = sign * 18
+            if plaza_clear(x, z, 1.8, 1.8):
+                add(f"{side} Plaza Lamp Post", "Cylinder", "Metal", [x, 3.4, z], [0.48, 6.8, 0.48], [74, 86, 103])
+                add(f"{side} Plaza Lantern", "Ball", "Neon", [x, 6.9, z], [1.1, 1.1, 1.1], accent)
+        for z in (2, 50):
+            x = sign * 25
+            if plaza_clear(x, z, 2.0, 2.0):
+                add(f"{side} Plaza Flower Bed", "Block", "Concrete", [x, 0.48, z], [4.2, 0.9, 3.2], [115, 127, 137])
+                for offset, bloom in ((-1.15, accent), (0, primary), (1.15, [241, 158, 105])):
+                    add(f"{side} Plaza Flower", "Ball", "SmoothPlastic", [x + offset, 1.12, z], [1.25, 1.15, 1.25], bloom)
+
     motif_palette = {
         "reef": [("Sea Floor Stone", "Ball", "Slate", [12, 2, 10], base), ("Coral Stem", "Block", "Neon", [1.2, 5, 1.2], primary),
                  ("Coral Bloom", "Ball", "SmoothPlastic", [3.6, 3.6, 3.6], [245, 125, 185]), ("Kelp Blade", "Block", "Grass", [0.8, 4.2, 0.8], [65, 155, 90]),
@@ -447,28 +505,48 @@ def expand_plan(plan, target_props=220):
                       ("Story Lantern", "Block", "Neon", [1, 3.2, 1], accent), ("Wonder Marker", "Ball", "SmoothPlastic", [2.5, 2.5, 2.5], accent)],
     }[family]
     motif_offsets = [(0, 0, 0), (-5, -3, 0), (5, -3, 0), (-4, 4, 0), (4, 4, 0), (0, -5, 0), (0, 3, 0), (0, 0, 5)]
-    x_sites = [-210, -140, -70, 0, 70, 140, 210]
-    z_sites = [-220, -150, -80, 80, 150, 220]
-    for z in z_sites:
-        for x in x_sites:
-            if len(expanded) >= target_props:
-                break
-            if any(abs(x - bx) < max(18, b["size"][0] / 2 + 10)
-                   and abs(z - bz) < max(18, b["size"][2] / 2 + 10)
-                   for b in building_cores for bx, bz in [(b["position"][0], b["position"][2])]):
-                continue
-            for (label, shape, material, size, color), (dx, dz, _dy) in zip(motif_palette, motif_offsets):
-                height = size[1]
-                lower_label = label.casefold()
-                lift = (4.0 if any(word in lower_label for word in ("crown", "canopy")) else
-                        2.0 if any(word in lower_label for word in ("orb", "bloom", "anemone", "flower")) else
-                        0.7 if any(word in lower_label for word in ("stem", "spire", "blade", "pillar", "beacon", "post", "column", "obelisk", "lantern")) else 0.0)
-                position = [x + dx, height / 2 + lift, z + dz]
-                add(f"{label} Site {x + 250:03d}-{z + 250:03d}", shape, material, position, size, color)
-            if len(expanded) >= target_props:
-                break
+    x_sites = [-220, -165, -110, -55, 0, 55, 110, 165, 220]
+    z_sites = [-220, -165, -110, -55, 55, 110, 165, 220]
+    candidate_sites = [
+        (x, z) for z in z_sites for x in x_sites
+        if not (-35 <= x <= 35 and -2 <= z <= 62)
+        and not any(abs(x - bx) < max(18, b["size"][0] / 2 + 10)
+                    and abs(z - bz) < max(18, b["size"][2] / 2 + 10)
+                    for b in building_cores for bx, bz in [(b["position"][0], b["position"][2])])
+    ]
+    # Farthest-point ordering spreads theme clusters across the full world rather
+    # than filling only the first few rows of the grid when the Part target is met.
+    site_order = []
+    remaining = list(candidate_sites)
+    while remaining:
+        if not site_order:
+            selected = min(remaining, key=lambda site: (site[0] ** 2 + (site[1] - 24) ** 2, site[1], site[0]))
+        else:
+            selected = max(remaining, key=lambda site: (min((site[0] - old[0]) ** 2 + (site[1] - old[1]) ** 2
+                                                             for old in site_order), -site[1], -site[0]))
+        site_order.append(selected)
+        remaining.remove(selected)
+
+    scale_variants = (0.84, 1.0, 1.12)
+    tint_variants = (0.88, 1.0, 1.10)
+    for x, z in site_order:
         if len(expanded) >= target_props:
             break
+        site_id = f"{x + 250:03d}-{z + 250:03d}"
+        for motif_index, ((label, shape, material, size, color), (dx, dz, _dy)) in enumerate(zip(motif_palette, motif_offsets)):
+            height = size[1]
+            lower_label = label.casefold()
+            lift = (4.0 if any(word in lower_label for word in ("crown", "canopy")) else
+                    2.0 if any(word in lower_label for word in ("orb", "bloom", "anemone", "flower")) else
+                    0.7 if any(word in lower_label for word in ("stem", "spire", "blade", "pillar", "beacon", "post", "column", "obelisk", "lantern")) else 0.0)
+            variant = (x // 55 + z // 55 + motif_index) % len(scale_variants)
+            scale_factor = scale_variants[variant]
+            varied_size = [round(max(0.5, dimension * scale_factor), 2) for dimension in size]
+            varied_color = tint(color, tint_variants[(variant + 1) % len(tint_variants)])
+            position = [x + dx, varied_size[1] / 2 + lift, z + dz]
+            add(f"{label} Site {site_id}", shape, material, position, varied_size, varied_color)
+            if len(expanded) >= target_props:
+                break
 
     if len(expanded) < target_props:
         raise ValueError(f"theme expansion created only {len(expanded)} props; expected {target_props}")
@@ -502,6 +580,16 @@ def validate(plan, duration=90, usernames=(), min_props=16):
             return default
         return value
 
+    def visible_prop_color(value, default):
+        """Lift near-black map colors so buildings remain readable in the lit 3D scene."""
+        rgb = list(color(value, default))
+        luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+        if luminance < 72:
+            target = [112, 124, 142]
+            blend = min(1.0, (72 - luminance) / 65)
+            rgb = [round(channel * (1 - blend) + target[i] * blend) for i, channel in enumerate(rgb)]
+        return rgb
+
     clean_props = []
     unique_prop_names = set()
     for index, prop in enumerate(props):
@@ -518,8 +606,8 @@ def validate(plan, duration=90, usernames=(), min_props=16):
                 or not -250 <= pos[2] <= 250):
             raise ValueError("prop position must use X/Z from -250 to 250 and a nonnegative Y height up to 250")
         if (not isinstance(size, list) or len(size) != 3
-                or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.5 <= v <= 120 for v in size)):
-            raise ValueError("prop size must be three dimensions from 0.5 to 120")
+                or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.5 <= v <= 64 for v in size)):
+            raise ValueError("prop size must be three dimensions from 0.5 to 64")
         if abs(pos[0]) + size[0] / 2 > 320 or abs(pos[2]) + size[2] / 2 > 320:
             raise ValueError("prop footprint must fit on the 640-stud world platform")
         prop_name = prop.get("name", f"Map Prop {index + 1}")
@@ -534,7 +622,7 @@ def validate(plan, duration=90, usernames=(), min_props=16):
             "name": prop_name, "shape": shape, "material": material,
             "position": [round(float(v), 2) for v in pos],
             "size": [round(float(v), 2) for v in size],
-            "color": color(prop.get("color"), [120, 145, 180]),
+            "color": visible_prop_color(prop.get("color"), [120, 145, 180]),
             "physics": ("dynamic" if prop.get("physics") == "dynamic" and shape in {"Block", "Ball"}
                         and max(float(v) for v in size) <= 12 else "static"),
         })
@@ -544,7 +632,7 @@ def validate(plan, duration=90, usernames=(), min_props=16):
         "ground_material": plan.get("ground_material") if isinstance(plan.get("ground_material"), str) and plan.get("ground_material") in MATERIALS else "Grass",
         "ambient_color": color(plan.get("ambient_color"), [185, 205, 225]),
         "props": clean_props,
-        "camera_shots": normalize_camera_shots(plan.get("camera_shots"), duration),
+        "camera_shots": normalize_camera_shots(plan.get("camera_shots"), duration, usernames),
         "character_placements": normalize_character_placements(plan.get("character_placements"), usernames),
     }
 
@@ -628,7 +716,7 @@ def main():
     parser.add_argument("--theme", default="", help="explicit visual-theme cue for procedural fallback")
     parser.add_argument("--story", default="", help="story context for procedural fallback")
     parser.add_argument("--min-props", type=int, default=8, help="minimum unique AI landmark/building anchors")
-    parser.add_argument("--target-props", type=int, default=220, help="minimum furnished world Parts after deterministic expansion")
+    parser.add_argument("--target-props", type=int, default=420, help="minimum furnished world Parts after deterministic expansion")
     parser.add_argument("--usernames", type=Path, help="JSON file containing the ordered Roblox cast")
     args = parser.parse_args()
     source, destination, duration = args.source, args.destination, args.duration
@@ -637,8 +725,8 @@ def main():
         raise SystemExit("usernames file must be a JSON array of strings")
     if not 30 <= duration <= 60:
         raise SystemExit("duration must be 30 to 60 seconds")
-    if args.target_props < 120:
-        raise SystemExit("target-props must be at least 120 furnished Parts")
+    if args.target_props < 300:
+        raise SystemExit("target-props must be at least 300 furnished Parts")
     if args.fallback:
         raw_plan = procedural_fallback_plan(args.theme, args.story, duration, usernames)
         source_label = "theme/story procedural fallback"

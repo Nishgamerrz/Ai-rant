@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { animateAvatarRig, buildAvatarRig } from './avatar_rig.mjs';
+import { animateAvatarRig, applyRobloxAnimationRig, buildAvatarRig } from './avatar_rig.mjs';
 
 const model = new THREE.Group();
 const material = new THREE.MeshStandardMaterial({ color: 0x78a8d8 });
@@ -41,4 +41,19 @@ const after = leftArm.getVertexPosition(0, new THREE.Vector3());
 assert.ok(before.distanceTo(after) > 0.01, 'the auto-rigged real mesh vertex should move with the limb animation');
 assert.notEqual(rig.bones.LeftUpperArm.rotation.x, 0);
 assert.notEqual(rig.bones.RightUpperLeg.rotation.x, 0);
+const head = new THREE.Bone();
+head.name = 'Head';
+head.position.set(0, 5, 0);
+const identity = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+const nativeClip = {
+  duration: 2,
+  keyframes: [
+    { time: 0, poses: { Head: { orientation: identity, position: [0, 2, 0], weight: 1 } } },
+    { time: 2, poses: { Head: { orientation: identity, position: [0, 2.6, 0], weight: 1 } } },
+  ],
+};
+assert.equal(applyRobloxAnimationRig(THREE, { Head: head }, nativeClip, 0, false), 1);
+assert.ok(Math.abs(head.position.y - 5) < 1e-6, 'native static Pose offset must not be added on top of the generated skeleton rest offset');
+assert.equal(applyRobloxAnimationRig(THREE, { Head: head }, nativeClip, 1, false), 1);
+assert.ok(Math.abs(head.position.y - 5.3) < 1e-6, 'native animation displacement should still move the joint smoothly');
 console.log(`Avatar rig smoke test passed; automatically skinned ${rig.meshCount} mesh groups to ${rig.skeleton.bones.length} procedural R15-style joints.`);

@@ -22,33 +22,12 @@ function argumentsFromProcess(argv) {
     args[key] = argv[i + 1];
     i += 1;
   }
-  for (const key of ['map', 'characters', 'profiles', 'captions', 'duration', 'output']) {
+  for (const key of ['map', 'characters', 'profiles', 'duration', 'output']) {
     if (!args[key]) throw new Error(`Missing --${key.replaceAll('_', '-')}`);
   }
   args.duration = Number(args.duration);
   if (![30, 45, 60].includes(args.duration)) throw new Error('Duration must be 30, 45, or 60 seconds.');
   return args;
-}
-
-function parseSrt(text) {
-  const cleaned = text.replace(/^\uFEFF/, '').replaceAll('\r', '');
-  const blocks = cleaned.trim().split(/\n\s*\n/);
-  const cues = [];
-  const time = (stamp) => {
-    const match = stamp.match(/^(\d{2}):(\d{2}):(\d{2})[,.](\d{3})$/);
-    if (!match) return NaN;
-    return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]) + Number(match[4]) / 1000;
-  };
-  for (const block of blocks) {
-    const lines = block.split('\n');
-    const timing = (lines[1] || '').match(/(\d{2}:\d{2}:\d{2}[,.]\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2}[,.]\d{3})/);
-    if (!timing) continue;
-    const start = time(timing[1]);
-    const end = time(timing[2]);
-    const caption = lines.slice(2).join(' ').replace(/<[^>]*>/g, '').trim();
-    if (Number.isFinite(start) && Number.isFinite(end) && end > start && caption) cues.push({ start, finish: end, text: caption });
-  }
-  return cues;
 }
 
 function safeData(value) {
@@ -64,11 +43,7 @@ function buildHtml(data) {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><style>
   *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#87b9e8;font-family:Arial,Helvetica,sans-serif}
   #frame{position:relative;width:${WIDTH}px;height:${HEIGHT}px}canvas{display:block;width:${WIDTH}px;height:${HEIGHT}px}
-  #brand{position:absolute;top:35px;left:5%;width:90%;padding:14px 20px;border-radius:15px;background:rgba(9,20,39,.78);color:#fff;text-align:center;font-size:28px;font-weight:800;letter-spacing:1px;text-shadow:0 2px 4px #000}
-  #theme{font-size:15px;font-weight:500;letter-spacing:.2px;color:#eaf4ff;margin-top:4px}
-  #caption{position:absolute;left:4%;bottom:92px;width:92%;min-height:112px;padding:18px 22px;border:2px solid rgba(255,255,255,.45);border-radius:18px;background:rgba(4,10,20,.88);color:#fff;text-align:center;font-size:30px;line-height:1.22;font-weight:800;text-shadow:0 2px 5px #000;display:flex;align-items:center;justify-content:center}
-  #credit{position:absolute;right:24px;bottom:37px;color:#fff;font-size:15px;text-shadow:0 2px 4px #000}
-  </style></head><body><div id="frame"><div id="brand"><span id="title"></span><div id="theme"></div></div><div id="caption"></div><div id="credit">STORY WORLD</div></div>
+  </style></head><body><div id="frame">
   <script id="render-data" type="application/json">${encoded}</script><script type="importmap">{"imports":{"three":"/modules/three/build/three.module.js"}}</script><script type="module">
   import * as THREE from '/modules/three/build/three.module.js';
   import RAPIER from '/modules/@dimforge/rapier3d-compat/dist/rapier.mjs';
@@ -81,10 +56,10 @@ function buildHtml(data) {
   import { STLLoader } from '/modules/three/examples/jsm/loaders/STLLoader.js';
   import { TDSLoader } from '/modules/three/examples/jsm/loaders/TDSLoader.js';
   import { animateAvatarRig, applyRobloxAnimationRig, buildAvatarRig } from '/avatar_rig.mjs';
+  import { chooseSafeCamera } from '/scene_camera.mjs';
   const DATA=JSON.parse(document.getElementById('render-data').textContent);
   await RAPIER.init();
   const physicsWorld=new RAPIER.World({x:0,y:-18,z:0});physicsWorld.timestep=1/60;
-  const PHYSICS_ROOT_OFFSET=2.9,ACTOR_CAPSULE_HALF_HEIGHT=2.35,ACTOR_CAPSULE_RADIUS=.55;
   const fixedWorldBody=physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed());
   const dynamicPropBodies=new Map();let dynamicPropCount=0,staticPropCount=0;
   physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(320,1,320).setTranslation(0,-1.08,0).setFriction(.9),fixedWorldBody);
@@ -190,35 +165,56 @@ function buildHtml(data) {
   }
   // Floor tiles and far green terrain soften the map edge without replacing the AI-authored theme.
   const horizon=new THREE.Mesh(new THREE.PlaneGeometry(2600,2600),new THREE.MeshStandardMaterial({color:rgb(DATA.plan.ground_color||[88,166,91]),roughness:1})); horizon.rotation.x=-Math.PI/2; horizon.position.y=-.08; scene.add(horizon);
-  const title=document.getElementById('title'),theme=document.getElementById('theme'),caption=document.getElementById('caption');
-  title.textContent=(DATA.plan.name||'STORY WORLD').toUpperCase(); theme.textContent=DATA.plan.theme||'';
   const actors=[];
-  function registerActor(root,point,index,placement,rig=null,animationClips=null,animationScale=1){
-    const lead=placement?.role==='lead'||index===0;
-    const body=physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
-      .setTranslation(Number(point[0]),Number(point[1])+PHYSICS_ROOT_OFFSET,Number(point[2]))
-      .setLinearDamping(3.2).setAngularDamping(8).lockRotations().setCanSleep(false));
-    physicsWorld.createCollider(RAPIER.ColliderDesc.capsule(ACTOR_CAPSULE_HALF_HEIGHT,ACTOR_CAPSULE_RADIUS)
-      .setFriction(.95).setRestitution(0),body);
-    actors.push({root,body,baseX:Number(point[0]),baseY:Number(point[1]),baseZ:Number(point[2]),
-      phase:index*1.73,lead,stride:lead?2.1:1.15,baseYaw:0,jumpApplied:false,rig,animationClips,animationScale});
-  }
-  function nameSprite(text){
-    const canvas=document.createElement('canvas'); canvas.width=512;canvas.height=96;const ctx=canvas.getContext('2d');
-    ctx.fillStyle='rgba(8,17,30,.82)';ctx.fillRect(8,8,496,80);ctx.font='bold 38px Arial';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillStyle='#fff';ctx.fillText(text.slice(0,24),256,48,470);
-    const texture=new THREE.CanvasTexture(canvas);texture.colorSpace=THREE.SRGBColorSpace;const sprite=new THREE.Sprite(new THREE.SpriteMaterial({map:texture,transparent:true,depthTest:false}));sprite.scale.set(7,1.3,1);return sprite;
-  }
   const placements=new Map((DATA.plan.character_placements||[]).map(c=>[String(c.username).toLowerCase(),c]));
+  const mapProps=DATA.plan.props||[];
+  const cameraBlockers=mapProps.filter(p=>p.physics!=='dynamic'&&p.size[1]>=2.5);
+  function actorPointIsClear(x,z,occupied){
+    for(const p of mapProps){
+      const [px,py,pz]=p.position,[sx,sy,sz]=p.size;
+      if(py-sy/2>8||py+sy/2<.3)continue;
+      const dx=Math.max(Math.abs(x-px)-sx/2,0),dz=Math.max(Math.abs(z-pz)-sz/2,0);
+      if(dx*dx+dz*dz<4.2*4.2)return false;
+    }
+    return occupied.every(q=>Math.hypot(x-q[0],z-q[2])>=4.2);
+  }
+  function resolveActorPoint(point){
+    const occupied=actors.map(a=>[a.baseX,a.baseY,a.baseZ]);
+    const offsets=[[0,0],[4,0],[-4,0],[0,4],[0,-4],[4,4],[-4,4],[4,-4],[-4,-4],
+      [8,0],[-8,0],[0,8],[0,-8],[8,8],[-8,8],[8,-8],[-8,-8],[12,0],[-12,0],[0,12],[0,-12]];
+    for(const [dx,dz] of offsets){
+      const x=Math.max(-16,Math.min(16,Number(point[0])+dx));
+      const z=Math.max(8,Math.min(48,Number(point[2])+dz));
+      if(actorPointIsClear(x,z,occupied))return [x,Number(point[1]),z];
+    }
+    return [Number(point[0]),Number(point[1]),Number(point[2])];
+  }
+  function strengthSprite(value){
+    const canvas=document.createElement('canvas');canvas.width=256;canvas.height=128;
+    const ctx=canvas.getContext('2d');const text=String(Math.max(1,Math.min(999,Math.round(Number(value)||50))));
+    ctx.font='bold 92px Arial';ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.lineJoin='round';ctx.lineWidth=10;ctx.strokeStyle='rgba(10,18,28,.92)';ctx.strokeText(text,128,66);
+    ctx.fillStyle='#ffe18a';ctx.fillText(text,128,66);
+    const texture=new THREE.CanvasTexture(canvas);texture.colorSpace=THREE.SRGBColorSpace;
+    const sprite=new THREE.Sprite(new THREE.SpriteMaterial({map:texture,transparent:true,depthTest:true,depthWrite:false}));
+    sprite.scale.set(2.5,1.25,1);return sprite;
+  }
+  function registerActor(root,point,index,placement,username,strength,rig=null,animationClips=null,animationScale=1){
+    const lead=placement?.role==='lead'||index===0;
+    const number=strengthSprite(strength);number.position.set(0,7.25,0);root.add(number);
+    actors.push({root,username:String(username||''),baseX:Number(point[0]),baseY:Number(point[1]),baseZ:Number(point[2]),
+      phase:index*1.73,lead,stride:lead?2.1:1.15,rig,animationClips,animationScale});
+  }
   async function loadAvatar(profile,index){
     const username=profile.username,place=placements.get(username.toLowerCase());
     const fallback=[[0,0,24],[-4,0,25],[4,0,25],[-7,0,31],[7,0,31],[0,0,36]][index];
-    const point=place?.position||fallback; const path='/avatar-assets/'+profile.user_id+'/';
+    const point=resolveActorPoint(place?.position||fallback); const path='/avatar-assets/'+profile.user_id+'/';
     if(!profile.model_ready){
       const portrait=await new Promise((resolve,reject)=>new THREE.TextureLoader().load(path+'avatar.png',resolve,undefined,reject));
       portrait.colorSpace=THREE.SRGBColorSpace;
       const root=new THREE.Group();root.name='AuthenticRobloxAvatarPortrait_'+username;root.position.set(point[0],point[1],point[2]);
       const image=new THREE.Sprite(new THREE.SpriteMaterial({map:portrait,transparent:true,depthTest:true,depthWrite:false}));image.scale.set(5.4,5.4,1);image.position.y=2.9;root.add(image);
-      const label=nameSprite(username);label.position.y=6.3;root.add(label);scene.add(root);registerActor(root,point,index,place);return;
+      scene.add(root);registerActor(root,point,index,place,username,place?.strength);return;
     }
     const modelFile=profile.model_file||'avatar.obj',modelFormat=profile.model_format||'obj';
     const manager=new THREE.LoadingManager();
@@ -281,29 +277,46 @@ function buildHtml(data) {
       }
     }
     pivot.position.set(point[0],point[1],point[2]);
-    const label=nameSprite(username);label.position.set(0,7.2,0);pivot.add(label);scene.add(pivot);registerActor(pivot,point,index,place,avatarRig?.bones||null,animationClips,avatarScale);
+    scene.add(pivot);registerActor(pivot,point,index,place,username,place?.strength,avatarRig?.bones||null,animationClips,avatarScale);
   }
   const avatarPromise=Promise.all(DATA.profiles.map(loadAvatar));
-  const shots=DATA.plan.camera_shots?.length?DATA.plan.camera_shots:[{time:0,position:[0,45,110],target:[0,4,24],transition:'smooth'},{time:DATA.duration,position:[-25,18,50],target:[0,3,24],transition:'smooth'}];
-  const cues=DATA.captions;
+  const shots=DATA.plan.camera_shots?.length?DATA.plan.camera_shots:[{time:0,position:[0,38,76],target:[0,3,24],transition:'smooth'},{time:DATA.duration,position:[-14,15,18],target:[0,3,24],transition:'smooth'}];
   function cameraAt(t){
     let index=0;for(let i=0;i<shots.length;i++){if(t>=shots[i].time)index=i;else break;}
     const a=shots[index],b=shots[Math.min(index+1,shots.length-1)];let alpha=0;
     if(b!==a&&b.transition!=='snap'){alpha=Math.max(0,Math.min(1,(t-a.time)/Math.max(.01,b.time-a.time)));alpha=alpha*alpha*(3-2*alpha);}
     const mix=(key)=>new THREE.Vector3(...a[key]).lerp(new THREE.Vector3(...b[key]),alpha);
-    const pos=mix('position');pos.y=Math.max(2.5,pos.y);const target=mix('target');camera.position.copy(pos);camera.lookAt(target);camera.updateMatrixWorld(true);
+    const planned=mix('target');
+    const actorFor=(shot,shotIndex)=>{
+      const focus=String(shot.focus_username||'').toLowerCase();
+      if(focus==='world'||focus==='none')return null;
+      return actors.find(actor=>actor.username.toLowerCase()===focus)
+        ||actors.find(actor=>actor.lead)||actors[shotIndex%Math.max(1,actors.length)];
+    };
+    const focusPoint=(actor,shot)=>actor
+      ?new THREE.Vector3(actor.root.position.x,actor.root.position.y+3.05,actor.root.position.z)
+      :new THREE.Vector3(...shot.target);
+    const targetA=focusPoint(actorFor(a,index),a);
+    const targetB=focusPoint(actorFor(b,Math.min(index+1,shots.length-1)),b);
+    const target=targetA.lerp(targetB,alpha).lerp(planned,0.2);
+    const desired=mix('position');
+    const preferred= index===0 ? [23,48] : (index>=shots.length-1 ? [14,28] : [17,36]);
+    const safe=chooseSafeCamera(target.toArray(),desired.toArray(),cameraBlockers,preferred[0],preferred[1]);
+    camera.position.set(safe[0],safe[1],safe[2]);camera.lookAt(target);camera.updateMatrixWorld(true);
   }
-  // Roblox's public OBJ avatar export has no R15 skeleton. Keep each genuine avatar mesh intact,
-  // but drive a capsule through the furnished map with Rapier gravity/collisions and story-paced motion.
+  // Move actors on deterministic, collision-free paths. A dynamic rigidbody used to
+  // wedge against generated map Parts and keep moving the rig in place, causing foot
+  // sliding and apparent limb stretch. Native Roblox clips still drive every pose.
   function animateActor(actor,t){
     const cycle=t*1.8+actor.phase,progress=Math.max(0,Math.min(1,t/DATA.duration));
-    const vx=Math.cos(cycle*.48)*actor.stride*.48*1.8;
-    const vz=-Math.sin(cycle*.39+actor.phase)*actor.stride*.55*.39*1.8;
-    const current=actor.body.linvel();
-    actor.body.setLinvel({x:vx,y:current.y,z:vz},true);
-    if(actor.lead&&!actor.jumpApplied&&progress>=.88){actor.body.applyImpulse({x:0,y:16,z:0},true);actor.jumpApplied=true;}
-    const nativeClips=actor.animationClips;
+    const x=actor.baseX+Math.sin(cycle*.42)*actor.stride;
+    const z=actor.baseZ+Math.cos(cycle*.34+actor.phase)*actor.stride*.52;
     const jumpProgress=actor.lead?Math.max(0,Math.min(1,(progress-.88)/.12)):0;
+    const jumpHeight=actor.lead?Math.sin(Math.PI*jumpProgress)*3.0:0;
+    actor.root.position.set(x,actor.baseY+jumpHeight,z);
+    const vx=Math.cos(cycle*.42)*actor.stride*.42*1.8;
+    const vz=-Math.sin(cycle*.34+actor.phase)*actor.stride*.34*.52*1.8;
+    const nativeClips=actor.animationClips;
     const jumpPose=actor.lead?Math.max(0,Math.sin(Math.PI*jumpProgress)):0;
     if(nativeClips?.walk){
       const jumping=Boolean(actor.lead&&jumpProgress>0&&nativeClips.jump);
@@ -314,8 +327,8 @@ function buildHtml(data) {
       actor.root.rotation.y=Math.atan2(vx,Math.max(.001,-vz));
       actor.root.rotation.z=0;
     }else{
-      actor.root.rotation.y=actor.baseYaw+Math.sin(cycle*.48+actor.phase)*.28;
-      actor.root.rotation.z=Math.sin(cycle*3.4+actor.phase)*.035;
+      actor.root.rotation.y=Math.atan2(vx,Math.max(.001,-vz));
+      actor.root.rotation.z=0;
       if(actor.rig)animateAvatarRig(actor.rig,t,actor.phase,jumpPose);
     }
   }
@@ -324,19 +337,14 @@ function buildHtml(data) {
     renderer.compile(scene,camera);return true;
   });
   window.renderAt=async(t)=>{
-    cameraAt(t);for(const actor of actors)animateActor(actor,t);
+    for(const actor of actors)animateActor(actor,t);cameraAt(t);
     physicsWorld.step();physicsWorld.step();
-    for(const actor of actors){
-      const position=actor.body.translation();
-      actor.root.position.set(position.x,position.y-PHYSICS_ROOT_OFFSET,position.z);
-    }
     for(const item of dynamicPropInstances){
       const p=item.body.translation(),r=item.body.rotation(),size=item.part.size;
       position.set(p.x,p.y,p.z);scale.set(Math.max(.03,size[0]),Math.max(.03,size[1]),Math.max(.03,size[2]));
       quaternion.set(r.x,r.y,r.z,r.w);matrix.compose(position,quaternion,scale);
       item.mesh.setMatrixAt(item.index,matrix);item.mesh.instanceMatrix.needsUpdate=true;
     }
-    const active=cues.find(c=>t>=c.start&&t<=c.finish);caption.textContent=active?.text||'';
     renderer.render(scene,camera);await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));return true;
   };
   </script></body></html>`;
@@ -353,6 +361,7 @@ function createStaticServer(html, avatarRoot) {
     const pathname = decodeURIComponent(new URL(request.url, 'http://127.0.0.1').pathname);
     if (pathname === '/') { response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); response.end(html); return; }
     if (pathname === '/avatar_rig.mjs') { serveFile(response, join(ROOT, 'avatar_rig.mjs')); return; }
+    if (pathname === '/scene_camera.mjs') { serveFile(response, join(ROOT, 'scene_camera.mjs')); return; }
     if (pathname.startsWith('/modules/')) {
       const path = resolve(ROOT, 'node_modules', normalize(pathname.slice('/modules/'.length)));
       if (!path.startsWith(resolve(ROOT, 'node_modules') + '/')) { response.writeHead(403); response.end(); return; }
@@ -389,9 +398,7 @@ async function main() {
     }
     return p;
   });
-  const captions=parseSrt(readFileSync(args.captions,'utf8'));
-  if(!captions.length) throw new Error('SRT contains no caption cues; refusing to make an uncaptioned MP4.');
-  const data={plan,profiles:orderedProfiles,captions,duration:args.duration};
+  const data={plan,profiles:orderedProfiles,duration:args.duration};
   const server=createStaticServer(buildHtml(data),resolve(ASSET_ROOT,'dist/avatar-assets'));
   await new Promise((ok,fail)=>{server.once('error',fail);server.listen(0,'127.0.0.1',ok);});
   const address=server.address();
@@ -407,7 +414,7 @@ async function main() {
     if(!ready)throw new Error('3D map and actual Roblox avatars failed to load.');
     const simulation=await page.evaluate(()=>window.physicsSummary);
     const avatarRigging=await page.evaluate(()=>window.avatarRigSummary);
-    console.log(`Rapier simulation ready: ${orderedProfiles.length} authentic avatar capsule(s), ${simulation.dynamicProps} dynamic AI prop(s), ${simulation.staticProps} static world collider(s).`);
+    console.log(`Rapier simulation ready for ${simulation.dynamicProps} dynamic AI prop(s) and ${simulation.staticProps} static world collider(s); ${orderedProfiles.length} authentic avatar(s) use collision-free scripted paths.`);
     console.log(`Avatar sources: ${orderedProfiles.map(profile => `${profile.username}=${profile.model_source || (profile.thumbnail_ready ? 'official-thumbnail-fallback' : 'unknown')}`).join(', ')}.`);
     console.log(`Automatic avatar limb rigs: ${avatarRigging.rigged}/${avatarRigging.total} mesh(es) skinned to R15-style joints.`);
     console.log(`Native Roblox walk clips retargeted: ${avatarRigging.nativeAnimations}/${avatarRigging.total} avatar(s).`);
