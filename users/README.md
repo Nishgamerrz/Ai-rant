@@ -1,15 +1,25 @@
-# Optional local avatar meshes
+# Username-matched Roblox avatar models
 
-The workflow checks this folder before attempting the Roblox 3D-mesh API. It matches the username entered in the GitHub Actions form case-insensitively:
+In the GitHub Actions **Character usernames** field, enter only the Roblox username (for example, `normal`)—do not append `.rbxm` and do not upload a file. The workflow automatically checks this folder for the matching **flat, username-named RBXM file first**; no per-user subdirectories are required:
 
 ```text
 users/
-  Builderman/
-    avatar.obj
-    avatar.mtl       # optional; a neutral material is generated if absent
-    texture.png      # optional; keep textures at the relative paths used by the MTL
+  normal.rbxm
+  AnotherUsername.rbxm
 ```
 
-Put each user's OBJ and its MTL/texture files in a folder named exactly after their Roblox username. The OBJ must contain readable vertex (`v`) and face (`f`) records. The workflow copies the files into its temporary render assets and auto-rigs the mesh. It does not commit generated render assets.
+For a workflow username of `normal`, the matching source is `users/normal.rbxm`. Matching is case-insensitive. The file must be a Roblox **model** (`.rbxm`) containing a Humanoid, a HumanoidRootPart, and MeshParts. A `.rbxl` is a whole place file and is not used as an avatar model.
 
-If no matching `users/<username>/avatar.obj` exists, the workflow continues with its normal automatic Roblox mesh lookup and official thumbnail fallback. If Roblox cannot resolve the username but a local OBJ exists, the MP4 can still render that local mesh under the entered username. This folder is an optional local asset source; it does not bypass Roblox authentication or retrieve protected meshes by itself.
+The RBXM keeps its native rig and animation references. Its MeshParts refer to Roblox asset IDs, so the automated MP4 step resolves those official mesh/texture assets, converts the geometry into a temporary renderer format, and applies the existing Three.js motion system. The MP4 is not a Roblox Studio capture, and Roblox's native `Animate` script does not execute in the MP4 renderer. Native animation IDs from the RBXM are also passed to the generated Studio experience, where the avatars move with Roblox Humanoids. The original RBXM is included in the downloadable package under `avatar-assets/source-rbxm/`.
+
+When no matching RBXM exists, the workflow retains the optional legacy mesh layout below, then continues with the existing Roblox mesh lookup and official thumbnail fallback:
+
+```text
+users/
+  SomeUsername/
+    avatar.obj
+    avatar.mtl       # optional
+    texture.png      # optional; relative paths referenced by the MTL
+```
+
+No model file is uploaded through the Actions form; that form accepts text inputs, not files. Do not put Roblox cookies or API keys in this folder or in chat. Some referenced Roblox assets may require permission; if the model's assets cannot be fetched, the workflow uses the existing authorized-mesh or same-account thumbnail fallback when available.

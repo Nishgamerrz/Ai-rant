@@ -17,17 +17,17 @@ class StudioExperienceTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
         self.assertNotIn("narration_audio_asset_id", workflow)
         self.assertNotIn("--audio-asset-id \"$NARRATION_AUDIO_ASSET_ID\"", workflow)
-        username_step = workflow.index("- name: Require a real Roblox username for the MP4 avatar cast")
+        username_step = workflow.index("- name: Require a username for the avatar cast")
         model_step = workflow.index("- name: Download the selected AI model for story and world/camera planning")
         self.assertLess(username_step, model_step)
-        self.assertIn("description: 'Enter 1–6 Roblox usernames (first is lead); optional local mesh: users/<username>/avatar.obj.'\n        required: false", workflow)
+        self.assertIn("description: 'Enter 1–6 Roblox usernames only (first is lead); checks users/<username>.rbxm automatically.'\n        required: false", workflow)
         self.assertIn("Optional theme cue (e.g., daylight); blank = AI derives it from your story.", workflow)
         self.assertIn('"${WORLD_THEME:-AUTO FROM STORY}"', workflow)
         self.assertIn("treat the user's cue as a required design constraint", workflow)
         self.assertIn("daylight cue means a clearly bright, naturally sunlit daytime world", workflow)
         self.assertIn("ROBLOX_OPEN_CLOUD_API_KEY: ${{ secrets.ROBLOX_OPEN_CLOUD_API_KEY }}", workflow)
         self.assertIn("public Roblox Users API resolves entered usernames to IDs keylessly", workflow)
-        self.assertIn("users/<username>/avatar.obj", workflow)
+        self.assertIn("users/<username>.rbxm", workflow)
         self.assertIn("Mesh access:", workflow)
         renderer_tests = (ROOT / ".github/workflows/studio-experience-tests.yml").read_text(encoding="utf-8")
         self.assertIn("npm run test:avatar-rig", renderer_tests)
@@ -59,6 +59,22 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("Show the public AI build plan and tools", workflow)
         self.assertIn("not private chain-of-thought", workflow)
 
+    def test_studio_runtime_uses_native_rbxm_animation_tracks(self):
+        from tools.build_studio_experience import make_config, server_lua
+
+        profiles = [{
+            "username": "Normal",
+            "rbxm_animation_ids": {"idle": "rbxassetid://123", "walk": "rbxassetid://456"},
+        }]
+        config = make_config({}, [{"username": "Normal", "role": "lead", "position": [0, 0, 0]}],
+                             60, "", [], "", profiles)
+        self.assertEqual(config["rbxm_animations"]["normal"]["idle"], "rbxassetid://123")
+        runtime = server_lua(json.dumps(config))
+        self.assertIn("animator:LoadAnimation(animation)", runtime)
+        self.assertIn("tracks.walk", runtime)
+        self.assertIn("humanoid:MoveTo(waypoints[index])", runtime)
+        self.assertIn('FindFirstChild("Animate")', runtime)
+
     def test_mp4_renderer_applies_procedural_motion_to_authentic_avatar_models(self):
         renderer = (ROOT / "tools/video_renderer/render_short.mjs").read_text(encoding="utf-8")
         report = (ROOT / "tools/package_studio_deliverables.py").read_text(encoding="utf-8")
@@ -77,6 +93,9 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("buildAvatarRig", renderer)
         self.assertIn("animateAvatarRig", renderer)
         self.assertIn("Automatic avatar limb rigs", renderer)
+        self.assertIn("Avatar sources:", renderer)
+        self.assertIn("type:'jpeg',quality:92", renderer)
+        self.assertIn("estimated ${remaining.toFixed(0)}s remaining", renderer)
         self.assertIn("DATA.plan.ground_color", renderer)
         self.assertIn("horizon.position.y=-.08", renderer)
         self.assertIn("rather than using native Roblox R15 animation clips", report)
@@ -150,8 +169,8 @@ class StudioExperienceTests(unittest.TestCase):
             readme = (work / "README.md").read_text(encoding="utf-8")
             self.assertIn("ROBLOX_OPEN_CLOUD_API_KEY", readme)
             self.assertIn("public Users API", readme)
-            self.assertIn("users/<username>/avatar.obj", readme)
-            self.assertIn("procedural R15-style skeleton", readme)
+            self.assertIn("users/<username>.rbxm", readme)
+            self.assertIn("procedural R15-style joints", readme)
             self.assertTrue((work / "World.lua").exists())
 
     def test_prompt_themed_map_requires_full_ai_authored_scene(self):
@@ -263,6 +282,9 @@ class StudioExperienceTests(unittest.TestCase):
             (dist / "narration.srt").write_text("1\\ncue", encoding="utf-8")
             (dist / "Roblox_2K_YouTube_Short.mp4").write_bytes(b"mp4 test fixture")
             (dist / "short_silent.mp4").write_bytes(b"temporary silent video")
+            model_copy = dist / "avatar-assets" / "source-rbxm" / "normal.rbxm"
+            model_copy.parent.mkdir(parents=True)
+            model_copy.write_bytes(b"RBXM package fixture")
             subprocess.run([
                 sys.executable, str(ROOT / "tools/package_studio_deliverables.py"),
                 "--directory", str(dist), "--map", str(work / "map.json"),
@@ -276,6 +298,7 @@ class StudioExperienceTests(unittest.TestCase):
             with zipfile.ZipFile(bundle) as archive:
                 self.assertIn("AI_Design_and_Tools_Report.pdf", archive.namelist())
                 self.assertIn("Roblox_Studio_Experience.rbxlx", archive.namelist())
+                self.assertIn("avatar-assets/source-rbxm/normal.rbxm", archive.namelist())
                 self.assertIn("Roblox_2K_YouTube_Short.mp4", archive.namelist())
                 self.assertNotIn("short_silent.mp4", archive.namelist())
                 self.assertNotIn("Roblox_Studio_Complete_Package.zip", archive.namelist())

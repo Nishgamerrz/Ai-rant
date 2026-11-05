@@ -347,17 +347,26 @@ async function main() {
     const simulation=await page.evaluate(()=>window.physicsSummary);
     const avatarRigging=await page.evaluate(()=>window.avatarRigSummary);
     console.log(`Rapier simulation ready: ${orderedProfiles.length} authentic avatar capsule(s), ${simulation.dynamicProps} dynamic AI prop(s), ${simulation.staticProps} static world collider(s).`);
+    console.log(`Avatar sources: ${orderedProfiles.map(profile => `${profile.username}=${profile.model_source || (profile.thumbnail_ready ? 'official-thumbnail-fallback' : 'unknown')}`).join(', ')}.`);
     console.log(`Automatic avatar limb rigs: ${avatarRigging.rigged}/${avatarRigging.total} authentic 3D mesh(es) skinned to procedural R15-style joints; portrait fallbacks cannot animate limbs.`);
-    ffmpeg=spawn('ffmpeg',['-y','-hide_banner','-loglevel','warning','-f','image2pipe','-vcodec','png','-framerate',String(FPS),'-i','pipe:0','-an','-c:v','libx264','-preset','veryfast','-crf','19','-pix_fmt','yuv420p','-vf','scale=1440:2560:flags=lanczos','-r',String(FPS),'-t',String(args.duration),'-movflags','+faststart',args.output],{stdio:['pipe','ignore','inherit']});
+    if (avatarRigging.rigged < avatarRigging.total) console.warn('At least one avatar is a 2D thumbnail fallback, so its limbs cannot animate; check the source and Roblox mesh-access logs above.');
+    const frameStartedAt = Date.now();
+    ffmpeg=spawn('ffmpeg',['-y','-hide_banner','-loglevel','warning','-f','image2pipe','-vcodec','mjpeg','-framerate',String(FPS),'-i','pipe:0','-an','-c:v','libx264','-preset','veryfast','-crf','19','-pix_fmt','yuv420p','-vf','scale=1440:2560:flags=lanczos','-r',String(FPS),'-t',String(args.duration),'-movflags','+faststart',args.output],{stdio:['pipe','ignore','inherit']});
     const ffmpegExit=once(ffmpeg,'close');
     const totalFrames=args.duration*FPS;
     console.log(`Rendering ${totalFrames} headless 3D frames with Rapier gravity/collisions and ${orderedProfiles.length} genuine Roblox avatar(s) (mesh or account-thumbnail source).`);
     for(let frame=0;frame<totalFrames;frame++){
       const time=frame/FPS;
       await page.evaluate(t=>window.renderAt(t),time);
-      const png=await page.screenshot({type:'png',timeout:30000});
-      await writeFrame(ffmpeg.stdin,png);
-      if(frame===0||(frame+1)%300===0||frame+1===totalFrames)console.log(`Rendered ${frame+1}/${totalFrames} frames (${time.toFixed(1)}s).`);
+      const jpeg=await page.screenshot({type:'jpeg',quality:92,timeout:30000});
+      await writeFrame(ffmpeg.stdin,jpeg);
+      const completed=frame+1;
+      if(frame===0||completed%30===0||completed===totalFrames){
+        const elapsed=(Date.now()-frameStartedAt)/1000;
+        const rate=completed/Math.max(elapsed,0.001);
+        const remaining=(totalFrames-completed)/Math.max(rate,0.001);
+        console.log(`Rendered ${completed}/${totalFrames} frames (${time.toFixed(1)}s video); elapsed ${elapsed.toFixed(0)}s, estimated ${remaining.toFixed(0)}s remaining.`);
+      }
     }
     ffmpeg.stdin.end();
     const [code,signal]=await ffmpegExit;

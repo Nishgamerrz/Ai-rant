@@ -38,6 +38,12 @@ jobs:
           npm run test:avatar-rig
           npm run test:module-resolution
 
+      - name: Install and smoke-test the RBXM parser
+        run: |
+          npm ci --prefix tools/rbxm_importer --ignore-scripts --no-audit --no-fund
+          node --check tools/rbxm_importer/prepare_rbxm_avatar.mjs
+          node tools/rbxm_importer/test_rbxm.mjs
+
       - name: Compile Python and run experience tests
         run: |
           python -m py_compile tools/*.py tests/*.py

@@ -211,12 +211,30 @@ def find_local_avatar_folder(username: str, users_root: Path = USERS_ROOT) -> Pa
     return None
 
 
+def find_local_avatar_rbxm(username: str, users_root: Path = USERS_ROOT) -> Path | None:
+    """Find a flat users/<username>.rbxm source file case-insensitively."""
+    if not re.fullmatch(r"[A-Za-z0-9_]{3,20}", username) or not users_root.is_dir() or users_root.is_symlink():
+        return None
+    root = users_root.resolve()
+    for candidate in users_root.iterdir():
+        if (candidate.is_file() and not candidate.is_symlink()
+                and candidate.suffix.casefold() == ".rbxm"
+                and candidate.stem.casefold() == username.casefold()
+                and candidate.resolve().is_relative_to(root)):
+            return candidate
+    return None
+
+
 def has_local_avatar_obj(username: str, users_root: Path = USERS_ROOT) -> bool:
     folder = find_local_avatar_folder(username, users_root)
     if folder is None:
         return False
     return any(path.is_file() and not path.is_symlink() and path.name.casefold() == "avatar.obj"
                for path in folder.iterdir())
+
+
+def has_local_avatar_source(username: str, users_root: Path = USERS_ROOT) -> bool:
+    return find_local_avatar_rbxm(username, users_root) is not None or has_local_avatar_obj(username, users_root)
 
 
 def load_local_avatar_model(username: str, user_id: int | str, users_root: Path, output_dir: Path) -> dict | None:
@@ -293,12 +311,12 @@ def main() -> None:
             local_only = False
             if item and item.get("id"):
                 user_id: int | str = int(item["id"])
-            elif has_local_avatar_obj(username, USERS_ROOT):
+            elif has_local_avatar_source(username, USERS_ROOT):
                 user_id = f"local-{username.casefold()}"
                 local_only = True
-                print(f"Roblox did not resolve {username}; using the matching local users/{username}/avatar.obj.")
+                print(f"Roblox did not resolve {username}; using the matching flat users/{username}.rbxm or local OBJ source.")
             else:
-                raise RuntimeError(f"Roblox username {username!r} was not found and no local users/{username}/avatar.obj exists")
+                raise RuntimeError(f"Roblox username {username!r} was not found and no users/{username}.rbxm or local avatar OBJ exists")
             profile = {"username": username, "user_id": user_id}
             if not local_only:
                 try:
@@ -311,7 +329,11 @@ def main() -> None:
                         profile.update(profile_from_thumbnail(thumb, asset_root / str(user_id) / "avatar.png"))
                 except Exception as exc:
                     print(f"Avatar thumbnail color sampling failed for {username}: {type(exc).__name__}.", file=sys.stderr)
-            try:
+            local_rbxm = find_local_avatar_rbxm(username, USERS_ROOT)
+            if local_rbxm is not None:
+                profile.update({"rbxm_path": str(local_rbxm.resolve()), "rbxm_source_selected": True, "model_source": "rbxm-file"})
+                print(f"Found flat local model users/{local_rbxm.name} for {username}; it takes priority after its MeshParts are converted.")
+            else:
                 try:
                     local_model = load_local_avatar_model(username, user_id, USERS_ROOT, asset_root / str(user_id))
                 except (OSError, ValueError) as local_error:
@@ -321,20 +343,29 @@ def main() -> None:
                     profile.update(local_model)
                     print(f"Loaded local avatar OBJ for {username} from users/{username}/avatar.obj ({local_model['texture_count']} local texture files).")
                 elif local_only:
-                    raise RuntimeError(f"Local avatar mesh for {username} is unreadable")
-                else:
-                    profile.update(fetch_avatar_model(int(user_id), asset_root / str(user_id)))
-                    print(f"Fetched Roblox avatar mesh and textures for {username} ({profile['texture_count']} textures; source={profile['model_source']}).")
-            except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError, RuntimeError) as exc:
-                thumbnail_path = Path(profile.get("thumbnail", ""))
-                if local_only or not thumbnail_path.is_file() or thumbnail_path.stat().st_size == 0:
-                    raise RuntimeError(f"Avatar mesh access failed and no usable official thumbnail is available for {username}: {exc}") from exc
-                profile.update({
-                    "model_ready": False,
-                    "thumbnail_ready": True,
-                    "mesh_error": f"{type(exc).__name__}: {exc}",
-                })
-                print(f"Roblox automatic 3D mesh lookup failed for {username} ({exc}); using that account's official thumbnail, not a generated substitute.", file=sys.stderr)
+                    raise RuntimeError(f"Local avatar model for {username} is unreadable")
+            if not local_only and not (profile.get("model_ready") and profile.get("model_source") == "users-folder"):
+                try:
+                    remote_model = fetch_avatar_model(int(user_id), asset_root / str(user_id))
+                    if local_rbxm is None:
+                        profile.update(remote_model)
+                    else:
+                        profile.update({"fallback_model_obj": remote_model["model_obj"],
+                                        "fallback_model_mtl": remote_model["model_mtl"],
+                                        "fallback_model_ready": remote_model["model_ready"]})
+                    print(f"Fetched fallback Roblox mesh for {username} (source={remote_model['model_source']}); a matching local RBXM will replace it when its assets are accessible.")
+                except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError, RuntimeError) as exc:
+                    thumbnail_path = Path(profile.get("thumbnail", ""))
+                    if not thumbnail_path.is_file() or thumbnail_path.stat().st_size == 0:
+                        if local_rbxm is None:
+                            raise RuntimeError(f"Avatar mesh access failed and no usable official thumbnail is available for {username}: {exc}") from exc
+                    else:
+                        profile.update({
+                            "model_ready": False if local_rbxm is None else profile.get("model_ready", False),
+                            "thumbnail_ready": True,
+                            "mesh_error": f"{type(exc).__name__}: {exc}",
+                        })
+                        print(f"Roblox automatic 3D mesh lookup failed for {username} ({exc}); retaining the official thumbnail (not a generated substitute) as a fallback.", file=sys.stderr)
             records.append(profile)
             time.sleep(0.12)
     except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError, RuntimeError) as exc:
