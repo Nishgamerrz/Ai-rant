@@ -189,19 +189,40 @@ function buildHtml(data) {
     }
     return [Number(point[0]),Number(point[1]),Number(point[2])];
   }
-  function strengthSprite(value){
-    const canvas=document.createElement('canvas');canvas.width=256;canvas.height=128;
-    const ctx=canvas.getContext('2d');const text=String(Math.max(1,Math.min(999,Math.round(Number(value)||50))));
-    ctx.font='bold 92px Arial';ctx.textAlign='center';ctx.textBaseline='middle';
-    ctx.lineJoin='round';ctx.lineWidth=10;ctx.strokeStyle='rgba(10,18,28,.92)';ctx.strokeText(text,128,66);
-    ctx.fillStyle='#ffe18a';ctx.fillText(text,128,66);
+  function bodyTextSprite(value){
+    const canvas=document.createElement('canvas');canvas.width=256;canvas.height=96;
+    const ctx=canvas.getContext('2d');const text=String(value??'').slice(0,18);
+    ctx.font='bold 76px Arial';ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.lineJoin='round';ctx.lineWidth=9;ctx.strokeStyle='rgba(10,18,28,.92)';ctx.strokeText(text,128,50);
+    ctx.fillStyle='#ffe18a';ctx.fillText(text,128,50);
     const texture=new THREE.CanvasTexture(canvas);texture.colorSpace=THREE.SRGBColorSpace;
     const sprite=new THREE.Sprite(new THREE.SpriteMaterial({map:texture,transparent:true,depthTest:true,depthWrite:false}));
-    sprite.scale.set(2.5,1.25,1);return sprite;
+    sprite.scale.set(1.8,.68,1);return sprite;
   }
-  function registerActor(root,point,index,placement,username,strength,rig=null,animationClips=null,animationScale=1){
+  function addRequestedAvatarEffects(root,bones,effects,frontDirection=[0,0,1]){
+    const bonesByPart={head:'Head',torso:'Chest',left_arm:'LeftUpperArm',right_arm:'RightUpperArm',left_leg:'LeftUpperLeg',right_leg:'RightUpperLeg'};
+    const frontSign=Number(frontDirection?.[2]??1)>=0?1:-1;
+    for(const effect of Array.isArray(effects)?effects:[]){
+      const target=bones?.[bonesByPart[effect.attachment]||'Head']||root;
+      if(effect.kind==='number'||effect.kind==='text'){
+        const label=bodyTextSprite(effect.value);
+        label.position.set(0,effect.attachment==='head' ? .38 : .08, target===root?5.4:frontSign*.42);
+        target.add(label);
+      }else if(['scar','tattoo','birthmark','badge','emblem','symbol'].includes(effect.kind)){
+        const color=effect.kind==='scar'||effect.kind==='birthmark'?0x8e3b48:0xf2c45e;
+        const mark=new THREE.Mesh(new THREE.CircleGeometry(effect.kind==='scar' ? .18 : .13,16),
+          new THREE.MeshBasicMaterial({color,transparent:true,opacity:.9,depthWrite:false,side:THREE.DoubleSide}));
+        mark.scale.set(1.25,.34,1);
+        mark.position.set(.16,.08,target===root?5.36:frontSign*.36);
+        if(frontSign<0)mark.rotation.y=Math.PI;
+        mark.rotation.z=-.42;
+        target.add(mark);
+      }
+    }
+  }
+  function registerActor(root,point,index,placement,username,rig=null,animationClips=null,animationScale=1,frontDirection=[0,0,1]){
     const lead=placement?.role==='lead'||index===0;
-    const number=strengthSprite(strength);number.position.set(0,7.25,0);root.add(number);
+    addRequestedAvatarEffects(root,rig,placement?.visual_effects,frontDirection);
     actors.push({root,username:String(username||''),baseX:Number(point[0]),baseY:Number(point[1]),baseZ:Number(point[2]),
       phase:index*1.73,lead,stride:lead?2.1:1.15,rig,animationClips,animationScale});
   }
@@ -214,7 +235,7 @@ function buildHtml(data) {
       portrait.colorSpace=THREE.SRGBColorSpace;
       const root=new THREE.Group();root.name='AuthenticRobloxAvatarPortrait_'+username;root.position.set(point[0],point[1],point[2]);
       const image=new THREE.Sprite(new THREE.SpriteMaterial({map:portrait,transparent:true,depthTest:true,depthWrite:false}));image.scale.set(5.4,5.4,1);image.position.y=2.9;root.add(image);
-      scene.add(root);registerActor(root,point,index,place,username,place?.strength);return;
+      scene.add(root);registerActor(root,point,index,place,username,null,null,1,profile.front_direction);return;
     }
     const modelFile=profile.model_file||'avatar.obj',modelFormat=profile.model_format||'obj';
     const manager=new THREE.LoadingManager();
@@ -277,7 +298,7 @@ function buildHtml(data) {
       }
     }
     pivot.position.set(point[0],point[1],point[2]);
-    scene.add(pivot);registerActor(pivot,point,index,place,username,place?.strength,avatarRig?.bones||null,animationClips,avatarScale);
+    scene.add(pivot);registerActor(pivot,point,index,place,username,avatarRig?.bones||null,animationClips,avatarScale,profile.front_direction);
   }
   const avatarPromise=Promise.all(DATA.profiles.map(loadAvatar));
   const shots=DATA.plan.camera_shots?.length?DATA.plan.camera_shots:[{time:0,position:[0,38,76],target:[0,3,24],transition:'smooth'},{time:DATA.duration,position:[-14,15,18],target:[0,3,24],transition:'smooth'}];

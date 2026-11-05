@@ -54,29 +54,34 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("sudo rm -rf /usr/local/lib/android/sdk", workflow)
         self.assertIn("8 GiB for download and working files", workflow)
         self.assertIn("rm -f ollama.tar.zst", workflow)
-        self.assertIn("ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'hard' && 'qwen3-8b-v3' || 'qwen3-v2' }}", workflow)
+        self.assertIn("ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'animation_best' && 'deepseek-r1-8b-v1' || inputs.model_quality == 'hard' && 'qwen3-8b-v3' || 'qwen3-v2' }}", workflow)
         self.assertIn("fast) SELECTED_MODEL=qwen3:1.7b", workflow)
         self.assertIn("medium) SELECTED_MODEL=qwen3:4b", workflow)
         self.assertIn("hard) SELECTED_MODEL=qwen3:8b", workflow)
+        self.assertIn("animation_best) SELECTED_MODEL=deepseek-r1:8b; MODEL_THINKING=true", workflow)
+        self.assertIn("OLLAMA_THINKING=$MODEL_THINKING", workflow)
+        self.assertIn("/api/chat", workflow)
+        self.assertNotIn("/api/generate", workflow)
+        self.assertIn("128K-context, text-only DeepSeek-R1 reasoning model for world/shot planning", workflow)
         self.assertNotIn("qwen3:14b", workflow)
         self.assertIn("for attempt in 1 2; do", workflow)
-        self.assertIn("--min-props 8 --target-props 420", workflow)
+        self.assertIn("--min-props 8 --target-props 1260", workflow)
         self.assertIn("every deliberate snap cut must move both the camera and focus", workflow)
-        self.assertIn("strength number is assigned automatically", workflow)
-        self.assertIn("num_predict:6000", workflow)
+        self.assertIn("only when the user's story/topic explicitly requests that effect", workflow)
+        self.assertIn("num_predict:12000", workflow)
         self.assertIn("--max-time 480", workflow)
         self.assertIn("--fallback --theme", workflow)
-        self.assertIn("producing at least 420 individually named editable Parts", workflow)
+        self.assertIn("producing at least 1260 individually named editable Parts", workflow)
         self.assertIn("Show the public AI build plan and tools", workflow)
         self.assertIn("not private chain-of-thought", workflow)
 
     def test_workflow_uses_higher_creative_model_temperatures(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
-        self.assertIn("options:{temperature:0.75, num_predict:600}", workflow)
-        self.assertIn("options:{temperature:0.85, num_predict:6000}", workflow)
-        self.assertIn("options:{temperature:0.45, num_predict:1000}", workflow)
-        self.assertIn("options:{temperature:0.68, num_predict:6000}", workflow)
-        self.assertIn("options:{temperature:0.6, num_predict:400}", workflow)
+        self.assertIn("options:{temperature:0.9, num_predict:1600}", workflow)
+        self.assertIn("options:{temperature:1.5, num_predict:12000}", workflow)
+        self.assertIn("options:{temperature:0.45, num_predict:2000}", workflow)
+        self.assertIn("options:{temperature:0.75, num_predict:12000}", workflow)
+        self.assertIn("options:{temperature:0.6, num_predict:800}", workflow)
 
     def test_studio_runtime_uses_native_rbxm_animation_tracks(self):
         from tools.build_studio_experience import make_config, server_lua
@@ -88,11 +93,39 @@ class StudioExperienceTests(unittest.TestCase):
         config = make_config({}, [{"username": "Normal", "role": "lead", "position": [0, 0, 0]}],
                              60, "", [], "", profiles)
         self.assertEqual(config["rbxm_animations"]["normal"]["idle"], "rbxassetid://123")
+        self.assertEqual(config["cast"][0]["visual_effects"], [])
         runtime = server_lua(json.dumps(config))
         self.assertIn("animator:LoadAnimation(animation)", runtime)
         self.assertIn("tracks.walk", runtime)
         self.assertIn("humanoid:MoveTo(waypoints[index])", runtime)
         self.assertIn('FindFirstChild("Animate")', runtime)
+
+    def test_avatar_body_effects_are_opt_in_and_follow_requested_attachments(self):
+        from tools.build_story_map import default_plan, validate
+        from tools.build_studio_experience import make_config, server_lua
+
+        no_effects = validate(default_plan(), 60, ["Lead", "Friend"], min_props=8,
+                              visual_request="A wallet dilemma about finding strength in friendship.")
+        self.assertTrue(all("visual_effects" not in person for person in no_effects["character_placements"]))
+
+        explicit = validate(default_plan(), 60, ["Lead", "Friend"], min_props=8,
+                             visual_request="Show a strength number above each avatar's head and add a scar on the left arm.")
+        lead_effects = explicit["character_placements"][0]["visual_effects"]
+        self.assertEqual([(effect["kind"], effect["attachment"]) for effect in lead_effects],
+                         [("number", "head"), ("scar", "left_arm")])
+        self.assertTrue(all(10 <= effect["value"] <= 99 for effect in lead_effects if effect["kind"] == "number"))
+        fixed = validate(default_plan(), 60, ["Lead"], min_props=8,
+                         visual_request="Put the number 42 on the avatar's chest.")
+        self.assertEqual(fixed["character_placements"][0]["visual_effects"],
+                         [{"kind": "number", "attachment": "torso", "value": 42}])
+
+        config = make_config(explicit, [{"username": "Lead", "role": "lead", "position": [0, 0, 24]}],
+                             60, "", [], "")
+        self.assertEqual(config["cast"][0]["visual_effects"], lead_effects)
+        runtime = server_lua(json.dumps(config))
+        self.assertIn("applyRequestedAvatarEffects", runtime)
+        self.assertIn('kind == "number" or kind == "text"', runtime)
+        self.assertIn('kind == "scar"', runtime)
 
     def test_mp4_renderer_retargets_native_roblox_keyframes_onto_auto_rigged_models(self):
         renderer = (ROOT / "tools/video_renderer/render_short.mjs").read_text(encoding="utf-8")
@@ -114,7 +147,8 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("applyRobloxAnimationRig", renderer)
         self.assertIn("animateAvatarRig", renderer)
         self.assertIn("chooseSafeCamera", renderer)
-        self.assertIn("strengthSprite", renderer)
+        self.assertIn("addRequestedAvatarEffects", renderer)
+        self.assertNotIn("strengthSprite", renderer)
         self.assertIn("focus_username", renderer)
         self.assertNotIn("nameSprite", renderer)
         self.assertNotIn("#caption", renderer)
@@ -182,7 +216,8 @@ class StudioExperienceTests(unittest.TestCase):
             self.assertIsNotNone(root.find('.//Item[@class="Sky"]'))
             self.assertIn('SkyboxBk = "rbxasset://textures/sky/sky512_bk.tex"', server.text)
             self.assertNotIn('World Title Sign', server.text)
-            self.assertIn('StrengthNumber', server.text)
+            self.assertIn('applyRequestedAvatarEffects(avatar, castMember.visual_effects)', server.text)
+            self.assertNotIn('StrengthNumber', server.text)
             self.assertIn('humanoid.DisplayName = ""', server.text)
             self.assertIn('HumanoidDisplayDistanceType.None', server.text)
             part_names = {node.text for node in root.findall('.//Item[@class="Part"]/Properties/string[@name="Name"]')}
@@ -207,6 +242,15 @@ class StudioExperienceTests(unittest.TestCase):
             self.assertIn("users/<username>.rbxm", readme)
             self.assertIn("R15-style joints", readme)
             self.assertTrue((work / "World.lua").exists())
+
+    def test_map_decoder_reads_chat_api_content(self):
+        from tools.build_story_map import decode_response
+
+        plan = {"name": "Test", "props": []}
+        with tempfile.TemporaryDirectory() as temporary:
+            response = Path(temporary) / "response.json"
+            response.write_text(json.dumps({"message": {"content": json.dumps(plan)}}), encoding="utf-8")
+            self.assertEqual(decode_response(response), plan)
 
     def test_prompt_themed_map_requires_full_ai_authored_scene(self):
         from tools.build_story_map import emit_lua, validate
@@ -257,9 +301,9 @@ class StudioExperienceTests(unittest.TestCase):
         blueprint = validate({"name": "Coral Reef", "theme": "Bright daylight underwater coral reef",
                               "ground_material": "Slate", "ground_color": [45, 125, 150],
                               "ambient_color": [140, 210, 225], "props": anchors}, 60, (), min_props=8)
-        expanded = validate(expand_plan(blueprint, 420), 60, (), min_props=420)
+        expanded = validate(expand_plan(blueprint, 1260), 60, (), min_props=1260)
         names = [part["name"] for part in expanded["props"]]
-        self.assertGreaterEqual(len(names), 420)
+        self.assertGreaterEqual(len(names), 1260)
         self.assertEqual(len(names), len(set(names)))
         self.assertTrue(any(name == "Coral Market Interior Floor" for name in names))
         self.assertTrue(any("Wood Entrance Door" in name for name in names))
@@ -283,19 +327,17 @@ class StudioExperienceTests(unittest.TestCase):
                            "color": [80, 160, 200]} for index in range(22)]
         sparse_plan = validate({"name": "Wildwood", "theme": "Mystery forest", "props": sparse_anchors},
                                60, (), min_props=8)
-        sparse_world = validate(expand_plan(sparse_plan, 420), 60, (), min_props=420)
+        sparse_world = validate(expand_plan(sparse_plan, 1260), 60, (), min_props=1260)
         self.assertTrue(all(any(building in part["name"] for part in sparse_world["props"])
                             for building in ("Forest Market", "Canopy Hall", "Moss Workshop")))
 
         fallback = procedural_fallback_plan("daylight", "Friends discover a hidden coral reef.", 60, ["Lead", "Friend"])
-        fallback_world = validate(expand_plan(validate(fallback, 60, ["Lead", "Friend"], 8), 420),
-                                  60, ["Lead", "Friend"], 420)
+        fallback_world = validate(expand_plan(validate(fallback, 60, ["Lead", "Friend"], 8), 1260),
+                                  60, ["Lead", "Friend"], 1260)
         self.assertIn("daylight", fallback_world["theme"])
         self.assertIn("coral reef", fallback_world["theme"])
         self.assertEqual(len(fallback_world["character_placements"]), 2)
-        strengths = [person["strength"] for person in fallback_world["character_placements"]]
-        self.assertTrue(all(10 <= strength <= 99 for strength in strengths))
-        self.assertEqual(len(strengths), len(set(strengths)))
+        self.assertTrue(all("visual_effects" not in person for person in fallback_world["character_placements"]))
         self.assertEqual(fallback_world["camera_shots"][0]["focus_username"], "Lead")
 
     def test_captions_have_valid_subtitle_and_fallback_cues(self):

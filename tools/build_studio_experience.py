@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import html
 import json
 import re
@@ -85,16 +84,14 @@ def make_config(plan, cast, duration, narration, captions, audio_asset_id, avata
     placements = {entry.get("username", "").casefold(): entry
                   for entry in plan.get("character_placements", []) if isinstance(entry, dict)}
     normalized_cast = []
-    used_strengths = set()
     for member in cast:
         username = str(member.get("username", ""))
         placement = placements.get(username.casefold(), {})
-        digest = hashlib.sha256(username.casefold().encode("utf-8")).digest()
-        strength = int(member.get("strength") or placement.get("strength") or (10 + int.from_bytes(digest[:4], "big") % 90))
-        while strength in used_strengths:
-            strength = 10 + ((strength - 9) % 90)
-        used_strengths.add(strength)
-        normalized_cast.append({**member, "strength": strength})
+        effects = placement.get("visual_effects", [])
+        normalized_cast.append({
+            **member,
+            "visual_effects": effects if isinstance(effects, list) else [],
+        })
     cast = normalized_cast
     rbxm_animations = {}
     for profile in avatar_profiles or []:
@@ -186,6 +183,54 @@ local function startNativeTrack(animator, animationId, looped, priority)
     return track
 end
 
+local effectPartNames = {
+    head = "Head", torso = "UpperTorso", left_arm = "LeftUpperArm", right_arm = "RightUpperArm",
+    left_leg = "LeftUpperLeg", right_leg = "RightUpperLeg",
+}
+local function applyRequestedAvatarEffects(avatar, effects)
+    for _, effect in ipairs(effects or {}) do
+        local kind = effect.kind
+        local bodyPart = avatar:FindFirstChild(effectPartNames[effect.attachment] or "Head") or avatar:FindFirstChild("Head")
+        if bodyPart and (kind == "number" or kind == "text") then
+            local tag = Instance.new("BillboardGui")
+            tag.Name = "RequestedBodyText"
+            tag.Size = UDim2.fromOffset(78, 36)
+            tag.StudsOffset = Vector3.new(0, 0, 0)
+            tag.AlwaysOnTop = false
+            tag.MaxDistance = 120
+            tag.Parent = bodyPart
+            local label = Instance.new("TextLabel")
+            label.Name = "RequestedValue"
+            label.Size = UDim2.fromScale(1, 1)
+            label.BackgroundTransparency = 1
+            label.Text = tostring(effect.value or "")
+            label.TextColor3 = Color3.fromRGB(255, 225, 138)
+            label.TextStrokeColor3 = Color3.fromRGB(10, 18, 28)
+            label.TextStrokeTransparency = 0.12
+            label.Font = Enum.Font.GothamBold
+            label.TextScaled = true
+            label.Parent = tag
+        elseif bodyPart and (kind == "scar" or kind == "tattoo" or kind == "birthmark" or kind == "badge" or kind == "emblem" or kind == "symbol") then
+            local mark = Instance.new("Part")
+            mark.Name = "RequestedStoryMark"
+            mark.Size = kind == "scar" and Vector3.new(0.09, 0.58, 0.035) or Vector3.new(0.34, 0.34, 0.035)
+            mark.Color = kind == "scar" and Color3.fromRGB(112, 42, 49) or Color3.fromRGB(245, 196, 76)
+            mark.Material = Enum.Material.SmoothPlastic
+            mark.CanCollide = false
+            mark.CanTouch = false
+            mark.CanQuery = false
+            mark.Massless = true
+            mark.Anchored = false
+            mark.CFrame = bodyPart.CFrame * CFrame.new(0.18, 0.08, -bodyPart.Size.Z / 2 - 0.025) * CFrame.Angles(0, 0, math.rad(-28))
+            mark.Parent = avatar
+            local weld = Instance.new("WeldConstraint")
+            weld.Part0 = bodyPart
+            weld.Part1 = mark
+            weld.Parent = mark
+        end
+    end
+end
+
 for _, castMember in ipairs(CONFIG.cast or {}) do
     task.spawn(function()
         local ok, result = pcall(function()
@@ -199,27 +244,7 @@ for _, castMember in ipairs(CONFIG.cast or {}) do
             if not humanoid then return avatar end
             humanoid.DisplayName = ""
             humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-            local head = avatar:FindFirstChild("Head")
-            if head then
-                local strengthTag = Instance.new("BillboardGui")
-                strengthTag.Name = "StrengthNumber"
-                strengthTag.Size = UDim2.fromOffset(96, 54)
-                strengthTag.StudsOffset = Vector3.new(0, 2.8, 0)
-                strengthTag.AlwaysOnTop = true
-                strengthTag.MaxDistance = 120
-                strengthTag.Parent = head
-                local value = Instance.new("TextLabel")
-                value.Name = "Value"
-                value.Size = UDim2.fromScale(1, 1)
-                value.BackgroundTransparency = 1
-                value.Text = tostring(castMember.strength or 50)
-                value.TextColor3 = Color3.fromRGB(255, 225, 138)
-                value.TextStrokeColor3 = Color3.fromRGB(10, 18, 28)
-                value.TextStrokeTransparency = 0.12
-                value.Font = Enum.Font.GothamBold
-                value.TextScaled = true
-                value.Parent = strengthTag
-            end
+            applyRequestedAvatarEffects(avatar, castMember.visual_effects)
             humanoid.WalkSpeed = 9
             humanoid.JumpPower = 32
             humanoid.AutoRotate = true
@@ -639,7 +664,7 @@ def build(args):
             "username": username,
             "role": "lead" if index == 0 else "supporting",
             "position": entry.get("position", fallback_positions[index]),
-            "strength": entry.get("strength"),
+            "visual_effects": entry.get("visual_effects", []),
         })
     narration = args.narration.read_text(encoding="utf-8") if args.narration and args.narration.exists() else ""
     captions = parse_srt(args.srt)
@@ -667,7 +692,7 @@ def build(args):
             f"**Cast:** {cast_label}\n\n"
             "## Watch the short\n\n"
             "1. Download and unzip `Roblox_Studio_Complete_Package.zip`.\n"
-            "2. Play `Roblox_2K_YouTube_Short.mp4` directly. It is rendered with authentic 3D Roblox avatar meshes, moving limbs, the furnished world, camera tour, and narration audio, with no username labels or story text and only a numeric strength badge above each avatar; the workflow refuses to package a thumbnail-only video with static limbs.\n"
+            "2. Play `Roblox_2K_YouTube_Short.mp4` directly. It is rendered with authentic 3D Roblox avatar meshes, moving limbs, the furnished world, camera tour, and narration audio. No usernames or story text are overlaid; avatar-body numbers, scars, tattoos, or other marks appear only when explicitly requested in the story/topic. The workflow refuses to package a thumbnail-only video with static limbs.\n"
             "3. The ZIP also includes `AI_Creation_Summary.txt`, `AI_Design_and_Tools_Report.pdf`, narration audio/subtitles, generation prompts, and an optional editable `Roblox_Studio_Experience.rbxlx` project.\n"
             "4. The workflow first checks for a flat `users/<username>.rbxm` model and resolves its referenced official Roblox MeshParts/textures for the MP4; the generated ZIP includes the original RBXM. The MP4 is rendered with headless Three.js, not captured from a Roblox client. Rapier simulates dynamic prop physics; avatars follow deterministic collision-free paths, and the converted RBXM geometry is automatically skinned to R15-style joints and animated in Three.js. The editable Studio project receives native Roblox animation IDs from the RBXM and moves its Humanoid avatars using Roblox animation tracks. The MP4 motion is not Roblox's native Animate runtime.\n\n"
             "## Notes\n\n"
