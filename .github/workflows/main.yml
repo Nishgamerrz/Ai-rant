@@ -563,6 +563,8 @@ jobs:
           PY
           mkdir -p dist/Generation_Prompts
           cp narration_prompt.txt map_prompt.txt creation_summary_prompt.txt dist/Generation_Prompts/
+          PACKAGE_RATE="${NARRATOR_RATE:--8%}"
+          echo "Report speech-rate metadata: $PACKAGE_RATE"
           python tools/package_studio_deliverables.py \
             --directory dist \
             --map dist/Roblox_Story_Map.json \
@@ -571,7 +573,7 @@ jobs:
             --summary dist/AI_Creation_Summary.txt \
             --model "$AI_MODEL" \
             --voice "$NARRATOR_VOICE" \
-            --rate="$NARRATOR_RATE" \
+            --rate="$PACKAGE_RATE" \
             --duration "$DURATION_SECONDS"
           test -s dist/AI_Design_and_Tools_Report.pdf
           test -s dist/Roblox_Studio_Complete_Package.zip
