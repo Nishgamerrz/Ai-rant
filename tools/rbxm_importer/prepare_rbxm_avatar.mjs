@@ -128,6 +128,10 @@ async function prepareProfile(profile) {
   // can still use Roblox's Animator if a protected MeshPart asset returns HTTP 401.
   const animationIds = readAnimationIds(instances);
   profile.rbxm_animation_ids = animationIds;
+  if (profile.model_ready && ['users-file', 'users-folder'].includes(profile.model_source)) {
+    console.log(`Using the self-contained ${profile.model_format || 'OBJ'} avatar mesh for MP4; extracted ${Object.keys(animationIds).length} native animation references from the matching RBXM for Studio.`);
+    return profile;
+  }
   const outputDir = path.resolve(profile.rbxm_output_dir);
   await fs.mkdir(outputDir, { recursive: true });
   const meshCache = new Map();
@@ -219,7 +223,9 @@ async function main() {
       profile.rbxm_import_error = String(error.message || error);
       const preservedAnimationCount = Object.keys(profile.rbxm_animation_ids || {}).length;
       console.warn(`Could not render ${profile.username}'s RBXM (${profile.rbxm_import_error}); preserving ${preservedAnimationCount} native animation references for Studio.`);
-      if (profile.fallback_model_ready && profile.fallback_model_obj && profile.fallback_model_mtl) {
+      if (profile.model_ready && ['users-file', 'users-folder'].includes(profile.model_source)) {
+        console.warn(`Keeping the self-contained local mesh for ${profile.username}; only RBXM animation metadata was unavailable.`);
+      } else if (profile.fallback_model_ready && profile.fallback_model_obj && profile.fallback_model_mtl) {
         profile.model_obj = profile.fallback_model_obj;
         profile.model_mtl = profile.fallback_model_mtl;
         profile.model_ready = true;

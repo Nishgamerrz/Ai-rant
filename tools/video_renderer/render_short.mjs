@@ -56,7 +56,7 @@ function safeData(value) {
 }
 
 function contentType(path) {
-  return ({ '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.obj': 'text/plain; charset=utf-8', '.mtl': 'text/plain; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' })[extname(path).toLowerCase()] || 'application/octet-stream';
+  return ({ '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.obj': 'text/plain; charset=utf-8', '.mtl': 'text/plain; charset=utf-8', '.gltf': 'model/gltf+json', '.glb': 'model/gltf-binary', '.fbx': 'application/octet-stream', '.dae': 'model/vnd.collada+xml', '.3ds': 'application/octet-stream', '.ply': 'application/octet-stream', '.stl': 'application/octet-stream', '.bin': 'application/octet-stream', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' })[extname(path).toLowerCase()] || 'application/octet-stream';
 }
 
 function buildHtml(data) {
@@ -74,6 +74,12 @@ function buildHtml(data) {
   import RAPIER from '/modules/@dimforge/rapier3d-compat/dist/rapier.mjs';
   import { OBJLoader } from '/modules/three/examples/jsm/loaders/OBJLoader.js';
   import { MTLLoader } from '/modules/three/examples/jsm/loaders/MTLLoader.js';
+  import { GLTFLoader } from '/modules/three/examples/jsm/loaders/GLTFLoader.js';
+  import { FBXLoader } from '/modules/three/examples/jsm/loaders/FBXLoader.js';
+  import { ColladaLoader } from '/modules/three/examples/jsm/loaders/ColladaLoader.js';
+  import { PLYLoader } from '/modules/three/examples/jsm/loaders/PLYLoader.js';
+  import { STLLoader } from '/modules/three/examples/jsm/loaders/STLLoader.js';
+  import { TDSLoader } from '/modules/three/examples/jsm/loaders/TDSLoader.js';
   import { animateAvatarRig, buildAvatarRig } from '/avatar_rig.mjs';
   const DATA=JSON.parse(document.getElementById('render-data').textContent);
   await RAPIER.init();
@@ -214,18 +220,41 @@ function buildHtml(data) {
       const image=new THREE.Sprite(new THREE.SpriteMaterial({map:portrait,transparent:true,depthTest:true,depthWrite:false}));image.scale.set(5.4,5.4,1);image.position.y=2.9;root.add(image);
       const label=nameSprite(username);label.position.y=6.3;root.add(label);scene.add(root);registerActor(root,point,index,place);return;
     }
-    const [objResponse,mtlResponse]=await Promise.all([fetch(path+'avatar.obj'),fetch(path+'avatar.mtl')]);
-    if(!objResponse.ok||!mtlResponse.ok) throw new Error('Missing public Roblox avatar model files for '+username);
-    const [objText,mtlText]=await Promise.all([objResponse.text(),mtlResponse.text()]);
+    const modelFile=profile.model_file||'avatar.obj',modelFormat=profile.model_format||'obj';
     const manager=new THREE.LoadingManager();
-    manager.onError=url=>console.warn('Roblox avatar texture failed to load:',url);
+    let managerSawItems=false;
+    manager.onStart=()=>{managerSawItems=true;};
+    manager.onError=url=>console.warn('Avatar texture/dependency failed to load:',url);
     let finishTextures,textureTimer;
     const textureReady=new Promise(resolve=>{finishTextures=()=>{clearTimeout(textureTimer);resolve();};manager.onLoad=finishTextures;textureTimer=setTimeout(finishTextures,30000);});
-    const mtlLoader=new MTLLoader(manager);mtlLoader.setResourcePath(location.origin+path);const materials=mtlLoader.parse(mtlText,location.origin+path);
-    const hasTextures=Object.values(materials.materialsInfo||{}).some(info=>Object.keys(info).some(key=>key.toLowerCase().startsWith('map_')));
-    materials.preload();
-    const objLoader=new OBJLoader();objLoader.setMaterials(materials);const model=objLoader.parse(objText);
-    if(hasTextures)await textureReady;else finishTextures();
+    const modelResponse=await fetch(path+modelFile);
+    if(!modelResponse.ok)throw new Error('Missing local avatar model '+modelFile+' for '+username);
+    let model,hasTextures=false;
+    if(modelFormat==='obj'){
+      const mtlResponse=await fetch(path+'avatar.mtl');
+      if(!mtlResponse.ok)throw new Error('Missing OBJ material file for '+username);
+      const [objText,mtlText]=await Promise.all([modelResponse.text(),mtlResponse.text()]);
+      const mtlLoader=new MTLLoader(manager);mtlLoader.setResourcePath(location.origin+path);const materials=mtlLoader.parse(mtlText,location.origin+path);
+      hasTextures=Object.values(materials.materialsInfo||{}).some(info=>Object.keys(info).some(key=>key.toLowerCase().startsWith('map_')));
+      materials.preload();const objLoader=new OBJLoader();objLoader.setMaterials(materials);model=objLoader.parse(objText);
+    }else if(modelFormat==='gltf'||modelFormat==='glb'){
+      const data=await modelResponse.arrayBuffer();
+      const gltf=await new GLTFLoader(manager).parseAsync(data,location.origin+path);model=gltf.scene;
+      hasTextures=true;
+    }else if(modelFormat==='fbx'){
+      const data=await modelResponse.arrayBuffer();model=new FBXLoader(manager).parse(data,location.origin+path);hasTextures=true;
+    }else if(modelFormat==='dae'){
+      const text=await modelResponse.text();model=new ColladaLoader(manager).parse(text,location.origin+path).scene;hasTextures=true;
+    }else if(modelFormat==='3ds'){
+      const data=await modelResponse.arrayBuffer();model=new TDSLoader(manager).parse(data,location.origin+path);hasTextures=true;
+    }else if(modelFormat==='ply'||modelFormat==='stl'){
+      const data=await modelResponse.arrayBuffer();
+      const geometry=modelFormat==='ply'?new PLYLoader().parse(data):new STLLoader().parse(data);
+      if(modelFormat==='ply'&&geometry.hasAttribute('color'))geometry.computeVertexNormals();
+      const material=new THREE.MeshStandardMaterial({color:0xffffff,vertexColors:modelFormat==='ply'&&geometry.hasAttribute('color'),roughness:.78,metalness:.02,side:THREE.DoubleSide});
+      model=new THREE.Group();model.add(new THREE.Mesh(geometry,material));
+    }else throw new Error('Unsupported avatar model format '+modelFormat+' for '+username);
+    if(hasTextures&&managerSawItems)await textureReady;else finishTextures();
     const bounds=new THREE.Box3().setFromObject(model);const size=bounds.getSize(new THREE.Vector3());
     if(!Number.isFinite(size.y)||size.y<.1) throw new Error('Roblox avatar mesh has invalid bounds for '+username);
     const pivot=new THREE.Group();pivot.name='AuthenticRobloxAvatar_'+username;
