@@ -571,7 +571,7 @@ jobs:
             --summary dist/AI_Creation_Summary.txt \
             --model "$AI_MODEL" \
             --voice "$NARRATOR_VOICE" \
-            --rate "$NARRATOR_RATE" \
+            --rate="$NARRATOR_RATE" \
             --duration "$DURATION_SECONDS"
           test -s dist/AI_Design_and_Tools_Report.pdf
           test -s dist/Roblox_Studio_Complete_Package.zip
