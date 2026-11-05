@@ -208,7 +208,8 @@ async function main() {
       profile.source_rbxm_copy = sourceCopy;
       await prepareProfile(profile);
     } catch (error) {
-      console.warn(`Could not render ${profile.username}'s RBXM (${error.message}).`);
+      profile.rbxm_import_error = String(error.message || error);
+      console.warn(`Could not render ${profile.username}'s RBXM (${profile.rbxm_import_error}).`);
       if (profile.fallback_model_ready && profile.fallback_model_obj && profile.fallback_model_mtl) {
         profile.model_obj = profile.fallback_model_obj;
         profile.model_mtl = profile.fallback_model_mtl;

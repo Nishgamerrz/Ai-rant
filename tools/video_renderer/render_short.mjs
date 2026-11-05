@@ -327,7 +327,7 @@ async function main() {
   if(!Array.isArray(usernames)||usernames.length===0) throw new Error('Provide at least one actual Roblox username for the lead avatar.');
   if(!Array.isArray(profiles)||profiles.length!==usernames.length) throw new Error('Actual Roblox avatar profiles do not match the username cast.');
   const profileByName=new Map(profiles.map(p=>[p.username.toLowerCase(),p]));
-  const orderedProfiles=usernames.map(name=>{const p=profileByName.get(name.toLowerCase());if(!p?.user_id)throw new Error('Roblox avatar profile missing for '+name);if(!p.model_ready)throw new Error(`Moving-limb MP4 requires an authentic 3D avatar mesh for ${name}; only a 2D thumbnail fallback is available. Make the matching RBXM or authorized Roblox mesh accessible and rerun.`);return p;});
+  const orderedProfiles=usernames.map(name=>{const p=profileByName.get(name.toLowerCase());if(!p?.user_id)throw new Error('Roblox avatar profile missing for '+name);if(!p.model_ready)throw new Error(`Moving-limb MP4 requires an authentic 3D avatar mesh for ${name}; only a 2D thumbnail fallback is available. Confirm the RBXM MeshPart assets are accessible, or add a Roblox Open Cloud key with Thumbnails read access as the GitHub Actions secret ROBLOX_OPEN_CLOUD_API_KEY, then rerun. Never paste the key into chat.`);return p;});
   const captions=parseSrt(readFileSync(args.captions,'utf8'));
   if(!captions.length) throw new Error('SRT contains no caption cues; refusing to make an uncaptioned MP4.');
   const data={plan,profiles:orderedProfiles,captions,duration:args.duration};
