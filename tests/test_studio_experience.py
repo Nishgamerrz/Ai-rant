@@ -60,20 +60,22 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("hard) SELECTED_MODEL=qwen3:8b", workflow)
         self.assertNotIn("qwen3:14b", workflow)
         self.assertIn("for attempt in 1 2; do", workflow)
-        self.assertIn("--min-props 8 --target-props 220", workflow)
+        self.assertIn("--min-props 8 --target-props 420", workflow)
+        self.assertIn("every deliberate snap cut must move both the camera and focus", workflow)
+        self.assertIn("strength number is assigned automatically", workflow)
         self.assertIn("num_predict:6000", workflow)
         self.assertIn("--max-time 480", workflow)
         self.assertIn("--fallback --theme", workflow)
-        self.assertIn("producing at least 220 individually named editable Parts", workflow)
+        self.assertIn("producing at least 420 individually named editable Parts", workflow)
         self.assertIn("Show the public AI build plan and tools", workflow)
         self.assertIn("not private chain-of-thought", workflow)
 
     def test_workflow_uses_higher_creative_model_temperatures(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
         self.assertIn("options:{temperature:0.75, num_predict:600}", workflow)
-        self.assertIn("options:{temperature:0.75, num_predict:6000}", workflow)
+        self.assertIn("options:{temperature:0.85, num_predict:6000}", workflow)
         self.assertIn("options:{temperature:0.45, num_predict:1000}", workflow)
-        self.assertIn("options:{temperature:0.55, num_predict:6000}", workflow)
+        self.assertIn("options:{temperature:0.68, num_predict:6000}", workflow)
         self.assertIn("options:{temperature:0.6, num_predict:400}", workflow)
 
     def test_studio_runtime_uses_native_rbxm_animation_tracks(self):
@@ -101,7 +103,7 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("test:module-resolution", renderer_package["scripts"])
         self.assertIn("function animateActor(actor,t)", renderer)
         self.assertIn("actor.root.rotation.y", renderer)
-        self.assertIn("story-paced motion", renderer)
+        self.assertIn("deterministic, collision-free paths", renderer)
         self.assertIn("await RAPIER.init()", renderer)
         self.assertIn("physicsWorld.step();physicsWorld.step();", renderer)
         self.assertIn("dynamicPropInstances", renderer)
@@ -111,6 +113,11 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("buildAvatarRig", renderer)
         self.assertIn("applyRobloxAnimationRig", renderer)
         self.assertIn("animateAvatarRig", renderer)
+        self.assertIn("chooseSafeCamera", renderer)
+        self.assertIn("strengthSprite", renderer)
+        self.assertIn("focus_username", renderer)
+        self.assertNotIn("nameSprite", renderer)
+        self.assertNotIn("#caption", renderer)
         self.assertIn("Automatic avatar limb rigs", renderer)
         self.assertIn("Native Roblox walk clips retargeted", renderer)
         self.assertIn("Native Roblox ${missing.join('/')}", renderer)
@@ -171,10 +178,13 @@ class StudioExperienceTests(unittest.TestCase):
             self.assertIsNotNone(client)
             self.assertIn('for _, castMember in ipairs(CONFIG.cast or {}) do', server.text)
             self.assertIn('CreateHumanoidModelFromUserIdAsync', server.text)
-            self.assertGreaterEqual(len(root.findall('.//Item[@class="Part"]')), 10)
+            self.assertGreaterEqual(len(root.findall('.//Item[@class="Part"]')), 9)
             self.assertIsNotNone(root.find('.//Item[@class="Sky"]'))
             self.assertIn('SkyboxBk = "rbxasset://textures/sky/sky512_bk.tex"', server.text)
-            self.assertIn('World Title Sign', server.text)
+            self.assertNotIn('World Title Sign', server.text)
+            self.assertIn('StrengthNumber', server.text)
+            self.assertIn('humanoid.DisplayName = ""', server.text)
+            self.assertIn('HumanoidDisplayDistanceType.None', server.text)
             part_names = {node.text for node in root.findall('.//Item[@class="Part"]/Properties/string[@name="Name"]')}
             self.assertIn('AI landmark 0', part_names)
             part_by_name = {
@@ -183,10 +193,11 @@ class StudioExperienceTests(unittest.TestCase):
             }
             self.assertEqual(part_by_name['AI landmark 0'].find('Properties/bool[@name="Anchored"]').text, 'false')
             self.assertEqual(part_by_name['AI landmark 1'].find('Properties/bool[@name="Anchored"]').text, 'true')
-            self.assertIn('NarrationCaption', client.text)
-            self.assertIn('A student returns a lost wallet.', client.text)
-            self.assertIn('12345', client.text)
-            self.assertIn('caption.Visible = true', client.text)
+            self.assertNotIn('NarrationCaption', client.text)
+            self.assertNotIn('TextLabel', client.text)
+            self.assertNotIn('A student returns a lost wallet.', client.text)
+            self.assertIn('shotFocus(a, targetA)', client.text)
+            self.assertIn('focus_username', client.text)
             self.assertNotIn('motor.Transform', client.text)
             self.assertNotIn('Story Lead Torso', server.text)
             self.assertTrue((work / "README.md").exists())
@@ -194,7 +205,7 @@ class StudioExperienceTests(unittest.TestCase):
             self.assertIn("ROBLOX_OPEN_CLOUD_API_KEY", readme)
             self.assertIn("public Users API", readme)
             self.assertIn("users/<username>.rbxm", readme)
-            self.assertIn("procedural R15-style joints", readme)
+            self.assertIn("R15-style joints", readme)
             self.assertTrue((work / "World.lua").exists())
 
     def test_prompt_themed_map_requires_full_ai_authored_scene(self):
@@ -202,7 +213,7 @@ class StudioExperienceTests(unittest.TestCase):
 
         props = [
             {"name": f"Theme part {index}", "shape": "Block", "material": "SmoothPlastic",
-             "position": [index - 25, 4, 0], "size": [4, 8, 4], "color": [95, 145, 210],
+             "position": [index - 25, 4, 0], "size": [4, 8, 4], "color": [0, 0, 0] if index == 0 else [95, 145, 210],
              "physics": "dynamic" if index < 3 else "static"}
             for index in range(120)
         ]
@@ -214,7 +225,10 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertEqual(normalized["ground_material"], "Slate")
         self.assertEqual(len(normalized["props"]), 120)
         self.assertEqual(normalized["props"][0]["physics"], "dynamic")
+        self.assertGreaterEqual(sum(normalized["props"][0]["color"]) / 3, 72)
         self.assertEqual(normalized["props"][3]["physics"], "static")
+        with self.assertRaises(ValueError):
+            validate({**plan, "props": [{**props[0], "size": [65, 1, 1]}, *props[1:]]}, 60, (), min_props=120)
         with tempfile.TemporaryDirectory() as temporary:
             lua_output = Path(temporary) / "GeneratedStoryWorld.lua"
             emit_lua(normalized, lua_output)
@@ -243,15 +257,17 @@ class StudioExperienceTests(unittest.TestCase):
         blueprint = validate({"name": "Coral Reef", "theme": "Bright daylight underwater coral reef",
                               "ground_material": "Slate", "ground_color": [45, 125, 150],
                               "ambient_color": [140, 210, 225], "props": anchors}, 60, (), min_props=8)
-        expanded = validate(expand_plan(blueprint, 220), 60, (), min_props=220)
+        expanded = validate(expand_plan(blueprint, 420), 60, (), min_props=420)
         names = [part["name"] for part in expanded["props"]]
-        self.assertGreaterEqual(len(names), 220)
+        self.assertGreaterEqual(len(names), 420)
         self.assertEqual(len(names), len(set(names)))
         self.assertTrue(any(name == "Coral Market Interior Floor" for name in names))
         self.assertTrue(any("Wood Entrance Door" in name for name in names))
         self.assertTrue(any("Glass Window" in name for name in names))
         self.assertTrue(any("Welcome Rug" in name for name in names))
         self.assertTrue(any("Sea Floor Stone" in name for name in names))
+        self.assertTrue(any(name.startswith("Plaza Paving Tile") for name in names))
+        self.assertTrue(any("Plaza Bench Seat" in name for name in names))
         self.assertGreater(max(abs(part["position"][0]) for part in expanded["props"]), 180)
         self.assertEqual(expanded["theme"], blueprint["theme"])
         with tempfile.TemporaryDirectory() as temporary:
@@ -267,16 +283,20 @@ class StudioExperienceTests(unittest.TestCase):
                            "color": [80, 160, 200]} for index in range(22)]
         sparse_plan = validate({"name": "Wildwood", "theme": "Mystery forest", "props": sparse_anchors},
                                60, (), min_props=8)
-        sparse_world = validate(expand_plan(sparse_plan, 220), 60, (), min_props=220)
+        sparse_world = validate(expand_plan(sparse_plan, 420), 60, (), min_props=420)
         self.assertTrue(all(any(building in part["name"] for part in sparse_world["props"])
                             for building in ("Forest Market", "Canopy Hall", "Moss Workshop")))
 
         fallback = procedural_fallback_plan("daylight", "Friends discover a hidden coral reef.", 60, ["Lead", "Friend"])
-        fallback_world = validate(expand_plan(validate(fallback, 60, ["Lead", "Friend"], 8), 220),
-                                  60, ["Lead", "Friend"], 220)
+        fallback_world = validate(expand_plan(validate(fallback, 60, ["Lead", "Friend"], 8), 420),
+                                  60, ["Lead", "Friend"], 420)
         self.assertIn("daylight", fallback_world["theme"])
         self.assertIn("coral reef", fallback_world["theme"])
         self.assertEqual(len(fallback_world["character_placements"]), 2)
+        strengths = [person["strength"] for person in fallback_world["character_placements"]]
+        self.assertTrue(all(10 <= strength <= 99 for strength in strengths))
+        self.assertEqual(len(strengths), len(set(strengths)))
+        self.assertEqual(fallback_world["camera_shots"][0]["focus_username"], "Lead")
 
     def test_captions_have_valid_subtitle_and_fallback_cues(self):
         from tools.build_studio_experience import fallback_captions, parse_srt

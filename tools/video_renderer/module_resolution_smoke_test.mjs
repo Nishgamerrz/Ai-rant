@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { normalize, resolve } from 'node:path';
+import { join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
@@ -19,7 +19,8 @@ const html = `<!doctype html><meta charset="utf-8">
   import { PLYLoader } from '/modules/three/examples/jsm/loaders/PLYLoader.js';
   import { STLLoader } from '/modules/three/examples/jsm/loaders/STLLoader.js';
   import { TDSLoader } from '/modules/three/examples/jsm/loaders/TDSLoader.js';
-  window.moduleResolutionReady = THREE.REVISION === '170' && [OBJLoader,MTLLoader,GLTFLoader,FBXLoader,ColladaLoader,PLYLoader,STLLoader,TDSLoader].every(Boolean);
+  import { chooseSafeCamera } from '/scene_camera.mjs';
+  window.moduleResolutionReady = THREE.REVISION === '170' && [OBJLoader,MTLLoader,GLTFLoader,FBXLoader,ColladaLoader,PLYLoader,STLLoader,TDSLoader,chooseSafeCamera].every(Boolean);
 </script>`;
 
 const server = createServer((request, response) => {
@@ -27,6 +28,11 @@ const server = createServer((request, response) => {
   if (pathname === '/') {
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     response.end(html);
+    return;
+  }
+  if (pathname === '/scene_camera.mjs') {
+    response.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
+    createReadStream(join(ROOT, 'scene_camera.mjs')).pipe(response);
     return;
   }
   if (pathname.startsWith('/modules/')) {

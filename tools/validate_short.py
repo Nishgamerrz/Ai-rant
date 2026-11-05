@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Technical quality gate: approve only a complete, decodable, captioned Shorts MP4."""
+"""Technical quality gate: approve only a complete, decodable, narrated Shorts MP4."""
 from __future__ import annotations
 
 import argparse

@@ -96,8 +96,8 @@ export function buildAvatarRig(THREE, model) {
         .sort((a, b) => a.distance - b.distance)
         .slice(0, 2);
       const first = nearest[0], second = nearest[1];
-      const firstInfluence = 1 / ((first.distance + 0.08) ** 2);
-      const secondInfluence = second ? 1 / ((second.distance + 0.08) ** 2) : 0;
+      const firstInfluence = 1 / ((first.distance + 0.08) ** 4);
+      const secondInfluence = second ? 1 / ((second.distance + 0.08) ** 4) : 0;
       const total = firstInfluence + secondInfluence;
       const offset = vertex * 4;
       indices[offset] = first.index;
@@ -178,7 +178,15 @@ function tracksForNativeClip(THREE, clip) {
       tracks.get(boneName).push({ time: Number(frame.time), rotation, position, weight });
     }
   }
-  for (const track of tracks.values()) track.sort((a,b)=>a.time-b.time);
+  for (const track of tracks.values()) {
+    track.sort((a,b)=>a.time-b.time);
+    // Roblox Pose.CFrame.Position includes a static joint offset. The generated
+    // skeleton already contains its own neutral offsets, so apply only the
+    // native animation's displacement from its first pose; otherwise each
+    // limb receives the rest offset twice and visibly stretches away from joints.
+    const restOffset = track[0]?.position.clone();
+    if (restOffset) for (const key of track) key.position.sub(restOffset);
+  }
   nativeTrackCache.set(clip, tracks);
   return tracks;
 }

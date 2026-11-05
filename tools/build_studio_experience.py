@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import re
@@ -81,6 +82,20 @@ def long_bracket(value: str) -> str:
 
 
 def make_config(plan, cast, duration, narration, captions, audio_asset_id, avatar_profiles=None):
+    placements = {entry.get("username", "").casefold(): entry
+                  for entry in plan.get("character_placements", []) if isinstance(entry, dict)}
+    normalized_cast = []
+    used_strengths = set()
+    for member in cast:
+        username = str(member.get("username", ""))
+        placement = placements.get(username.casefold(), {})
+        digest = hashlib.sha256(username.casefold().encode("utf-8")).digest()
+        strength = int(member.get("strength") or placement.get("strength") or (10 + int.from_bytes(digest[:4], "big") % 90))
+        while strength in used_strengths:
+            strength = 10 + ((strength - 9) % 90)
+        used_strengths.add(strength)
+        normalized_cast.append({**member, "strength": strength})
+    cast = normalized_cast
     rbxm_animations = {}
     for profile in avatar_profiles or []:
         if not isinstance(profile, dict) or not isinstance(profile.get("username"), str):
@@ -92,8 +107,6 @@ def make_config(plan, cast, duration, narration, captions, audio_asset_id, avata
         "plan": plan,
         "cast": cast,
         "duration": duration,
-        "narration": narration,
-        "captions": captions or fallback_captions(narration, duration),
         "audio_asset_id": audio_asset_id,
         "rbxm_animations": rbxm_animations,
     }
@@ -144,29 +157,9 @@ atmosphere.Haze = 0.45
 atmosphere.Glare = 0.08
 atmosphere.Parent = Lighting
 
--- Add readable lettering and small point lights to the map's authored 3D signs and lamps.
+-- Add point lights only; this world intentionally has no visible words or signs.
 for _, object in ipairs(map:GetDescendants()) do
     if object:IsA("BasePart") then
-        local text = string.match(object.Name, "^Shop Sign %- (.+)$")
-        if object.Name == "World Title Sign" then
-            text = string.upper(plan.name or "AI STORY WORLD") .. "\n" .. (plan.theme or "")
-        end
-        if text then
-            local surface = Instance.new("SurfaceGui")
-            surface.Name = "MapSign"
-            surface.Face = Enum.NormalId.Back
-            surface.PixelsPerStud = 45
-            surface.Parent = object
-            local label = Instance.new("TextLabel")
-            label.Size = UDim2.fromScale(1, 1)
-            label.BackgroundTransparency = 1
-            label.Text = text
-            label.TextColor3 = Color3.fromRGB(255, 255, 255)
-            label.TextScaled = true
-            label.TextWrapped = true
-            label.Font = Enum.Font.GothamBold
-            label.Parent = surface
-        end
         if object.Name == "Warm Street Lamp" then
             local light = Instance.new("PointLight")
             light.Color = Color3.fromRGB(255, 232, 170)
@@ -204,7 +197,29 @@ for _, castMember in ipairs(CONFIG.cast or {}) do
             avatar:PivotTo(CFrame.new(p[1], p[2] + 3, p[3]))
             avatar.Parent = castFolder
             if not humanoid then return avatar end
-            humanoid.DisplayName = castMember.username .. (castMember.role == "lead" and " • Lead" or "")
+            humanoid.DisplayName = ""
+            humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+            local head = avatar:FindFirstChild("Head")
+            if head then
+                local strengthTag = Instance.new("BillboardGui")
+                strengthTag.Name = "StrengthNumber"
+                strengthTag.Size = UDim2.fromOffset(96, 54)
+                strengthTag.StudsOffset = Vector3.new(0, 2.8, 0)
+                strengthTag.AlwaysOnTop = true
+                strengthTag.MaxDistance = 120
+                strengthTag.Parent = head
+                local value = Instance.new("TextLabel")
+                value.Name = "Value"
+                value.Size = UDim2.fromScale(1, 1)
+                value.BackgroundTransparency = 1
+                value.Text = tostring(castMember.strength or 50)
+                value.TextColor3 = Color3.fromRGB(255, 225, 138)
+                value.TextStrokeColor3 = Color3.fromRGB(10, 18, 28)
+                value.TextStrokeTransparency = 0.12
+                value.Font = Enum.Font.GothamBold
+                value.TextScaled = true
+                value.Parent = strengthTag
+            end
             humanoid.WalkSpeed = 9
             humanoid.JumpPower = 32
             humanoid.AutoRotate = true
@@ -299,7 +314,6 @@ def build_scene_parts(plan, cast):
 
     # One theme-colored walkable foundation; the AI landmark plan is expanded with matching structural and scenic details.
     add("World Foundation", (640, 2, 640), (0, -1.1, 0), plan.get("ground_color", [88, 166, 91]), plan.get("ground_material", "Grass"))
-    add("World Title Sign", (30, 7, 0.6), (0, 10, 74), [35, 48, 72], "SmoothPlastic")
 
     # Each planned or procedurally expanded map object becomes a named, editable Roblox Part.
     for index, prop in enumerate(plan.get("props", []), 1):
@@ -379,67 +393,13 @@ def part_instance(part, referent):
 
 def client_lua(config_json: str) -> str:
     cfg = long_bracket(config_json)
-    source = '''-- Opens with a captioned AI-directed camera tour, then returns control to the player.
+    source = '''-- Opens with an AI-directed camera tour, then returns control to the player.
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local CONFIG = HttpService:JSONDecode(__CONFIG_JSON__)
 local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
-local gui = Instance.new("ScreenGui")
-gui.Name = "GeneratedStoryHUD"
-gui.ResetOnSpawn = false
-gui.IgnoreGuiInset = true
-gui.DisplayOrder = 100
-gui.Parent = playerGui
-local header = Instance.new("TextLabel")
-header.Name = "StoryTitle"
-header.AnchorPoint = Vector2.new(0.5, 0)
-header.Position = UDim2.new(0.5, 0, 0.035, 0)
-header.Size = UDim2.new(0.82, 0, 0, 58)
-header.BackgroundColor3 = Color3.fromRGB(18, 31, 50)
-header.BackgroundTransparency = 0.18
-header.TextColor3 = Color3.fromRGB(255, 231, 160)
-header.Text = string.upper(CONFIG.plan.name or "AI STORY WORLD")
-header.TextScaled = true
-header.Font = Enum.Font.GothamBold
-header.Parent = gui
-local corner = Instance.new("UICorner")
-corner.CornerRadius = UDim.new(0, 14)
-corner.Parent = header
-local caption = Instance.new("TextLabel")
-caption.Name = "NarrationCaption"
-caption.AnchorPoint = Vector2.new(0.5, 1)
-caption.Position = UDim2.new(0.5, 0, 0.93, 0)
-caption.Size = UDim2.new(0.92, 0, 0, 132)
-caption.BackgroundColor3 = Color3.fromRGB(8, 14, 24)
-caption.BackgroundTransparency = 0.04
-caption.TextColor3 = Color3.fromRGB(255, 255, 255)
-caption.TextStrokeTransparency = 0.55
-caption.TextWrapped = true
-caption.TextScaled = true
-caption.TextTransparency = 0
-caption.TextXAlignment = Enum.TextXAlignment.Center
-caption.TextYAlignment = Enum.TextYAlignment.Center
-caption.Visible = true
-caption.ZIndex = 20
-caption.Font = Enum.Font.GothamBold
-caption.Parent = gui
-local captionCorner = Instance.new("UICorner")
-captionCorner.CornerRadius = UDim.new(0, 16)
-captionCorner.Parent = caption
-local skip = Instance.new("TextLabel")
-skip.Name = "SkipHint"
-skip.AnchorPoint = Vector2.new(1, 1)
-skip.Position = UDim2.new(0.97, 0, 0.97, 0)
-skip.Size = UDim2.new(0, 250, 0, 32)
-skip.BackgroundTransparency = 1
-skip.TextColor3 = Color3.fromRGB(245, 245, 245)
-skip.Text = "SPACE  •  skip tour and explore"
-skip.TextScaled = true
-skip.Font = Enum.Font.Gotham
-skip.Parent = gui
 
 local soundId = CONFIG.audio_asset_id or ""
 local narrationSound = nil
@@ -457,10 +417,17 @@ local inputConnection = UserInputService.InputBegan:Connect(function(input, proc
     if not processed and input.KeyCode == Enum.KeyCode.Space then skipped = true end
 end)
 local worldModel = workspace:WaitForChild("GeneratedStoryMap", 90)
+local castFolder = worldModel:WaitForChild("GeneratedCast", 90)
+local function shotFocus(shot, plannedTarget)
+    local username = shot and shot.focus_username
+    if not username or string.lower(username) == "world" then return plannedTarget end
+    local avatar = castFolder:FindFirstChild(username)
+    local head = avatar and avatar:FindFirstChild("Head")
+    return head and head.Position or plannedTarget
+end
 -- Account avatars are authentic Roblox rigs. No AI-generated body animation is applied.
 local camera = workspace.CurrentCamera
 local shots = CONFIG.plan.camera_shots or {{}}
-local captions = CONFIG.captions or {{}}
 local startTime = os.clock()
 if narrationSound then narrationSound:Play() end
 local duration = CONFIG.duration or 60
@@ -473,15 +440,8 @@ connection = RunService.RenderStepped:Connect(function()
         connection:Disconnect()
         inputConnection:Disconnect()
         camera.CameraType = Enum.CameraType.Custom
-        caption.Visible = false
-        skip.Visible = false
         return
     end
-    local currentCaption = ""
-    for _, line in ipairs(captions) do
-        if elapsed >= line.start and elapsed <= line.finish then currentCaption = line.text; break end
-    end
-    caption.Text = currentCaption
     if #shots > 0 then
         local index = 1
         for i = 1, #shots do
@@ -497,10 +457,11 @@ connection = RunService.RenderStepped:Connect(function()
         local posA = Vector3.new(a.position[1], a.position[2], a.position[3])
         local targetA = Vector3.new(a.target[1], a.target[2], a.target[3])
         local pos = posA
-        local target = targetA
+        local target = shotFocus(a, targetA)
         if b and b ~= a and b.transition ~= "snap" then
             pos = posA:Lerp(Vector3.new(b.position[1], b.position[2], b.position[3]), alpha)
-            target = targetA:Lerp(Vector3.new(b.target[1], b.target[2], b.target[3]), alpha)
+            local targetB = Vector3.new(b.target[1], b.target[2], b.target[3])
+            target = shotFocus(a, targetA):Lerp(shotFocus(b, targetB), alpha)
         elseif previousIndex ~= index then
             previousIndex = index
         end
@@ -678,6 +639,7 @@ def build(args):
             "username": username,
             "role": "lead" if index == 0 else "supporting",
             "position": entry.get("position", fallback_positions[index]),
+            "strength": entry.get("strength"),
         })
     narration = args.narration.read_text(encoding="utf-8") if args.narration and args.narration.exists() else ""
     captions = parse_srt(args.srt)
@@ -692,7 +654,7 @@ def build(args):
     args.output.write_text(make_place(server, client, plan, cast), encoding="utf-8")
     if args.lua_output:
         args.lua_output.parent.mkdir(parents=True, exist_ok=True)
-        args.lua_output.write_text(server + "\n-- Camera, caption, and narration playback client is embedded in the place.\n", encoding="utf-8")
+        args.lua_output.write_text(server + "\n-- Camera and narration playback client is embedded in the place.\n", encoding="utf-8")
     if args.readme:
         args.readme.parent.mkdir(parents=True, exist_ok=True)
         cast_label = ", ".join(member["username"] for member in cast) if cast else "your Roblox player avatar"
@@ -705,9 +667,9 @@ def build(args):
             f"**Cast:** {cast_label}\n\n"
             "## Watch the short\n\n"
             "1. Download and unzip `Roblox_Studio_Complete_Package.zip`.\n"
-            "2. Play `Roblox_2K_YouTube_Short.mp4` directly. It is rendered automatically with authentic 3D Roblox avatar meshes, moving limbs, the furnished world, camera tour, narration, and visible burned-in captions; the workflow refuses to package a thumbnail-only video with static limbs.\n"
+            "2. Play `Roblox_2K_YouTube_Short.mp4` directly. It is rendered with authentic 3D Roblox avatar meshes, moving limbs, the furnished world, camera tour, and narration audio, with no username labels or story text and only a numeric strength badge above each avatar; the workflow refuses to package a thumbnail-only video with static limbs.\n"
             "3. The ZIP also includes `AI_Creation_Summary.txt`, `AI_Design_and_Tools_Report.pdf`, narration audio/subtitles, generation prompts, and an optional editable `Roblox_Studio_Experience.rbxlx` project.\n"
-            "4. The workflow first checks for a flat `users/<username>.rbxm` model and resolves its referenced official Roblox MeshParts/textures for the MP4; the generated ZIP includes the original RBXM. The MP4 is rendered with headless Three.js, not captured from a Roblox client. Rapier simulates gravity and world collisions; the converted RBXM geometry is automatically skinned to procedural R15-style joints and animated in Three.js. The editable Studio project receives native Roblox animation IDs from the RBXM and moves its Humanoid avatars using Roblox animation tracks. The MP4 motion is not Roblox's native Animate runtime.\n\n"
+            "4. The workflow first checks for a flat `users/<username>.rbxm` model and resolves its referenced official Roblox MeshParts/textures for the MP4; the generated ZIP includes the original RBXM. The MP4 is rendered with headless Three.js, not captured from a Roblox client. Rapier simulates dynamic prop physics; avatars follow deterministic collision-free paths, and the converted RBXM geometry is automatically skinned to R15-style joints and animated in Three.js. The editable Studio project receives native Roblox animation IDs from the RBXM and moves its Humanoid avatars using Roblox animation tracks. The MP4 motion is not Roblox's native Animate runtime.\n\n"
             "## Notes\n\n"
             "The workflow renders the MP4 automatically using headless Chromium, Three.js, and FFmpeg; neither Roblox Studio nor Blender needs to be installed or launched. The optional `.rbxlx` project remains editable in Studio and uses Roblox's native Humanoid animation tracks. Video validation does not claim a Roblox game-client runtime test.\n\n"
             "## Automatic avatar source lookup\n\n"
