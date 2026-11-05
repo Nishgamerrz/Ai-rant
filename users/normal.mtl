@@ -1,0 +1,13 @@
+newmtl Handle1Mtl
+Ka 0 0 0
+Kd 1 1 1
+Ks 0.05 0.05 0.05
+Ns 8
+map_Kd normal_assets/Handle1_diff.png
+
+newmtl Rig1Mtl
+Ka 0 0 0
+Kd 1 1 1
+Ks 0.05 0.05 0.05
+Ns 8
+map_Kd normal_assets/Rig1_diff.png

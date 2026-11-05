@@ -32,7 +32,7 @@ on:
           - medium
           - hard
       character_usernames:
-        description: 'Enter 1–6 Roblox usernames only (first is lead); checks users/<username>.rbxm automatically.'
+        description: 'Enter 1–6 Roblox usernames only (first is lead); checks users/<username>.<supported mesh format> and .rbxm.'
         required: false
         default: ''
         type: string
@@ -72,7 +72,7 @@ jobs:
           echo "CAST_NAMES=$CAST_NAMES" >> "$GITHUB_ENV"
           echo "CHARACTER_USERNAMES_JSON=$(jq -c . dist/characters.json)" >> "$GITHUB_ENV"
           echo "Cast usernames: ${CAST_NAMES:-none supplied}"
-          test "$(jq 'length' dist/characters.json)" -ge 1 || { echo "Enter at least one Roblox username; the workflow checks users/<username>.rbxm before online avatar lookup." >&2; exit 1; }
+          test "$(jq 'length' dist/characters.json)" -ge 1 || { echo "Enter at least one Roblox username; the workflow checks users/<username>.obj/.gltf/.glb/.fbx/.dae/.ply/.stl/.3ds and .rbxm sources." >&2; exit 1; }
 
       - name: Show the public AI build plan and tools
         env:
@@ -105,9 +105,9 @@ jobs:
                   '- **Tools:** selected Ollama model, Roblox public avatar APIs, optional web research, edge-tts, Three.js + Rapier, Chromium, FFmpeg, Python validation, ReportLab, ZIP.\n'
                   '- **Pipeline:** story and furnished world/camera plan → narration/captions → physics-enabled MP4 + Studio project → quality checks and package.\n'
                   '- **Username lookup:** the public Roblox Users API resolves entered usernames to IDs keylessly; no manual ID is needed.\n'
-                  '- **Local model:** the workflow first checks the flat users/<username>.rbxm file; its referenced mesh assets are converted for the MP4, and the original model is included in the package.\n'
-                  '- **Avatar source:** a matching local RBXM model or authorized Roblox 3D mesh; thumbnail-only profiles stop the MP4 because they cannot animate limbs.\n'
-                  '- **Mesh access:** Roblox requires a scoped ROBLOX_OPEN_CLOUD_API_KEY secret for 3D meshes; the value is never logged.\n'
+                  '- **Local model:** username-matched OBJ, glTF/GLB, FBX, COLLADA, PLY, STL, and 3DS files are auto-rigged for the MP4; direct local geometry takes priority over RBXM asset references.\n'
+                  '- **Avatar source:** a local mesh is skinned to a procedural R15-style rig; RBXM and authorized Roblox 3D meshes remain supported fallbacks. Thumbnail-only profiles cannot animate limbs.\n'
+                  '- **Mesh access:** local mesh files need no Open Cloud key; the optional online 3D-avatar fallback may require a scoped secret.\n'
                   '- **Prompt/tool records:** successful runs include generation prompts and final summaries in the downloadable artifact.\n'
               )
           print('Added a safe public build plan and tool list to the Actions run summary; private reasoning is not exposed.')
@@ -133,6 +133,8 @@ jobs:
           npm ci --no-audit --no-fund
           npx playwright install --with-deps chromium
           npm run test:module-resolution
+          npm run test:avatar-rig
+          npm run test:avatar-obj
 
       - name: Install RBXM parser and validate username model
         run: |
@@ -217,7 +219,7 @@ jobs:
           path: ~/.ollama/models
           key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'hard' && 'qwen3-8b-v3' || 'qwen3-v2' }}
 
-      - name: Resolve username-matched RBXM models and prepare avatar assets for the short
+      - name: Resolve username-matched local avatar models and prepare assets for the short
         env:
           ROBLOX_OPEN_CLOUD_API_KEY: ${{ secrets.ROBLOX_OPEN_CLOUD_API_KEY }}
         run: |

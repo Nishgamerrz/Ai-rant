@@ -13,7 +13,13 @@ const html = `<!doctype html><meta charset="utf-8">
   import * as THREE from '/modules/three/build/three.module.js';
   import { OBJLoader } from '/modules/three/examples/jsm/loaders/OBJLoader.js';
   import { MTLLoader } from '/modules/three/examples/jsm/loaders/MTLLoader.js';
-  window.moduleResolutionReady = THREE.REVISION === '170' && Boolean(new OBJLoader()) && Boolean(new MTLLoader());
+  import { GLTFLoader } from '/modules/three/examples/jsm/loaders/GLTFLoader.js';
+  import { FBXLoader } from '/modules/three/examples/jsm/loaders/FBXLoader.js';
+  import { ColladaLoader } from '/modules/three/examples/jsm/loaders/ColladaLoader.js';
+  import { PLYLoader } from '/modules/three/examples/jsm/loaders/PLYLoader.js';
+  import { STLLoader } from '/modules/three/examples/jsm/loaders/STLLoader.js';
+  import { TDSLoader } from '/modules/three/examples/jsm/loaders/TDSLoader.js';
+  window.moduleResolutionReady = THREE.REVISION === '170' && [OBJLoader,MTLLoader,GLTFLoader,FBXLoader,ColladaLoader,PLYLoader,STLLoader,TDSLoader].every(Boolean);
 </script>`;
 
 const server = createServer((request, response) => {

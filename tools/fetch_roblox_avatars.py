@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 
 USERS_ROOT = Path(__file__).resolve().parents[1] / "users"
 LOCAL_ASSET_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+LOCAL_MODEL_ORDER = (".obj", ".glb", ".gltf", ".fbx", ".dae", ".ply", ".stl", ".3ds")
 
 
 def request_bytes(url: str, data: dict | None = None, headers: dict[str, str] | None = None) -> bytes:
@@ -225,64 +226,155 @@ def find_local_avatar_rbxm(username: str, users_root: Path = USERS_ROOT) -> Path
     return None
 
 
-def has_local_avatar_obj(username: str, users_root: Path = USERS_ROOT) -> bool:
+def find_local_avatar_model(username: str, users_root: Path = USERS_ROOT) -> Path | None:
+    """Find a username-matched file in one of the supported polygon-mesh formats."""
     folder = find_local_avatar_folder(username, users_root)
-    if folder is None:
-        return False
-    return any(path.is_file() and not path.is_symlink() and path.name.casefold() == "avatar.obj"
-               for path in folder.iterdir())
+    if folder is not None:
+        names = {path.name.casefold(): path for path in folder.iterdir()
+                 if path.is_file() and not path.is_symlink()}
+        for suffix in LOCAL_MODEL_ORDER:
+            if f"avatar{suffix}" in names:
+                return names[f"avatar{suffix}"]
+    if not re.fullmatch(r"[A-Za-z0-9_]{3,20}", username) or not users_root.is_dir() or users_root.is_symlink():
+        return None
+    root = users_root.resolve()
+    for suffix in LOCAL_MODEL_ORDER:
+        for candidate in users_root.iterdir():
+            if (candidate.is_file() and not candidate.is_symlink()
+                    and candidate.suffix.casefold() == suffix
+                    and candidate.stem.casefold() == username.casefold()
+                    and candidate.resolve().is_relative_to(root)):
+                return candidate
+    return None
+
+
+def find_local_avatar_place(username: str, users_root: Path = USERS_ROOT) -> Path | None:
+    """Find a username-matched RBXL place so it is not silently mistaken for an avatar mesh."""
+    if not re.fullmatch(r"[A-Za-z0-9_]{3,20}", username) or not users_root.is_dir() or users_root.is_symlink():
+        return None
+    for candidate in users_root.iterdir():
+        if (candidate.is_file() and not candidate.is_symlink()
+                and candidate.suffix.casefold() in {".rbxl", ".rbxlx"}
+                and candidate.stem.casefold() == username.casefold()):
+            return candidate
+    return None
+
+
+def has_local_avatar_obj(username: str, users_root: Path = USERS_ROOT) -> bool:
+    """Backward-compatible predicate for any supported local mesh model."""
+    return find_local_avatar_model(username, users_root) is not None
 
 
 def has_local_avatar_source(username: str, users_root: Path = USERS_ROOT) -> bool:
     return find_local_avatar_rbxm(username, users_root) is not None or has_local_avatar_obj(username, users_root)
 
 
+def _copy_local_dependency(source_root: Path, output_dir: Path, relative_name: str) -> bool:
+    from urllib.parse import unquote
+
+    relative_name = unquote(relative_name.split("?", 1)[0])
+    if not relative_name or relative_name.startswith(("data:", "http:", "https:", "//")):
+        return False
+    relative = Path(relative_name.replace("\\", "/"))
+    if relative.is_absolute() or ".." in relative.parts:
+        return False
+    source = source_root / relative
+    if source.is_symlink() or not source.is_file() or not source.resolve().is_relative_to(source_root.resolve()):
+        return False
+    destination = output_dir / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+    return True
+
+
 def load_local_avatar_model(username: str, user_id: int | str, users_root: Path, output_dir: Path) -> dict | None:
-    """Use a staged users/<username>/avatar.obj before making an authenticated network request."""
-    user_folder = find_local_avatar_folder(username, users_root)
-    if user_folder is None:
+    """Stage a username-matched OBJ, glTF/GLB, FBX, COLLADA, PLY, STL, or 3DS mesh."""
+    source = find_local_avatar_model(username, users_root)
+    if source is None:
         return None
-
-    candidates = {path.name.casefold(): path for path in user_folder.iterdir()
-                  if path.is_file() and not path.is_symlink()}
-    source_obj = candidates.get("avatar.obj")
-    if source_obj is None:
-        return None
-    obj_text = source_obj.read_text(encoding="utf-8", errors="replace")
-    if not re.search(r"(?m)^\s*v\s", obj_text) or not re.search(r"(?m)^\s*f\s", obj_text):
-        raise ValueError(f"{user_folder}/avatar.obj does not contain a readable OBJ mesh")
-
-    source_mtl = candidates.get("avatar.mtl") or next(
-        (path for path in user_folder.iterdir()
-         if path.is_file() and not path.is_symlink() and path.suffix.casefold() == ".mtl"),
-        None,
-    )
+    source_root = source.parent
+    suffix = source.suffix.casefold()
     output_dir.mkdir(parents=True, exist_ok=True)
+    model_path = output_dir / f"avatar{suffix}"
+    shutil.copyfile(source, model_path)
     copied_textures = 0
-    for source in user_folder.rglob("*"):
-        if (source.is_symlink() or not source.is_file()
-                or source.suffix.casefold() not in LOCAL_ASSET_SUFFIXES):
-            continue
-        relative = source.relative_to(user_folder)
-        destination = output_dir / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
-        copied_textures += 1
 
-    obj_path = output_dir / "avatar.obj"
-    obj_text = re.sub(r"(?m)^\s*mtllib\s+.*$", "mtllib avatar.mtl", obj_text)
-    if not re.search(r"(?m)^\s*mtllib\s", obj_text):
-        obj_text = "mtllib avatar.mtl\n" + obj_text
-    obj_path.write_text(obj_text, encoding="utf-8")
-    mtl_path = output_dir / "avatar.mtl"
-    if source_mtl is not None:
-        shutil.copyfile(source_mtl, mtl_path)
-    else:
-        mtl_path.write_text("newmtl LocalAvatar\nKd 0.72 0.72 0.72\n", encoding="utf-8")
+    if suffix == ".obj":
+        obj_text = source.read_text(encoding="utf-8", errors="replace")
+        if not re.search(r"(?m)^\s*v\s", obj_text) or not re.search(r"(?m)^\s*f\s", obj_text):
+            raise ValueError(f"{source} does not contain a readable OBJ mesh")
+        declared_mtl = re.search(r"(?m)^\s*mtllib\s+(.+?)\s*$", obj_text)
+        mtl_source = None
+        if declared_mtl:
+            mtl_name = declared_mtl.group(1).strip().strip('"')
+            candidate = source_root / mtl_name
+            if not candidate.is_file() and source.stem.casefold() != "avatar":
+                candidate = source_root / f"{source.stem}.mtl"
+            if candidate.is_file() and not candidate.is_symlink() and candidate.resolve().is_relative_to(source_root.resolve()):
+                mtl_source = candidate
+        if mtl_source is None:
+            mtl_source = next((p for p in (source_root / "avatar.mtl", source_root / f"{source.stem}.mtl")
+                               if p.is_file() and not p.is_symlink()), None)
 
-    return {"model_obj": str(obj_path.resolve()), "model_mtl": str(mtl_path.resolve()),
-            "model_ready": True, "texture_count": copied_textures,
-            "front_direction": [0, 0, 1], "model_source": "users-folder"}
+        mtl_path = output_dir / "avatar.mtl"
+        if mtl_source is not None:
+            mtl_text = mtl_source.read_text(encoding="utf-8", errors="replace")
+            for line in mtl_text.splitlines():
+                match = re.match(r"\s*map_\w+\s+(.+?)\s*$", line, re.IGNORECASE)
+                if match:
+                    texture_name = match.group(1).split()[-1].strip('"')
+                    copied_textures += int(_copy_local_dependency(source_root, output_dir, texture_name))
+            mtl_path.write_text(mtl_text, encoding="utf-8")
+        else:
+            materials = sorted(set(re.findall(r"(?m)^\s*usemtl\s+(.+?)\s*$", obj_text))) or ["LocalAvatar"]
+            mtl_path.write_text("\n\n".join(f"newmtl {name}\nKd 0.72 0.72 0.72" for name in materials) + "\n", encoding="utf-8")
+        obj_text = re.sub(r"(?m)^\s*mtllib\s+.*$", "mtllib avatar.mtl", obj_text)
+        if not re.search(r"(?m)^\s*mtllib\s", obj_text):
+            obj_text = "mtllib avatar.mtl\n" + obj_text
+        model_path.write_text(obj_text, encoding="utf-8")
+    elif suffix == ".gltf":
+        try:
+            document = json.loads(source.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"{source} is not valid glTF JSON") from exc
+        for record in [*(document.get("buffers") or []), *(document.get("images") or [])]:
+            uri = record.get("uri") if isinstance(record, dict) else None
+            if uri and not uri.startswith("data:"):
+                if not _copy_local_dependency(source_root, output_dir, uri):
+                    raise ValueError(f"Missing or unsafe glTF dependency {uri!r} referenced by {source.name}")
+                copied_textures += int(Path(uri).suffix.casefold() in LOCAL_ASSET_SUFFIXES)
+    elif suffix == ".dae":
+        import xml.etree.ElementTree as ET
+        try:
+            document = ET.parse(source).getroot()
+        except (OSError, ET.ParseError) as exc:
+            raise ValueError(f"{source} is not valid COLLADA XML") from exc
+        for node in document.iter():
+            if node.tag.split("}")[-1] == "init_from" and node.text and not node.text.strip().startswith("#"):
+                uri = node.text.strip()
+                if not _copy_local_dependency(source_root, output_dir, uri):
+                    raise ValueError(f"Missing or unsafe COLLADA dependency {uri!r} referenced by {source.name}")
+                copied_textures += int(Path(uri).suffix.casefold() in LOCAL_ASSET_SUFFIXES)
+    elif suffix in {".fbx", ".3ds"}:
+        # FBX/3DS texture references vary by exporter; support common sidecar-folder conventions.
+        sidecars = (source_root / f"{source.stem}_assets", source_root / f"{source.stem}.fbm")
+        for sidecar in sidecars:
+            if sidecar.is_dir() and not sidecar.is_symlink():
+                for dependency in sidecar.rglob("*"):
+                    if dependency.is_file() and not dependency.is_symlink() and dependency.resolve().is_relative_to(sidecar.resolve()):
+                        relative = dependency.relative_to(source_root)
+                        destination = output_dir / relative
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(dependency, destination)
+                        copied_textures += int(dependency.suffix.casefold() in LOCAL_ASSET_SUFFIXES)
+
+    model_format = suffix[1:]
+    result = {"model_file": model_path.name, "model_format": model_format,
+              "model_ready": True, "texture_count": copied_textures,
+              "front_direction": [0, 0, 1], "model_source": "users-folder" if source.parent.name.casefold() == username.casefold() else "users-file"}
+    if suffix == ".obj":
+        result.update({"model_obj": str(model_path.resolve()), "model_mtl": str((output_dir / "avatar.mtl").resolve())})
+    return result
 
 
 def main() -> None:
@@ -300,7 +392,7 @@ def main() -> None:
                 {"usernames": usernames, "excludeBannedUsers": False},
             )
         except (HTTPError, URLError, TimeoutError, OSError, ValueError) as lookup_error:
-            print(f"Roblox username lookup failed ({type(lookup_error).__name__}); checking local users/<username>/avatar.obj files.", file=sys.stderr)
+            print(f"Roblox username lookup failed ({type(lookup_error).__name__}); checking local username-matched avatar mesh files and folder-based models.", file=sys.stderr)
             result = {}
         data = result.get("data", []) if isinstance(result, dict) else []
         by_name = {item.get("requestedUsername", "").casefold(): item
@@ -314,9 +406,12 @@ def main() -> None:
             elif has_local_avatar_source(username, USERS_ROOT):
                 user_id = f"local-{username.casefold()}"
                 local_only = True
-                print(f"Roblox did not resolve {username}; using the matching flat users/{username}.rbxm or local OBJ source.")
+                print(f"Roblox did not resolve {username}; using the matching local RBXM or supported mesh model.")
             else:
-                raise RuntimeError(f"Roblox username {username!r} was not found and no users/{username}.rbxm or local avatar OBJ exists")
+                place = find_local_avatar_place(username, USERS_ROOT)
+                if place is not None:
+                    raise RuntimeError(f"users/{place.name} is a Roblox place, not an avatar mesh. Export the avatar as users/{username}.rbxm or a supported mesh file.")
+                raise RuntimeError(f"Roblox username {username!r} was not found and no supported users/{username}.rbxm or .obj/.gltf/.glb/.fbx/.dae/.ply/.stl/.3ds mesh exists")
             profile = {"username": username, "user_id": user_id}
             if not local_only:
                 try:
@@ -330,21 +425,26 @@ def main() -> None:
                 except Exception as exc:
                     print(f"Avatar thumbnail color sampling failed for {username}: {type(exc).__name__}.", file=sys.stderr)
             local_rbxm = find_local_avatar_rbxm(username, USERS_ROOT)
-            if local_rbxm is not None:
+            try:
+                local_model = load_local_avatar_model(username, user_id, USERS_ROOT, asset_root / str(user_id))
+            except (OSError, ValueError) as local_error:
+                print(f"Local users/{username} mesh model could not be used ({local_error}).", file=sys.stderr)
+                local_model = None
+            if local_model:
+                profile.update(local_model)
+                print(f"Loaded local {local_model['model_format'].upper()} avatar model for {username} ({local_model['texture_count']} local texture files); this self-contained mesh takes priority over RBXM asset references.")
+                if local_rbxm is not None:
+                    profile.update({"rbxm_path": str(local_rbxm.resolve()), "rbxm_source_selected": True})
+                    print(f"Also found users/{local_rbxm.name}; its native animation IDs will be extracted for the Studio project without replacing the local MP4 mesh.")
+            elif local_rbxm is not None:
                 profile.update({"rbxm_path": str(local_rbxm.resolve()), "rbxm_source_selected": True, "model_source": "rbxm-file"})
-                print(f"Found flat local model users/{local_rbxm.name} for {username}; it takes priority after its MeshParts are converted.")
-            else:
-                try:
-                    local_model = load_local_avatar_model(username, user_id, USERS_ROOT, asset_root / str(user_id))
-                except (OSError, ValueError) as local_error:
-                    print(f"Local users/{username}/avatar.obj could not be used ({local_error}).", file=sys.stderr)
-                    local_model = None
-                if local_model:
-                    profile.update(local_model)
-                    print(f"Loaded local avatar OBJ for {username} from users/{username}/avatar.obj ({local_model['texture_count']} local texture files).")
-                elif local_only:
-                    raise RuntimeError(f"Local avatar model for {username} is unreadable")
-            if not local_only and not (profile.get("model_ready") and profile.get("model_source") == "users-folder"):
+                print(f"Found flat local model users/{local_rbxm.name} for {username}; its referenced MeshParts will be converted if accessible.")
+            elif find_local_avatar_place(username, USERS_ROOT) is not None:
+                place = find_local_avatar_place(username, USERS_ROOT)
+                raise RuntimeError(f"users/{place.name} is a Roblox place, not an avatar mesh. Export the avatar as users/{username}.rbxm or a supported mesh file.")
+            elif local_only:
+                raise RuntimeError(f"Local avatar model for {username} is unreadable")
+            if not local_only and not (profile.get("model_ready") and profile.get("model_source") in {"users-folder", "users-file"}):
                 try:
                     remote_model = fetch_avatar_model(int(user_id), asset_root / str(user_id))
                     if local_rbxm is None:
