@@ -31,6 +31,8 @@ class RbxmAvatarTests(unittest.TestCase):
         self.assertLess(animation_assignment, first_mesh_download)
         self.assertNotIn("delete profile.rbxm_animation_ids", importer)
         self.assertIn("profile.model_ready && ['users-file', 'users-folder'].includes(profile.model_source)", importer)
+        self.assertIn("profile.rbxm_animation_clips = nativeAnimations.clips", importer)
+        self.assertIn("async function fetchNativeAnimationClip", importer)
 
     def test_flat_username_rbxm_is_selected_even_if_public_lookup_fails(self):
         with tempfile.TemporaryDirectory() as temporary:

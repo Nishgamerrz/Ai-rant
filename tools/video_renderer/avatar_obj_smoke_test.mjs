@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as THREE from 'three';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
-import { animateAvatarRig, buildAvatarRig } from './avatar_rig.mjs';
+import { animateAvatarRig, applyRobloxAnimationRig, buildAvatarRig } from './avatar_rig.mjs';
 
 const source = new URL('../../users/normal.obj', import.meta.url);
 const model = new OBJLoader().parse(readFileSync(source, 'utf8'));
@@ -34,4 +34,14 @@ for (const mesh of rig.root.children.filter((child) => child.isSkinnedMesh)) {
   if (movingVertex) break;
 }
 assert.ok(movingVertex, 'at least one real avatar mesh vertex should move under the generated limb rig');
-console.log(`Uploaded OBJ auto-rig smoke test passed: ${rig.meshCount} imported groups, ${rig.skeleton.bones.length} procedural joints; moving mesh ${movingVertex.mesh}.`);
+
+const identity=[1,0,0,0,1,0,0,0,1];
+const keyframedTurn=[1,0,0,0,0,-1,0,1,0];
+const nativeFixture={duration:1,keyframes:[
+  {time:0,poses:{LeftUpperArm:{orientation:identity,position:[0,0,0],weight:1}}},
+  {time:1,poses:{LeftUpperArm:{orientation:keyframedTurn,position:[0,0,0],weight:1}}},
+]};
+const applied=applyRobloxAnimationRig(THREE,rig.bones,nativeFixture,.5,false);
+assert.equal(applied,1,'the Roblox pose channel should retarget to the generated arm bone');
+assert.ok(Math.abs(rig.bones.LeftUpperArm.rotation.x-Math.PI/4)<1e-4,'native keyframe rotations should interpolate on the matching joint');
+console.log(`Uploaded OBJ auto-rig and native-keyframe smoke tests passed: ${rig.meshCount} groups, ${rig.skeleton.bones.length} joints; procedural vertex ${movingVertex.mesh}, Roblox-style pose interpolation.`);

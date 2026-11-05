@@ -80,7 +80,7 @@ function buildHtml(data) {
   import { PLYLoader } from '/modules/three/examples/jsm/loaders/PLYLoader.js';
   import { STLLoader } from '/modules/three/examples/jsm/loaders/STLLoader.js';
   import { TDSLoader } from '/modules/three/examples/jsm/loaders/TDSLoader.js';
-  import { animateAvatarRig, buildAvatarRig } from '/avatar_rig.mjs';
+  import { animateAvatarRig, applyRobloxAnimationRig, buildAvatarRig } from '/avatar_rig.mjs';
   const DATA=JSON.parse(document.getElementById('render-data').textContent);
   await RAPIER.init();
   const physicsWorld=new RAPIER.World({x:0,y:-18,z:0});physicsWorld.timestep=1/60;
@@ -193,7 +193,7 @@ function buildHtml(data) {
   const title=document.getElementById('title'),theme=document.getElementById('theme'),caption=document.getElementById('caption');
   title.textContent=(DATA.plan.name||'STORY WORLD').toUpperCase(); theme.textContent=DATA.plan.theme||'';
   const actors=[];
-  function registerActor(root,point,index,placement,rig=null){
+  function registerActor(root,point,index,placement,rig=null,animationClips=null,animationScale=1){
     const lead=placement?.role==='lead'||index===0;
     const body=physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
       .setTranslation(Number(point[0]),Number(point[1])+PHYSICS_ROOT_OFFSET,Number(point[2]))
@@ -201,7 +201,7 @@ function buildHtml(data) {
     physicsWorld.createCollider(RAPIER.ColliderDesc.capsule(ACTOR_CAPSULE_HALF_HEIGHT,ACTOR_CAPSULE_RADIUS)
       .setFriction(.95).setRestitution(0),body);
     actors.push({root,body,baseX:Number(point[0]),baseY:Number(point[1]),baseZ:Number(point[2]),
-      phase:index*1.73,lead,stride:lead?2.1:1.15,baseYaw:0,jumpApplied:false,rig});
+      phase:index*1.73,lead,stride:lead?2.1:1.15,baseYaw:0,jumpApplied:false,rig,animationClips,animationScale});
   }
   function nameSprite(text){
     const canvas=document.createElement('canvas'); canvas.width=512;canvas.height=96;const ctx=canvas.getContext('2d');
@@ -269,8 +269,19 @@ function buildHtml(data) {
       console.warn('Automatic limb rig failed for '+username+'; keeping the authentic mesh with whole-avatar motion:',error.message);
       pivot.add(model);
     }
+    const animationClips=profile.rbxm_animation_clips||null;
+    if(avatarRig){
+      for(const state of ['walk','jump']){
+        if(profile.rbxm_animation_ids?.[state]&&!animationClips?.[state])throw new Error('Native Roblox '+state+' keyframes are missing for '+username+'; refusing a procedural substitute.');
+        if(animationClips?.[state]){
+          const mapped=applyRobloxAnimationRig(THREE,avatarRig.bones,animationClips[state],0,true,avatarScale);
+          if(!mapped)throw new Error('Native Roblox '+state+' clip has no R15 Pose channels that map onto '+username+' avatar rig.');
+          console.log('Retargeted '+mapped+' native Roblox '+state+' Pose tracks onto '+username+' avatar.');
+        }
+      }
+    }
     pivot.position.set(point[0],point[1],point[2]);
-    const label=nameSprite(username);label.position.set(0,7.2,0);pivot.add(label);scene.add(pivot);registerActor(pivot,point,index,place,avatarRig?.bones||null);
+    const label=nameSprite(username);label.position.set(0,7.2,0);pivot.add(label);scene.add(pivot);registerActor(pivot,point,index,place,avatarRig?.bones||null,animationClips,avatarScale);
   }
   const avatarPromise=Promise.all(DATA.profiles.map(loadAvatar));
   const shots=DATA.plan.camera_shots?.length?DATA.plan.camera_shots:[{time:0,position:[0,45,110],target:[0,4,24],transition:'smooth'},{time:DATA.duration,position:[-25,18,50],target:[0,3,24],transition:'smooth'}];
@@ -291,13 +302,25 @@ function buildHtml(data) {
     const current=actor.body.linvel();
     actor.body.setLinvel({x:vx,y:current.y,z:vz},true);
     if(actor.lead&&!actor.jumpApplied&&progress>=.88){actor.body.applyImpulse({x:0,y:16,z:0},true);actor.jumpApplied=true;}
-    actor.root.rotation.y=actor.baseYaw+Math.sin(cycle*.48+actor.phase)*.28;
-    actor.root.rotation.z=Math.sin(cycle*3.4+actor.phase)*.035;
-    const jumpPose=actor.lead?Math.max(0,Math.sin(Math.PI*Math.max(0,Math.min(1,(progress-.88)/.12)))):0;
-    if(actor.rig)animateAvatarRig(actor.rig,t,actor.phase,jumpPose);
+    const nativeClips=actor.animationClips;
+    const jumpProgress=actor.lead?Math.max(0,Math.min(1,(progress-.88)/.12)):0;
+    const jumpPose=actor.lead?Math.max(0,Math.sin(Math.PI*jumpProgress)):0;
+    if(nativeClips?.walk){
+      const jumping=Boolean(actor.lead&&jumpProgress>0&&nativeClips.jump);
+      const clip=jumping?nativeClips.jump:nativeClips.walk;
+      const clipTime=jumping?jumpProgress*clip.duration:(t*1.15+actor.phase*clip.duration);
+      const mapped=applyRobloxAnimationRig(THREE,actor.rig,clip,clipTime,!jumping,actor.animationScale);
+      if(!mapped)throw new Error('Native Roblox animation lost all mapped Pose channels during rendering.');
+      actor.root.rotation.y=Math.atan2(vx,Math.max(.001,-vz));
+      actor.root.rotation.z=0;
+    }else{
+      actor.root.rotation.y=actor.baseYaw+Math.sin(cycle*.48+actor.phase)*.28;
+      actor.root.rotation.z=Math.sin(cycle*3.4+actor.phase)*.035;
+      if(actor.rig)animateAvatarRig(actor.rig,t,actor.phase,jumpPose);
+    }
   }
   window.sceneReady=avatarPromise.then(()=>{
-    window.avatarRigSummary={total:actors.length,rigged:actors.filter(actor=>actor.rig).length};
+    window.avatarRigSummary={total:actors.length,rigged:actors.filter(actor=>actor.rig).length,nativeAnimations:actors.filter(actor=>actor.rig&&actor.animationClips?.walk).length};
     renderer.compile(scene,camera);return true;
   });
   window.renderAt=async(t)=>{
@@ -356,7 +379,16 @@ async function main() {
   if(!Array.isArray(usernames)||usernames.length===0) throw new Error('Provide at least one actual Roblox username for the lead avatar.');
   if(!Array.isArray(profiles)||profiles.length!==usernames.length) throw new Error('Actual Roblox avatar profiles do not match the username cast.');
   const profileByName=new Map(profiles.map(p=>[p.username.toLowerCase(),p]));
-  const orderedProfiles=usernames.map(name=>{const p=profileByName.get(name.toLowerCase());if(!p?.user_id)throw new Error('Roblox avatar profile missing for '+name);if(!p.model_ready)throw new Error(`Moving-limb MP4 requires an authentic 3D avatar mesh for ${name}; only a 2D thumbnail fallback is available. Confirm the RBXM MeshPart assets are accessible, or add a Roblox Open Cloud key with Thumbnails read access as the GitHub Actions secret ROBLOX_OPEN_CLOUD_API_KEY, then rerun. Never paste the key into chat.`);return p;});
+  const orderedProfiles=usernames.map(name=>{
+    const p=profileByName.get(name.toLowerCase());
+    if(!p?.user_id)throw new Error('Roblox avatar profile missing for '+name);
+    if(!p.model_ready)throw new Error(`Moving-limb MP4 requires a local or authorized 3D avatar mesh for ${name}; only a 2D thumbnail fallback is available.`);
+    if(p.rbxm_animation_ids){
+      const missing=['walk','jump'].filter(state=>p.rbxm_animation_ids[state]&&!p.rbxm_animation_clips?.[state]);
+      if(missing.length)throw new Error(`Native Roblox ${missing.join('/')} animation keyframes for ${name} could not be loaded (${missing.map(state=>p.rbxm_animation_errors?.[state]||'missing clip data').join('; ')}); refusing to substitute procedural limb motion.`);
+    }
+    return p;
+  });
   const captions=parseSrt(readFileSync(args.captions,'utf8'));
   if(!captions.length) throw new Error('SRT contains no caption cues; refusing to make an uncaptioned MP4.');
   const data={plan,profiles:orderedProfiles,captions,duration:args.duration};
@@ -377,7 +409,8 @@ async function main() {
     const avatarRigging=await page.evaluate(()=>window.avatarRigSummary);
     console.log(`Rapier simulation ready: ${orderedProfiles.length} authentic avatar capsule(s), ${simulation.dynamicProps} dynamic AI prop(s), ${simulation.staticProps} static world collider(s).`);
     console.log(`Avatar sources: ${orderedProfiles.map(profile => `${profile.username}=${profile.model_source || (profile.thumbnail_ready ? 'official-thumbnail-fallback' : 'unknown')}`).join(', ')}.`);
-    console.log(`Automatic avatar limb rigs: ${avatarRigging.rigged}/${avatarRigging.total} authentic 3D mesh(es) skinned to procedural R15-style joints.`);
+    console.log(`Automatic avatar limb rigs: ${avatarRigging.rigged}/${avatarRigging.total} mesh(es) skinned to R15-style joints.`);
+    console.log(`Native Roblox walk clips retargeted: ${avatarRigging.nativeAnimations}/${avatarRigging.total} avatar(s).`);
     if (avatarRigging.rigged !== avatarRigging.total) {
       throw new Error(`Moving-limb MP4 blocked: only ${avatarRigging.rigged}/${avatarRigging.total} avatars loaded as 3D meshes. A 2D thumbnail cannot animate limbs. Make the username-matched RBXM MeshParts or an authorized Roblox 3D avatar mesh accessible, then rerun; no static-limb MP4 will be packaged.`);
     }
