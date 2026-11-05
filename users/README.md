@@ -19,7 +19,7 @@ users/
 
 Supported mesh formats are **OBJ, glTF (`.gltf`), GLB (`.glb`), FBX (`.fbx`), COLLADA (`.dae`), PLY, STL, and 3DS**. OBJ uses a matching `.mtl` and local texture paths where present. glTF/COLLADA dependencies must be local files referenced by the model. FBX/3DS textures can be placed in a sibling `<model>_assets/` or `<model>.fbm/` directory. Remote model dependencies are not fetched. Files are matched by username, case-insensitively; folder-based `users/<username>/avatar.<format>` sources are also accepted.
 
-Unrigged mesh files are automatically skinned to a procedural R15-style skeleton using mesh bounds and vertex positions, then animated by the MP4 renderer. This is a best-effort generic auto-rig, **not a guaranteed semantic rig for every arbitrary mesh**, and it does not play Roblox-native AnimationIds. An already rigged file is currently re-skinned to this generated skeleton. Inspect the rendered avatar before treating the result as a faithful limb rig.
+Unrigged mesh files are automatically skinned to an R15-style skeleton using mesh bounds and vertex positions; the auto-rig is best-effort and may differ from a carefully authored Roblox rig. When a matching RBXM is present, the workflow fetches its native walk/jump KeyframeSequence assets and retargets those actual Roblox pose tracks onto the generated rig. The RBXM is parsed for animation metadata only, so its protected body meshes are not downloaded when a direct mesh is available. If the native walk/jump keyframes cannot be accessed, the MP4 step refuses to substitute procedural limb motion. Without RBXM animation IDs, the renderer can still use its procedural fallback.
 
 ## Roblox model files
 

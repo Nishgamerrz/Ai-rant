@@ -87,6 +87,64 @@ function readAnimationIds(instances) {
   return animationIds;
 }
 
+function transformFromPose(pose) {
+  const frame = pose.CFrame;
+  if (!frame?.Position) return null;
+  const position = vector3(frame.Position, [0, 0, 0]);
+  const orientation = Array.isArray(frame.Orientation) ? frame.Orientation.map(Number) : [];
+  if (orientation.length !== 9 || orientation.some((value) => !Number.isFinite(value))) return null;
+  return { position, orientation, weight: Number.isFinite(Number(pose.Weight)) ? Number(pose.Weight) : 1 };
+}
+
+function poseChannels(pose, output = {}) {
+  if (pose.ClassName === 'Pose') {
+    const transform = transformFromPose(pose);
+    if (transform) output[String(pose.Name || '')] = transform;
+  }
+  for (const child of pose.Children ?? []) {
+    if (child.ClassName === 'Pose') poseChannels(child, output);
+  }
+  return output;
+}
+
+async function fetchNativeAnimationClip(id, label) {
+  const response = await fetch(`https://assetdelivery.roblox.com/v1/asset/?id=${id}`, {
+    headers: { Accept: '*/*', 'User-Agent': 'Ai-rant-Roblox-animation-renderer/1.0' },
+    signal: AbortSignal.timeout(45000),
+  });
+  if (!response.ok) throw new Error(`${label} animation asset ${id} returned HTTP ${response.status}`);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!bytes.length || bytes.length > 64 * 1024 * 1024) throw new Error(`${label} animation asset ${id} has an invalid size`);
+  const file = RobloxFile.ReadFromBuffer(bytes);
+  if (!file?.Roots?.length) throw new Error(`${label} animation asset ${id} is not a readable Roblox keyframe file`);
+  const instances = file.Roots.flatMap((root) => walk(root));
+  const keyframes = instances.filter((instance) => instance.ClassName === 'Keyframe')
+    .map((keyframe) => ({ time: Number(keyframe.Time), poses: poseChannels(keyframe) }))
+    .filter((keyframe) => Number.isFinite(keyframe.time) && Object.keys(keyframe.poses).length)
+    .sort((a, b) => a.time - b.time);
+  const duration = keyframes.at(-1)?.time ?? 0;
+  if (keyframes.length < 2 || duration <= 0) throw new Error(`${label} animation asset ${id} has no usable Pose timeline`);
+  return { asset_id: String(id), duration, keyframes };
+}
+
+async function fetchNativeAnimationClips(animationIds) {
+  const clips = {};
+  const errors = {};
+  const playbackStates = ['idle', 'walk', 'run', 'jump', 'fall', 'climb', 'swim'];
+  for (const name of playbackStates) {
+    const id = assetId(animationIds[name]);
+    if (!id) continue;
+    try {
+      clips[name] = await fetchNativeAnimationClip(id, name);
+      console.log(`Fetched native ${name} animation ${id}: ${clips[name].keyframes.length} keyframes.`);
+    } catch (error) {
+      errors[name] = String(error.message || error);
+      console.warn(`Native ${name} animation was unavailable: ${errors[name]}`);
+    }
+  }
+  return { clips, errors };
+}
+
 async function fetchAsset(url, destination, label, optional = false) {
   try {
     const response = await fetch(url, {
@@ -128,6 +186,9 @@ async function prepareProfile(profile) {
   // can still use Roblox's Animator if a protected MeshPart asset returns HTTP 401.
   const animationIds = readAnimationIds(instances);
   profile.rbxm_animation_ids = animationIds;
+  const nativeAnimations = await fetchNativeAnimationClips(animationIds);
+  profile.rbxm_animation_clips = nativeAnimations.clips;
+  profile.rbxm_animation_errors = nativeAnimations.errors;
   if (profile.model_ready && ['users-file', 'users-folder'].includes(profile.model_source)) {
     console.log(`Using the self-contained ${profile.model_format || 'OBJ'} avatar mesh for MP4; extracted ${Object.keys(animationIds).length} native animation references from the matching RBXM for Studio.`);
     return profile;

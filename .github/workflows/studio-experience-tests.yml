@@ -44,6 +44,7 @@ jobs:
           npm ci --prefix tools/rbxm_importer --ignore-scripts --no-audit --no-fund
           node --check tools/rbxm_importer/prepare_rbxm_avatar.mjs
           node tools/rbxm_importer/test_rbxm.mjs
+          node tools/rbxm_importer/animation_assets_smoke_test.mjs
 
       - name: Compile Python and run experience tests
         run: |

@@ -106,7 +106,7 @@ jobs:
                   '- **Pipeline:** story and furnished world/camera plan → narration/captions → physics-enabled MP4 + Studio project → quality checks and package.\n'
                   '- **Username lookup:** the public Roblox Users API resolves entered usernames to IDs keylessly; no manual ID is needed.\n'
                   '- **Local model:** username-matched OBJ, glTF/GLB, FBX, COLLADA, PLY, STL, and 3DS files are auto-rigged for the MP4; direct local geometry takes priority over RBXM asset references.\n'
-                  '- **Avatar source:** a local mesh is skinned to a procedural R15-style rig; RBXM and authorized Roblox 3D meshes remain supported fallbacks. Thumbnail-only profiles cannot animate limbs.\n'
+                  '- **Animation:** matching RBXM walk/jump KeyframeSequences are retargeted onto the local mesh rig; inaccessible native clips block MP4 instead of being replaced by fake limb motion.\n'
                   '- **Mesh access:** local mesh files need no Open Cloud key; the optional online 3D-avatar fallback may require a scoped secret.\n'
                   '- **Prompt/tool records:** successful runs include generation prompts and final summaries in the downloadable artifact.\n'
               )

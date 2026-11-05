@@ -143,7 +143,82 @@ export function buildAvatarRig(THREE, model) {
   return { root: rigRoot, bones: byName, meshCount: meshes.length, skeleton };
 }
 
-/** Procedural, Roblox-style walk cycle and small expressive pose for auto-rigged meshes. */
+const nativeTrackCache = new WeakMap();
+const nativeRestPoseCache = new WeakMap();
+const NATIVE_POSE_TO_BONE = {
+  HumanoidRootPart: 'Root', Root: 'Root',
+  LowerTorso: 'Hips', UpperTorso: 'Chest', Torso: 'Spine',
+  Head: 'Head', Neck: 'Neck',
+  LeftShoulder: 'LeftUpperArm', 'Left Arm': 'LeftUpperArm', LeftUpperArm: 'LeftUpperArm',
+  LeftElbow: 'LeftLowerArm', LeftLowerArm: 'LeftLowerArm',
+  LeftWrist: 'LeftHand', LeftHand: 'LeftHand',
+  RightShoulder: 'RightUpperArm', 'Right Arm': 'RightUpperArm', RightUpperArm: 'RightUpperArm',
+  RightElbow: 'RightLowerArm', RightLowerArm: 'RightLowerArm',
+  RightWrist: 'RightHand', RightHand: 'RightHand',
+  LeftHip: 'LeftUpperLeg', 'Left Leg': 'LeftUpperLeg', LeftUpperLeg: 'LeftUpperLeg',
+  LeftKnee: 'LeftLowerLeg', LeftLowerLeg: 'LeftLowerLeg', LeftAnkle: 'LeftFoot', LeftFoot: 'LeftFoot',
+  RightHip: 'RightUpperLeg', 'Right Leg': 'RightUpperLeg', RightUpperLeg: 'RightUpperLeg',
+  RightKnee: 'RightLowerLeg', RightLowerLeg: 'RightLowerLeg', RightAnkle: 'RightFoot', RightFoot: 'RightFoot',
+};
+
+function tracksForNativeClip(THREE, clip) {
+  let tracks = nativeTrackCache.get(clip);
+  if (tracks) return tracks;
+  tracks = new Map();
+  for (const frame of clip.keyframes || []) {
+    for (const [poseName, pose] of Object.entries(frame.poses || {})) {
+      const boneName = NATIVE_POSE_TO_BONE[poseName];
+      if (!boneName || !Array.isArray(pose.orientation) || pose.orientation.length !== 9) continue;
+      const m = pose.orientation;
+      const rotationMatrix = new THREE.Matrix4().set(m[0],m[1],m[2],0,m[3],m[4],m[5],0,m[6],m[7],m[8],0,0,0,0,1);
+      const rotation = new THREE.Quaternion().setFromRotationMatrix(rotationMatrix).normalize();
+      const position = new THREE.Vector3(...(pose.position || [0,0,0]));
+      const weight = clamp(Number(pose.weight ?? 1), 0, 1);
+      if (!tracks.has(boneName)) tracks.set(boneName, []);
+      tracks.get(boneName).push({ time: Number(frame.time), rotation, position, weight });
+    }
+  }
+  for (const track of tracks.values()) track.sort((a,b)=>a.time-b.time);
+  nativeTrackCache.set(clip, tracks);
+  return tracks;
+}
+
+/** Sample Roblox KeyframeSequence Pose channels on the generated avatar rig. */
+export function applyRobloxAnimationRig(THREE, bones, clip, time, loop = true, positionScale = 1) {
+  if (!clip?.keyframes?.length || !Number.isFinite(clip.duration) || clip.duration <= 0) return 0;
+  let restPose = nativeRestPoseCache.get(bones);
+  if (!restPose) {
+    restPose = new Map(Object.entries(bones).map(([name,bone])=>[name,{position:bone.position.clone(),rotation:bone.quaternion.clone()}]));
+    nativeRestPoseCache.set(bones,restPose);
+  }
+  for (const [name,rest] of restPose) {
+    bones[name].position.copy(rest.position);
+    bones[name].quaternion.copy(rest.rotation);
+  }
+  const tracks = tracksForNativeClip(THREE,clip);
+  const duration = clip.duration;
+  const sampleTime = loop ? ((time % duration) + duration) % duration : clamp(time,0,duration);
+  let applied = 0;
+  for (const [boneName,track] of tracks) {
+    const bone = bones[boneName];
+    if (!bone || !track.length) continue;
+    let right = track.findIndex((key)=>key.time>=sampleTime);
+    let left = right<=0?0:right-1;
+    if (right<0) right=track.length-1;
+    const a=track[left],b=track[right];
+    const span=b.time-a.time;
+    const alpha=span>1e-8?clamp((sampleTime-a.time)/span,0,1):0;
+    const rotation=a.rotation.clone().slerp(b.rotation,alpha);
+    const weight=a.weight+(b.weight-a.weight)*alpha;
+    const position=a.position.clone().lerp(b.position,alpha).multiplyScalar(positionScale*weight);
+    bone.quaternion.identity().slerp(rotation,weight);
+    bone.position.add(position);
+    applied+=1;
+  }
+  return applied;
+}
+
+/** Procedural fallback for profiles that have no native Roblox KeyframeSequence. */
 export function animateAvatarRig(bones, time, phase, jumpAmount = 0) {
   const gait = Math.sin(time * 2.8 + phase);
   const opposite = -gait;

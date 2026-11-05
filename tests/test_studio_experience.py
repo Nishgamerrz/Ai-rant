@@ -92,11 +92,12 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("humanoid:MoveTo(waypoints[index])", runtime)
         self.assertIn('FindFirstChild("Animate")', runtime)
 
-    def test_mp4_renderer_applies_procedural_motion_to_authentic_avatar_models(self):
+    def test_mp4_renderer_retargets_native_roblox_keyframes_onto_auto_rigged_models(self):
         renderer = (ROOT / "tools/video_renderer/render_short.mjs").read_text(encoding="utf-8")
         report = (ROOT / "tools/package_studio_deliverables.py").read_text(encoding="utf-8")
         renderer_package = json.loads((ROOT / "tools/video_renderer/package.json").read_text(encoding="utf-8"))
         self.assertIn("test:avatar-rig", renderer_package["scripts"])
+        self.assertIn("test:avatar-obj", renderer_package["scripts"])
         self.assertIn("test:module-resolution", renderer_package["scripts"])
         self.assertIn("function animateActor(actor,t)", renderer)
         self.assertIn("actor.root.rotation.y", renderer)
@@ -108,9 +109,12 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn('"three":"/modules/three/build/three.module.js"', renderer)
         self.assertLess(renderer.index('type="importmap"'), renderer.index('type="module"'))
         self.assertIn("buildAvatarRig", renderer)
+        self.assertIn("applyRobloxAnimationRig", renderer)
         self.assertIn("animateAvatarRig", renderer)
         self.assertIn("Automatic avatar limb rigs", renderer)
-        self.assertIn("Moving-limb MP4 requires an authentic 3D avatar mesh", renderer)
+        self.assertIn("Native Roblox walk clips retargeted", renderer)
+        self.assertIn("Native Roblox ${missing.join('/')}", renderer)
+        self.assertIn("Moving-limb MP4 requires a local or authorized 3D avatar mesh", renderer)
         self.assertIn("no static-limb MP4 will be packaged", renderer)
         self.assertIn("Avatar sources:", renderer)
         self.assertIn("type:'jpeg',quality:92", renderer)
