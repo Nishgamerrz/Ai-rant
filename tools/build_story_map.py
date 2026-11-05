@@ -109,6 +109,8 @@ def normalize_camera_shots(shots, duration, usernames=()):
 def decode_response(path):
     payload = json.loads(path.read_text(encoding="utf-8"))
     response = payload.get("response", "") if isinstance(payload, dict) else ""
+    if isinstance(payload, dict) and isinstance(payload.get("message"), dict):
+        response = payload["message"].get("content", response)
     try:
         plan = json.loads(response)
     except (json.JSONDecodeError, TypeError):
@@ -124,7 +126,67 @@ def default_character_placements(usernames):
     ]
 
 
-def normalize_character_placements(raw, usernames):
+def requested_avatar_effects(topic):
+    """Return only body effects explicitly requested in the user's story/topic text."""
+    raw_topic = str(topic or "")
+    text = raw_topic.casefold()
+    requests = []
+    number_requested = (
+        re.search(r"\b(?:strength|power|level)\s+(?:numbers?|scores?|stats?)\b", text)
+        or re.search(r"\b(?:numbers?|scores?)\b.{0,45}\b(?:above|over|on|at|in|head|body|chest|arm|leg|avatar|character)\b", text)
+        or re.search(r"\b(?:put|show|display|add|place|write|attach|wear)\b.{0,45}\b(?:numbers?|scores?)\b", text)
+    )
+    if number_requested:
+        fixed_number = re.search(r"\b(?:numbers?|scores?)\s*(?:is|of|:|=)?\s*(\d{1,3})\b", text)
+        requests.append(("number", int(fixed_number.group(1))) if fixed_number else "number")
+    for kind, pattern in (("scar", r"\bscars?\b|\bscarred\b"),
+                          ("tattoo", r"\btattoos?\b"),
+                          ("birthmark", r"\bbirthmarks?\b"),
+                          ("badge", r"\bbadges?\b"),
+                          ("emblem", r"\bemblems?\b"),
+                          ("symbol", r"\bsymbols?\b")):
+        if re.search(pattern, text):
+            requests.append(kind)
+    if re.search(r"\b(?:write|print|put|show|display|add)\b.{0,35}\b(?:text|word|lettering)\b", text):
+        match = re.search(r"[\"“”']([^\"“”']{1,18})[\"“”']", raw_topic)
+        if match:
+            value = re.sub(r"[^A-Za-z0-9 _-]", "", match.group(1)).strip()[:18]
+            if value:
+                requests.append(("text", value))
+    return requests
+
+
+def avatar_effect_attachment(topic, kind):
+    text = str(topic or "").casefold()
+    kind_words = {
+        "number": r"numbers?|scores?|strength|power|level",
+        "text": r"text|word|lettering",
+        "scar": r"scarred|scars|scar",
+        "tattoo": r"tattoos?", "birthmark": r"birthmarks?", "badge": r"badges?",
+        "emblem": r"emblems?", "symbol": r"symbols?",
+    }
+    clauses = re.split(r"[,;]|\band\b|\bwhile\b", text)
+    clause = next((part for part in clauses if re.search(rf"\b(?:{kind_words.get(kind, kind)})\b", part)), text)
+    if "left arm" in clause:
+        return "left_arm"
+    if "right arm" in clause:
+        return "right_arm"
+    if "left leg" in clause:
+        return "left_leg"
+    if "right leg" in clause:
+        return "right_leg"
+    if re.search(r"\b(?:chest|torso|shirt|body)\b", clause):
+        return "torso"
+    if re.search(r"\b(?:arm|wrist|hand)\b", clause):
+        return "left_arm"
+    if re.search(r"\b(?:leg|ankle|foot)\b", clause):
+        return "left_leg"
+    if re.search(r"\b(?:head|face|forehead|cheek)\b", clause) or kind in {"number", "scar"}:
+        return "head"
+    return "torso"
+
+
+def normalize_character_placements(raw, usernames, visual_request=""):
     if not usernames:
         return []
     defaults = default_character_placements(usernames)
@@ -141,21 +203,34 @@ def normalize_character_placements(raw, usernames):
                     or not -8 <= pos[0] <= 8 or not 0 <= pos[1] <= 3 or not 12 <= pos[2] <= 38):
                 continue
             by_name[name] = [round(float(v), 2) for v in pos]
+    requests = requested_avatar_effects(visual_request)
     placements = []
-    used_strengths = set()
+    used_numbers = set()
     for index, default in enumerate(defaults):
         name = default["username"]
-        digest = hashlib.sha256(name.casefold().encode("utf-8")).digest()
-        strength = 10 + int.from_bytes(digest[:4], "big") % 90
-        while strength in used_strengths:
-            strength = 10 + ((strength - 9) % 90)
-        used_strengths.add(strength)
-        placements.append({
+        effects = []
+        if requests:
+            digest = hashlib.sha256(name.casefold().encode("utf-8")).digest()
+            number = 10 + int.from_bytes(digest[:4], "big") % 90
+            while number in used_numbers:
+                number = 10 + ((number - 9) % 90)
+            used_numbers.add(number)
+            for request in requests:
+                kind, value = request if isinstance(request, tuple) else (request, None)
+                effect = {"kind": kind, "attachment": avatar_effect_attachment(visual_request, kind)}
+                if kind == "number":
+                    effect["value"] = value if isinstance(value, int) else number
+                elif value is not None:
+                    effect["value"] = value
+                effects.append(effect)
+        placement = {
             "username": name,
             "role": "lead" if index == 0 else "supporting",
             "position": by_name.get(name.casefold(), default["position"]),
-            "strength": strength,
-        })
+        }
+        if effects:
+            placement["visual_effects"] = effects
+        placements.append(placement)
     return placements
 
 
@@ -256,7 +331,7 @@ def procedural_fallback_plan(theme, story, duration, usernames=()):
     }
 
 
-def expand_plan(plan, target_props=420):
+def expand_plan(plan, target_props=1260):
     """Turn a compact AI landmark blueprint into a full, themed furnished build."""
     source_props = list(plan.get("props", []))
     if len(source_props) >= target_props:
@@ -505,8 +580,10 @@ def expand_plan(plan, target_props=420):
                       ("Story Lantern", "Block", "Neon", [1, 3.2, 1], accent), ("Wonder Marker", "Ball", "SmoothPlastic", [2.5, 2.5, 2.5], accent)],
     }[family]
     motif_offsets = [(0, 0, 0), (-5, -3, 0), (5, -3, 0), (-4, 4, 0), (4, 4, 0), (0, -5, 0), (0, 3, 0), (0, 0, 5)]
-    x_sites = [-220, -165, -110, -55, 0, 55, 110, 165, 220]
-    z_sites = [-220, -165, -110, -55, 55, 110, 165, 220]
+    # 13x13, 40-stud-spaced motif sites provide enough distinct clusters for the
+    # requested 3x world-detail target without piling geometry near spawn.
+    x_sites = list(range(-240, 241, 40))
+    z_sites = list(range(-240, 241, 40))
     candidate_sites = [
         (x, z) for z in z_sites for x in x_sites
         if not (-35 <= x <= 35 and -2 <= z <= 62)
@@ -559,7 +636,7 @@ def accent_color(plan, fallback):
             for index, channel in enumerate(ambient)]
 
 
-def validate(plan, duration=90, usernames=(), min_props=16):
+def validate(plan, duration=90, usernames=(), min_props=16, visual_request=""):
     if not isinstance(plan, dict):
         raise ValueError("map plan must be an object")
     props = plan.get("props")
@@ -633,7 +710,7 @@ def validate(plan, duration=90, usernames=(), min_props=16):
         "ambient_color": color(plan.get("ambient_color"), [185, 205, 225]),
         "props": clean_props,
         "camera_shots": normalize_camera_shots(plan.get("camera_shots"), duration, usernames),
-        "character_placements": normalize_character_placements(plan.get("character_placements"), usernames),
+        "character_placements": normalize_character_placements(plan.get("character_placements"), usernames, visual_request),
     }
 
 
@@ -716,8 +793,9 @@ def main():
     parser.add_argument("--theme", default="", help="explicit visual-theme cue for procedural fallback")
     parser.add_argument("--story", default="", help="story context for procedural fallback")
     parser.add_argument("--min-props", type=int, default=8, help="minimum unique AI landmark/building anchors")
-    parser.add_argument("--target-props", type=int, default=420, help="minimum furnished world Parts after deterministic expansion")
+    parser.add_argument("--target-props", type=int, default=1260, help="minimum furnished world Parts after deterministic expansion")
     parser.add_argument("--usernames", type=Path, help="JSON file containing the ordered Roblox cast")
+    parser.add_argument("--story-topic", default="", help="explicit user request used to gate optional avatar-body effects")
     args = parser.parse_args()
     source, destination, duration = args.source, args.destination, args.duration
     usernames = json.loads(args.usernames.read_text(encoding="utf-8")) if args.usernames else []
@@ -725,8 +803,8 @@ def main():
         raise SystemExit("usernames file must be a JSON array of strings")
     if not 30 <= duration <= 60:
         raise SystemExit("duration must be 30 to 60 seconds")
-    if args.target_props < 300:
-        raise SystemExit("target-props must be at least 300 furnished Parts")
+    if args.target_props < 1200:
+        raise SystemExit("target-props must be at least 1200 furnished Parts (three times the former 420-Part target)")
     if args.fallback:
         raw_plan = procedural_fallback_plan(args.theme, args.story, duration, usernames)
         source_label = "theme/story procedural fallback"
@@ -744,9 +822,9 @@ def main():
             raw_plan = procedural_fallback_plan(args.theme, args.story, duration, usernames)
             source_label = "theme/story procedural fallback"
     try:
-        anchors = validate(raw_plan, duration, usernames, args.min_props)
+        anchors = validate(raw_plan, duration, usernames, args.min_props, args.story_topic)
         plan = expand_plan(anchors, args.target_props)
-        plan = validate(plan, duration, usernames, args.target_props)
+        plan = validate(plan, duration, usernames, args.target_props, args.story_topic)
     except ValueError as exc:
         raise SystemExit(f"Could not construct a valid furnished world: {exc}") from exc
     json_path = destination if args.json_only else destination.with_suffix(".json")
