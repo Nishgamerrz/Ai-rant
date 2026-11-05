@@ -17,6 +17,8 @@ class StudioExperienceTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
         self.assertNotIn("narration_audio_asset_id", workflow)
         self.assertNotIn("--audio-asset-id \"$NARRATION_AUDIO_ASSET_ID\"", workflow)
+        self.assertIn('--rate="$NARRATOR_RATE"', workflow)
+        self.assertNotIn('--rate "$NARRATOR_RATE"', workflow)
         username_step = workflow.index("- name: Require a username for the avatar cast")
         model_step = workflow.index("- name: Download the selected AI model for story and world/camera planning")
         self.assertLess(username_step, model_step)
@@ -293,7 +295,7 @@ class StudioExperienceTests(unittest.TestCase):
                 "--directory", str(dist), "--map", str(work / "map.json"),
                 "--cast", str(work / "cast.json"), "--research", str(work / "research.json"),
                 "--summary", str(work / "summary.txt"), "--model", "qwen3:test",
-                "--voice", "en-US-GuyNeural", "--duration", "60",
+                "--voice", "en-US-GuyNeural", "--rate=-8%", "--duration", "60",
             ], check=True, capture_output=True, text=True)
             pdf = dist / "AI_Design_and_Tools_Report.pdf"
             bundle = dist / "Roblox_Studio_Complete_Package.zip"
