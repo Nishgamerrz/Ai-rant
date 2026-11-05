@@ -106,7 +106,7 @@ jobs:
                   '- **Pipeline:** story and furnished world/camera plan → narration/captions → physics-enabled MP4 + Studio project → quality checks and package.\n'
                   '- **Username lookup:** the public Roblox Users API resolves entered usernames to IDs keylessly; no manual ID is needed.\n'
                   '- **Local model:** the workflow first checks the flat users/<username>.rbxm file; its referenced mesh assets are converted for the MP4, and the original model is included in the package.\n'
-                  '- **Avatar source:** a matching local RBXM model, optional local OBJ, authorized Roblox mesh, or the account’s official thumbnail.\n'
+                  '- **Avatar source:** a matching local RBXM model or authorized Roblox 3D mesh; thumbnail-only profiles stop the MP4 because they cannot animate limbs.\n'
                   '- **Mesh access:** Roblox requires a scoped ROBLOX_OPEN_CLOUD_API_KEY secret for 3D meshes; the value is never logged.\n'
                   '- **Prompt/tool records:** successful runs include generation prompts and final summaries in the downloadable artifact.\n'
               )
