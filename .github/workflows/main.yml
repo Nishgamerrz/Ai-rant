@@ -227,18 +227,35 @@ jobs:
           test "$(jq 'length' dist/avatar_profiles.json)" -eq "$(jq 'length' dist/characters.json)"
           python - <<'PY'
           import json
+          import os
           from pathlib import Path
           profiles = json.loads(Path('dist/avatar_profiles.json').read_text(encoding='utf-8'))
+          missing_meshes = []
+          summary_lines = ['## Avatar 3D mesh readiness']
           for profile in profiles:
+              username = profile['username']
+              source_name = profile.get('model_source', 'unknown')
+              ready = bool(profile.get('model_ready'))
+              reason = profile.get('rbxm_import_error') or profile.get('mesh_error') or ''
+              print(f"Avatar {username}: source={source_name}, 3D_mesh_ready={ready}.")
+              summary_lines.append(f"- **{username}:** source `{source_name}`, 3D mesh ready: `{ready}`" + (f"; reason: {reason}" if reason else ''))
               if profile.get('rbxm_path'):
-                  raise SystemExit(f"RBXM staging path was not cleared for {profile['username']}")
+                  raise SystemExit(f"RBXM staging path was not cleared for {username}")
               if profile.get('rbxm_source_selected'):
                   source = profile.get('source_rbxm_copy')
-                  assert source and Path(source).is_file(), f"Original RBXM was not packaged for {profile['username']}"
-              if profile.get('model_source') == 'rbxm-file':
-                  assert profile.get('model_ready'), f"RBXM avatar failed conversion for {profile['username']}"
+                  assert source and Path(source).is_file(), f"Original RBXM was not packaged for {username}"
+              if source_name == 'rbxm-file':
+                  assert ready, f"RBXM avatar failed conversion for {username}"
                   assert Path(profile['model_obj']).is_file() and Path(profile['model_mtl']).is_file()
-          print('Successful RBXM conversions and documented fallbacks were validated; original selected RBXMs are staged for packaging.')
+              if not ready:
+                  missing_meshes.append(f"{username} ({source_name})" + (f": {reason}" if reason else ''))
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a', encoding='utf-8') as out:
+              out.write('\n'.join(summary_lines) + '\n')
+          if missing_meshes:
+              key_state = 'configured' if os.environ.get('ROBLOX_OPEN_CLOUD_API_KEY', '').strip() else 'not configured'
+              details = '; '.join(missing_meshes)
+              raise SystemExit(f"Moving-limb MP4 needs accessible 3D avatar meshes; only a 2D thumbnail was available for {details}. ROBLOX_OPEN_CLOUD_API_KEY is {key_state}. In repository Settings > Secrets and variables > Actions, add/update ROBLOX_OPEN_CLOUD_API_KEY with Roblox Open Cloud Thumbnails read permission; protected RBXM MeshPart assets must also be accessible to that key/account. Never paste the key into chat.")
+          print('All requested avatars have 3D meshes; RBXM originals and conversions are validated.')
           PY
 
       - name: Search the web for optional story background

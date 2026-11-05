@@ -32,6 +32,8 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("public Roblox Users API resolves entered usernames to IDs keylessly", workflow)
         self.assertIn("users/<username>.rbxm", workflow)
         self.assertIn("Mesh access:", workflow)
+        self.assertIn("Moving-limb MP4 needs accessible 3D avatar meshes", workflow)
+        self.assertIn("ROBLOX_OPEN_CLOUD_API_KEY is {key_state}", workflow)
         renderer_tests = (ROOT / ".github/workflows/studio-experience-tests.yml").read_text(encoding="utf-8")
         self.assertIn("npm run test:avatar-rig", renderer_tests)
         self.assertIn("npm run test:module-resolution", renderer_tests)
