@@ -93,12 +93,15 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("buildAvatarRig", renderer)
         self.assertIn("animateAvatarRig", renderer)
         self.assertIn("Automatic avatar limb rigs", renderer)
+        self.assertIn("Moving-limb MP4 requires an authentic 3D avatar mesh", renderer)
+        self.assertIn("no static-limb MP4 will be packaged", renderer)
         self.assertIn("Avatar sources:", renderer)
         self.assertIn("type:'jpeg',quality:92", renderer)
         self.assertIn("estimated ${remaining.toFixed(0)}s remaining", renderer)
         self.assertIn("DATA.plan.ground_color", renderer)
         self.assertIn("horizon.position.y=-.08", renderer)
-        self.assertIn("rather than using native Roblox R15 animation clips", report)
+        self.assertIn("rather than using Roblox's native Animate runtime", report)
+        self.assertIn("static-limb video is not delivered", report)
 
     def test_builder_packages_playable_place_with_world_cast_and_captions(self):
         with tempfile.TemporaryDirectory() as temporary:

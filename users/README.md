@@ -12,7 +12,7 @@ For a workflow username of `normal`, the matching source is `users/normal.rbxm`.
 
 The RBXM keeps its native rig and animation references. Its MeshParts refer to Roblox asset IDs, so the automated MP4 step resolves those official mesh/texture assets, converts the geometry into a temporary renderer format, and applies the existing Three.js motion system. The MP4 is not a Roblox Studio capture, and Roblox's native `Animate` script does not execute in the MP4 renderer. Native animation IDs from the RBXM are also passed to the generated Studio experience, where the avatars move with Roblox Humanoids. The original RBXM is included in the downloadable package under `avatar-assets/source-rbxm/`.
 
-When no matching RBXM exists, the workflow retains the optional legacy mesh layout below, then continues with the existing Roblox mesh lookup and official thumbnail fallback:
+When no matching RBXM exists, the workflow retains the optional legacy mesh layout below, then tries the Roblox 3D mesh lookup. A genuine account thumbnail is still recognized as a fallback source for metadata, but it is only a 2D picture; the MP4 render now stops rather than packaging a video without moving limbs if no 3D avatar mesh is available:
 
 ```text
 users/
@@ -22,4 +22,4 @@ users/
     texture.png      # optional; relative paths referenced by the MTL
 ```
 
-No model file is uploaded through the Actions form; that form accepts text inputs, not files. Do not put Roblox cookies or API keys in this folder or in chat. Some referenced Roblox assets may require permission; if the model's assets cannot be fetched, the workflow uses the existing authorized-mesh or same-account thumbnail fallback when available.
+No model file is uploaded through the Actions form; that form accepts text inputs, not files. Do not put Roblox cookies or API keys in this folder or in chat. Some referenced Roblox assets may require permission. If neither the RBXM assets nor an authorized 3D mesh can be fetched, the workflow explains the access problem and refuses to package a static-limb MP4. Configure the scoped Actions secret if Roblox's 3D avatar endpoint requires authentication.
