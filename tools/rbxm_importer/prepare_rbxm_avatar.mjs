@@ -65,6 +65,28 @@ function walk(instance, result = []) {
   return result;
 }
 
+function readAnimationIds(instances) {
+  const animationIds = {};
+  const locomotion = new Set(['idle', 'walk', 'run', 'jump', 'fall', 'climb', 'swim']);
+  for (const animation of instances.filter((instance) => instance.ClassName === 'Animation')) {
+    const id = assetId(animation.AnimationId);
+    if (!id) continue;
+    let parent = animation.Parent;
+    let key = '';
+    while (parent) {
+      const candidate = String(parent.Name || '').toLowerCase();
+      if (locomotion.has(candidate)) { key = candidate; break; }
+      parent = parent.Parent;
+    }
+    if (!key) {
+      const name = String(animation.Name || '').toLowerCase();
+      key = [...locomotion].find((kind) => name.includes(kind)) || name;
+    }
+    if (key) animationIds[key] ??= `rbxassetid://${id}`;
+  }
+  return animationIds;
+}
+
 async function fetchAsset(url, destination, label, optional = false) {
   try {
     const response = await fetch(url, {
@@ -102,6 +124,10 @@ async function prepareProfile(profile) {
     ?? instances.find((instance) => instance.ClassName === 'Part' && instance.Name === 'HumanoidRootPart');
   if (!rootPart) throw new Error(`users/${path.basename(source)} has no HumanoidRootPart.`);
   const rootTransform = cframe(rootPart.CFrame);
+  // Extract native animation IDs before downloading external meshes so the Studio project
+  // can still use Roblox's Animator if a protected MeshPart asset returns HTTP 401.
+  const animationIds = readAnimationIds(instances);
+  profile.rbxm_animation_ids = animationIds;
   const outputDir = path.resolve(profile.rbxm_output_dir);
   await fs.mkdir(outputDir, { recursive: true });
   const meshCache = new Map();
@@ -156,24 +182,6 @@ async function prepareProfile(profile) {
       color: color3(part.Color),
     });
   }
-  const animationIds = {};
-  const locomotion = new Set(['idle', 'walk', 'run', 'jump', 'fall', 'climb', 'swim']);
-  for (const animation of instances.filter((instance) => instance.ClassName === 'Animation')) {
-    const id = assetId(animation.AnimationId);
-    if (!id) continue;
-    let parent = animation.Parent;
-    let key = '';
-    while (parent) {
-      const candidate = String(parent.Name || '').toLowerCase();
-      if (locomotion.has(candidate)) { key = candidate; break; }
-      parent = parent.Parent;
-    }
-    if (!key) {
-      const name = String(animation.Name || '').toLowerCase();
-      key = [...locomotion].find((kind) => name.includes(kind)) || name;
-    }
-    if (key) animationIds[key] ??= `rbxassetid://${id}`;
-  }
   const manifest = {
     format: 'rbxm-avatar-manifest-v1',
     username: profile.username,
@@ -209,7 +217,8 @@ async function main() {
       await prepareProfile(profile);
     } catch (error) {
       profile.rbxm_import_error = String(error.message || error);
-      console.warn(`Could not render ${profile.username}'s RBXM (${profile.rbxm_import_error}).`);
+      const preservedAnimationCount = Object.keys(profile.rbxm_animation_ids || {}).length;
+      console.warn(`Could not render ${profile.username}'s RBXM (${profile.rbxm_import_error}); preserving ${preservedAnimationCount} native animation references for Studio.`);
       if (profile.fallback_model_ready && profile.fallback_model_obj && profile.fallback_model_mtl) {
         profile.model_obj = profile.fallback_model_obj;
         profile.model_mtl = profile.fallback_model_mtl;
@@ -221,7 +230,6 @@ async function main() {
         profile.model_source = 'official-thumbnail-fallback';
       }
       delete profile.rbxm_manifest;
-      delete profile.rbxm_animation_ids;
       delete profile.fallback_model_obj;
       delete profile.fallback_model_mtl;
       delete profile.fallback_model_ready;

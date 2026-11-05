@@ -254,8 +254,12 @@ jobs:
           if missing_meshes:
               key_state = 'configured' if os.environ.get('ROBLOX_OPEN_CLOUD_API_KEY', '').strip() else 'not configured'
               details = '; '.join(missing_meshes)
-              raise SystemExit(f"Moving-limb MP4 needs accessible 3D avatar meshes; only a 2D thumbnail was available for {details}. ROBLOX_OPEN_CLOUD_API_KEY is {key_state}. In repository Settings > Secrets and variables > Actions, add/update ROBLOX_OPEN_CLOUD_API_KEY with Roblox Open Cloud Thumbnails read permission; protected RBXM MeshPart assets must also be accessible to that key/account. Never paste the key into chat.")
-          print('All requested avatars have 3D meshes; RBXM originals and conversions are validated.')
+              message = f"3D mesh unavailable for {details}; ROBLOX_OPEN_CLOUD_API_KEY is {key_state}. The native Studio project will still be built from RBXM animation IDs, but the MP4 renderer cannot animate a 2D thumbnail."
+              print(f"Warning: {message}", file=__import__('sys').stderr)
+              with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a', encoding='utf-8') as out:
+                  out.write(f"\n> **3D avatar mesh warning:** {message}\n")
+          else:
+              print('All requested avatars have 3D meshes; RBXM originals and conversions are validated.')
           PY
 
       - name: Search the web for optional story background
@@ -449,6 +453,7 @@ jobs:
           PY
 
       - name: Package the runnable Roblox Studio experience
+        id: studio-experience
         env:
           DURATION_SECONDS: ${{ inputs.duration_seconds }}
         run: |
@@ -525,6 +530,20 @@ jobs:
             --profiles dist/avatar_profiles.json \
             --map-plan dist/Roblox_Story_Map.json \
             --duration "$DURATION_SECONDS"
+
+      - name: Upload native Studio project even if the MP4 cannot use a protected mesh
+        if: failure() && steps.studio-experience.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Roblox-Studio-Native-Animation-Project
+          path: |
+            dist/Roblox_Studio_Experience.rbxlx
+            dist/Generated_Story_World.lua
+            dist/README_Studio.md
+            dist/avatar_profiles.json
+            dist/avatar-assets/source-rbxm/*.rbxm
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Write AI-generated creation summary and bundle the final deliverables
         env:

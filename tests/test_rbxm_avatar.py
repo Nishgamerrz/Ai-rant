@@ -23,6 +23,13 @@ def make_v2_mesh() -> bytes:
 
 
 class RbxmAvatarTests(unittest.TestCase):
+    def test_native_animation_ids_survive_external_mesh_401(self):
+        importer = (Path(__file__).resolve().parents[1] / "tools/rbxm_importer/prepare_rbxm_avatar.mjs").read_text(encoding="utf-8")
+        animation_assignment = importer.index("profile.rbxm_animation_ids = animationIds")
+        first_mesh_download = importer.index("for (const part of meshParts)")
+        self.assertLess(animation_assignment, first_mesh_download)
+        self.assertNotIn("delete profile.rbxm_animation_ids", importer)
+
     def test_flat_username_rbxm_is_selected_even_if_public_lookup_fails(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
