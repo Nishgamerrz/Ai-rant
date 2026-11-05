@@ -80,7 +80,14 @@ def long_bracket(value: str) -> str:
     return f"[{equals}[{value}]{equals}]"
 
 
-def make_config(plan, cast, duration, narration, captions, audio_asset_id):
+def make_config(plan, cast, duration, narration, captions, audio_asset_id, avatar_profiles=None):
+    rbxm_animations = {}
+    for profile in avatar_profiles or []:
+        if not isinstance(profile, dict) or not isinstance(profile.get("username"), str):
+            continue
+        animations = profile.get("rbxm_animation_ids")
+        if isinstance(animations, dict) and animations:
+            rbxm_animations[profile["username"].casefold()] = animations
     return {
         "plan": plan,
         "cast": cast,
@@ -88,6 +95,7 @@ def make_config(plan, cast, duration, narration, captions, audio_asset_id):
         "narration": narration,
         "captions": captions or fallback_captions(narration, duration),
         "audio_asset_id": audio_asset_id,
+        "rbxm_animations": rbxm_animations,
     }
 
 
@@ -169,7 +177,22 @@ for _, object in ipairs(map:GetDescendants()) do
     end
 end
 
--- Use the live public Roblox account appearance at runtime, not a blocky approximation.
+-- Load native Roblox locomotion tracks referenced by the username-matched RBXM, then move each NPC through story-world waypoints.
+local function startNativeTrack(animator, animationId, looped, priority)
+    if type(animationId) ~= "string" or animationId == "" then return nil end
+    local animation = Instance.new("Animation")
+    animation.AnimationId = animationId
+    local ok, track = pcall(function() return animator:LoadAnimation(animation) end)
+    if not ok or not track then
+        warn("Could not load native avatar animation " .. animationId .. ": " .. tostring(track))
+        animation:Destroy()
+        return nil
+    end
+    track.Looped = looped
+    track.Priority = priority
+    return track
+end
+
 for _, castMember in ipairs(CONFIG.cast or {}) do
     task.spawn(function()
         local ok, result = pcall(function()
@@ -177,24 +200,83 @@ for _, castMember in ipairs(CONFIG.cast or {}) do
             local avatar = Players:CreateHumanoidModelFromUserIdAsync(userId)
             avatar.Name = castMember.username
             local humanoid = avatar:FindFirstChildOfClass("Humanoid")
-            if humanoid then
-                humanoid.DisplayName = castMember.username .. (castMember.role == "lead" and " • Lead" or "")
-                humanoid.WalkSpeed = 0
-                humanoid.JumpPower = 0
-                humanoid.AutoRotate = false
-            end
+            local p = castMember.position
+            avatar:PivotTo(CFrame.new(p[1], p[2] + 3, p[3]))
+            avatar.Parent = castFolder
+            if not humanoid then return avatar end
+            humanoid.DisplayName = castMember.username .. (castMember.role == "lead" and " • Lead" or "")
+            humanoid.WalkSpeed = 9
+            humanoid.JumpPower = 32
+            humanoid.AutoRotate = true
             for _, descendant in ipairs(avatar:GetDescendants()) do
                 if descendant:IsA("BasePart") then descendant.CanCollide = false end
             end
             local root = avatar:FindFirstChild("HumanoidRootPart")
-            if root then root.Anchored = true end
-            local p = castMember.position
-            avatar:PivotTo(CFrame.new(p[1], p[2] + 3, p[3]))
-            avatar.Parent = castFolder
+            if root then root.Anchored = false end
+
+            local animator = humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator")
+            animator.Parent = humanoid
+            local animationMap = (CONFIG.rbxm_animations or {})[string.lower(castMember.username)] or {}
+            local tracks = {
+                idle = startNativeTrack(animator, animationMap.idle, true, Enum.AnimationPriority.Idle),
+                walk = startNativeTrack(animator, animationMap.walk, true, Enum.AnimationPriority.Movement),
+                run = startNativeTrack(animator, animationMap.run, true, Enum.AnimationPriority.Movement),
+                jump = startNativeTrack(animator, animationMap.jump, false, Enum.AnimationPriority.Action),
+            }
+            local useRbxmLocomotion = tracks.idle and (tracks.walk or tracks.run)
+            if useRbxmLocomotion then
+                -- Avoid competing tracks only when a complete native idle/move set loaded successfully.
+                local defaultAnimate = avatar:FindFirstChild("Animate")
+                if defaultAnimate then defaultAnimate:Destroy() end
+            end
+            local activeTrack
+            local function play(track)
+                if not track or activeTrack == track then return end
+                if activeTrack then activeTrack:Stop(0.2) end
+                activeTrack = track
+                track:Play(0.2)
+            end
+            if useRbxmLocomotion then
+                humanoid.Running:Connect(function(speed)
+                    play(speed > 0.5 and (tracks.walk or tracks.run) or tracks.idle)
+                end)
+                humanoid.Jumping:Connect(function(active)
+                    if active and tracks.jump then play(tracks.jump) end
+                end)
+                play(tracks.idle)
+            else
+                warn("RBXM locomotion tracks were unavailable for " .. castMember.username .. "; keeping Roblox's default Animate controller.")
+            end
+
+            local origin = Vector3.new(p[1], p[2] + 3, p[3])
+            local side = castMember.role == "lead" and 1 or -1
+            local waypoints = {
+                origin + Vector3.new(6 * side, 0, 3),
+                origin + Vector3.new(-4 * side, 0, -7),
+                origin + Vector3.new(2 * side, 0, 5),
+            }
+            task.spawn(function()
+                local deadline = os.clock() + (CONFIG.duration or 60)
+                local index = 1
+                while os.clock() < deadline and avatar.Parent do
+                    local completed, reached = false, false
+                    local connection = humanoid.MoveToFinished:Connect(function(success)
+                        completed, reached = true, success
+                    end)
+                    humanoid:MoveTo(waypoints[index])
+                    local started = os.clock()
+                    while not completed and os.clock() - started < 7 do task.wait(0.1) end
+                    connection:Disconnect()
+                    if not reached then humanoid:MoveTo(origin) end
+                    if castMember.role == "lead" and index == 3 then humanoid.Jump = true end
+                    index = index % #waypoints + 1
+                end
+                humanoid:MoveTo(origin)
+            end)
             return avatar
         end)
         if not ok then
-            warn("Could not load Roblox avatar for " .. castMember.username .. ": " .. tostring(result))
+            warn("Could not load or animate Roblox avatar for " .. castMember.username .. ": " .. tostring(result))
         end
     end)
 end
@@ -601,7 +683,8 @@ def build(args):
     captions = parse_srt(args.srt)
     if not captions:
         captions = fallback_captions(narration, args.duration)
-    config = make_config(plan, cast, args.duration, narration, captions, args.audio_asset_id.strip())
+    avatar_profiles = read_json(args.avatar_profiles, []) if args.avatar_profiles else []
+    config = make_config(plan, cast, args.duration, narration, captions, args.audio_asset_id.strip(), avatar_profiles)
     config_json = json.dumps(config, ensure_ascii=False, separators=(",", ":"))
     server = server_lua(config_json)
     client = client_lua(config_json)
@@ -624,11 +707,11 @@ def build(args):
             "1. Download and unzip `Roblox_Studio_Complete_Package.zip`.\n"
             "2. Play `Roblox_2K_YouTube_Short.mp4` directly. It is rendered automatically by the workflow with authentic Roblox avatars (3D meshes where accessible, otherwise the account's real avatar thumbnail), world, camera tour, narration, and visible burned-in captions; you do not need to open Roblox Studio.\n"
             "3. The ZIP also includes `AI_Creation_Summary.txt`, `AI_Design_and_Tools_Report.pdf`, narration audio/subtitles, generation prompts, and an optional editable `Roblox_Studio_Experience.rbxlx` project.\n"
-            "4. The real Roblox avatar is loaded from the username entered in the workflow. The MP4 is a headless Three.js rendering of the generated world, not a capture from a running Roblox client. Its Rapier simulation adds gravity and world collisions to avatar capsules and AI-marked loose props; eligible small loose props are also unanchored in the editable Roblox place. The MP4 automatically skins fetched avatar OBJ meshes to a procedural R15-style skeleton and animates the arms and legs during walks, turns, and the lead's ending hop; this is Three.js animation, not Roblox's native animation engine. If Roblox denies the mesh, the account's genuine thumbnail is a 2D portrait card and cannot animate limbs.\n\n"
+            "4. The workflow first checks for a flat `users/<username>.rbxm` model and resolves its referenced official Roblox MeshParts/textures for the MP4; the generated ZIP includes the original RBXM. The MP4 is rendered with headless Three.js, not captured from a Roblox client. Rapier simulates gravity and world collisions; the converted RBXM geometry is automatically skinned to procedural R15-style joints and animated in Three.js. The editable Studio project receives native Roblox animation IDs from the RBXM and moves its Humanoid avatars using Roblox animation tracks. The MP4 motion is not Roblox's native Animate runtime.\n\n"
             "## Notes\n\n"
-            "The workflow renders the MP4 automatically using headless Chromium, Three.js, and FFmpeg; neither Roblox Studio nor Blender needs to be installed or launched. The optional `.rbxlx` project remains editable in Studio. Video validation does not claim a Roblox game-client runtime test.\n\n"
-            "## Automatic 3D avatar mesh access\n\n"
-            "The workflow accepts usernames and automatically resolves each one to a numeric ID through Roblox's public Users API; that lookup is keyless, so there is no need to find or enter an ID. Before network mesh lookup it checks the optional repository path `users/<username>/avatar.obj` and its adjacent MTL/texture files. Roblox separately requires authentication for its 3D avatar-mesh thumbnail endpoint. To fetch a full mesh automatically, add the optional GitHub Actions secret `ROBLOX_OPEN_CLOUD_API_KEY` using a Roblox Open Cloud key scoped to Thumbnails read access. Never paste a key into prompts or chat; the workflow passes it only to the mesh-fetch step and never prints it. Without a local OBJ or authorized mesh access, the MP4 uses the account's official thumbnail instead.\n"
+            "The workflow renders the MP4 automatically using headless Chromium, Three.js, and FFmpeg; neither Roblox Studio nor Blender needs to be installed or launched. The optional `.rbxlx` project remains editable in Studio and uses Roblox's native Humanoid animation tracks. Video validation does not claim a Roblox game-client runtime test.\n\n"
+            "## Automatic avatar source lookup\n\n"
+            "The workflow accepts usernames and automatically resolves each one to a numeric ID through Roblox's public Users API; that lookup is keyless. It first looks for the flat repository file `users/<username>.rbxm` and converts that model's MeshPart asset references for rendering. If no RBXM exists, it checks the legacy `users/<username>/avatar.obj` layout, then uses automatic Roblox mesh lookup and the official same-account thumbnail fallback. Roblox separately requires authentication for its avatar-3D endpoint; add the optional GitHub Actions secret `ROBLOX_OPEN_CLOUD_API_KEY` with Thumbnails read access for that fallback path. Never paste a key into prompts or chat. Some referenced RBXM MeshPart assets may also be restricted; when they cannot be fetched, the existing mesh or thumbnail fallback is used when available.\n"
         )
         args.readme.write_text(guide, encoding="utf-8")
     print(f"Created runnable Roblox Studio place {args.output} with {len(plan.get('props', []))} furnished world Parts and {len(cast)} Roblox avatar(s).")
@@ -638,6 +721,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--map", type=Path, required=True)
     parser.add_argument("--cast", type=Path, required=True)
+    parser.add_argument("--avatar-profiles", type=Path, help="resolved avatar mesh and RBXM animation manifest JSON")
     parser.add_argument("--duration", type=int, choices=(30, 45, 60), required=True)
     parser.add_argument("--narration", type=Path)
     parser.add_argument("--srt", type=Path)

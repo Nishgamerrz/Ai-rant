@@ -1,0 +1,9 @@
+{
+  "name": "ai-rant-rbxm-importer",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "lz4js": "0.2.0",
+    "rbxm-parser": "1.1.4"
+  }
+}
