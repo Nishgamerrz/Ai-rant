@@ -212,10 +212,10 @@ jobs:
           done
           curl -fsS http://127.0.0.1:11434/api/tags >/dev/null
           case "$MODEL_QUALITY" in
-            fast) SELECTED_MODEL=qwen3:1.7b; MODEL_THINKING=false ;;
-            medium) SELECTED_MODEL=qwen3:4b; MODEL_THINKING=false ;;
-            hard) SELECTED_MODEL=qwen3:8b; MODEL_THINKING=false ;;
-            smart_11b) SELECTED_MODEL=llama3.2-vision:11b; MODEL_THINKING=false ;;
+            fast) SELECTED_MODEL=qwen3:1.7b; MODEL_THINKING=true ;;
+            medium) SELECTED_MODEL=qwen3:4b; MODEL_THINKING=true ;;
+            hard) SELECTED_MODEL=qwen3:8b; MODEL_THINKING=true ;;
+            smart_11b) SELECTED_MODEL=llama3.2-vision:11b; MODEL_THINKING=true ;;
             animation_best) SELECTED_MODEL=deepseek-r1:8b; MODEL_THINKING=true ;;
             *) echo "Unknown model quality: $MODEL_QUALITY" >&2; exit 1 ;;
           esac
@@ -229,7 +229,7 @@ jobs:
             echo "- Preset: $MODEL_QUALITY"
             echo "- Model: $SELECTED_MODEL"
             echo "- Restored preset cache: ${MODEL_CACHE_HIT:-false}"
-            echo "- Used for story and map/camera planning; thinking mode: $MODEL_THINKING."
+            echo "- Used for story and map/camera planning; thinking mode: $MODEL_THINKING (on for every preset)."
             echo "- Presets: fast qwen3:1.7b, medium qwen3:4b, hard qwen3:8b, smart_11b llama3.2-vision:11b (10.7B), animation_best deepseek-r1:8b."
             echo "- smart_11b is the strongest true 11B option on Ollama: llama3.2-vision:11b (10.7B params, 128K context, ~6 GB Q4_K_M). It is used text-only here for narration and the world/camera/face plan, and it is the model that follows long strict JSON blueprints most reliably at that size."
             echo "- animation_best is the ~5.2 GB, 128K-context, text-only DeepSeek-R1 reasoning model for world/shot planning; it is not a mesh editor. Avatar mesh loading and native Roblox animation retargeting remain unchanged."
