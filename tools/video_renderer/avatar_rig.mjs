@@ -161,7 +161,47 @@ export function buildAvatarRig(THREE, model) {
   const skeleton = new THREE.Skeleton(bones);
   for (const mesh of meshes) mesh.bind(skeleton);
   rigRoot.updateMatrixWorld(true);
-  return { root: rigRoot, bones: byName, meshCount: meshes.length, skeleton };
+  return { root: rigRoot, bones: byName, meshCount: meshes.length, skeleton, meshes, height };
+}
+
+/**
+ * Bounding box of the head geometry in rig space, used to place the animated
+ * face exactly on the front of the head instead of floating or sinking into it.
+ */
+export function measureHeadRegion(THREE, rig) {
+  const headIndex = rig.skeleton.bones.findIndex((bone) => bone.name === 'Head');
+  const fallbackHeight = Number(rig.height) || 6.2;
+  const empty = {
+    center: [0, fallbackHeight * 0.9, 0], size: [fallbackHeight * 0.16, fallbackHeight * 0.16, fallbackHeight * 0.16],
+    maxZ: fallbackHeight * 0.08, minZ: -fallbackHeight * 0.08,
+  };
+  if (headIndex < 0) return empty;
+  const min = new THREE.Vector3(Infinity, Infinity, Infinity);
+  const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+  let counted = 0;
+  const point = new THREE.Vector3();
+  for (const mesh of rig.meshes || []) {
+    const geometry = mesh.geometry;
+    const position = geometry.getAttribute('position');
+    const skinIndex = geometry.getAttribute('skinIndex');
+    if (!position || !skinIndex) continue;
+    const step = Math.max(1, Math.floor(position.count / 6000));
+    for (let vertex = 0; vertex < position.count; vertex += step) {
+      const belongs = skinIndex.getX(vertex) === headIndex || skinIndex.getY(vertex) === headIndex;
+      if (!belongs) continue;
+      point.set(position.getX(vertex), position.getY(vertex), position.getZ(vertex));
+      min.min(point);
+      max.max(point);
+      counted += 1;
+    }
+  }
+  if (!counted || !Number.isFinite(min.x)) return empty;
+  return {
+    center: [(min.x + max.x) / 2, (min.y + max.y) / 2, (min.z + max.z) / 2],
+    size: [max.x - min.x, max.y - min.y, max.z - min.z],
+    maxZ: max.z,
+    minZ: min.z,
+  };
 }
 
 const nativeTrackCache = new WeakMap();

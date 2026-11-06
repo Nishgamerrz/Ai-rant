@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Parse a comma-separated Roblox cast list; first username is the lead character."""
+"""Parse a Roblox cast list; first username is the lead character.
+
+Usernames may be separated by commas, semicolons, spaces or newlines, because the
+"Run workflow" form has a single text box and people paste lists in every style.
+"""
 from __future__ import annotations
 
 import json
@@ -13,7 +17,7 @@ MAX_CHARACTERS = 6
 
 def parse(value: str) -> list[str]:
     names, seen = [], set()
-    for raw in value.split(","):
+    for raw in re.split(r"[,;\s]+", value):
         name = raw.strip()
         if not name:
             continue
@@ -30,7 +34,7 @@ def parse(value: str) -> list[str]:
 
 def main() -> None:
     if len(sys.argv) != 3:
-        raise SystemExit("usage: parse_roblox_usernames.py CSV_USERNAMES OUTPUT.json")
+        raise SystemExit("usage: parse_roblox_usernames.py \"Name1, Name2\" OUTPUT.json")
     try:
         names = parse(sys.argv[1])
     except ValueError as exc:

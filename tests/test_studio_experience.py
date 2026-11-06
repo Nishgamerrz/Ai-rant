@@ -23,9 +23,10 @@ class StudioExperienceTests(unittest.TestCase):
         username_step = workflow.index("- name: Require a username for the avatar cast")
         model_step = workflow.index("- name: Download the selected AI model for story and world/camera planning")
         self.assertLess(username_step, model_step)
-        self.assertIn("checks users/<username>.<supported mesh format> and .rbxm.", workflow)
+        self.assertIn("Usernames, COMMA separated", workflow)
+        self.assertIn("users/<username>.obj/.gltf/.glb/.fbx/.dae/.ply/.stl/.3ds and .rbxm", workflow)
         self.assertIn("users/<username>.obj/.gltf/.glb/.fbx/.dae/.ply/.stl/.3ds", workflow)
-        self.assertIn("Optional theme cue (e.g., daylight); blank = AI derives it from your story.", workflow)
+        self.assertIn("description: 'Theme (optional)'", workflow)
         self.assertIn('"${WORLD_THEME:-AUTO FROM STORY}"', workflow)
         self.assertIn("treat the user's cue as a required design constraint", workflow)
         self.assertIn("daylight cue means a clearly bright, naturally sunlit daytime world", workflow)
@@ -60,7 +61,8 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("hard) SELECTED_MODEL=qwen3:8b", workflow)
         self.assertIn("animation_best) SELECTED_MODEL=deepseek-r1:8b; MODEL_THINKING=true", workflow)
         self.assertIn("OLLAMA_THINKING=$MODEL_THINKING", workflow)
-        self.assertIn("/api/chat", workflow)
+        self.assertIn("ollama_stream.py", workflow)
+        self.assertIn("/api/chat", (ROOT / "tools/ollama_stream.py").read_text(encoding="utf-8"))
         self.assertNotIn("/api/generate", workflow)
         self.assertIn("128K-context, text-only DeepSeek-R1 reasoning model for world/shot planning", workflow)
         self.assertNotIn("qwen3:14b", workflow)
@@ -69,7 +71,8 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("every deliberate snap cut must move both the camera and focus", workflow)
         self.assertIn("only when the user's story/topic explicitly requests that effect", workflow)
         self.assertIn("num_predict:12000", workflow)
-        self.assertIn("--max-time 480", workflow)
+        self.assertIn("--timeout 600", workflow)
+        self.assertIn("dist/web_research.json", workflow)
         self.assertIn("--fallback --theme", workflow)
         self.assertIn("individually named, grid-aligned editable Parts", workflow)
         self.assertIn("Show the public AI build plan and tools", workflow)
@@ -77,11 +80,38 @@ class StudioExperienceTests(unittest.TestCase):
 
     def test_workflow_uses_higher_creative_model_temperatures(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
-        self.assertIn("options:{temperature:0.9, num_predict:1600}", workflow)
-        self.assertIn("options:{temperature:1.5, num_predict:12000}", workflow)
-        self.assertIn("options:{temperature:0.45, num_predict:2000}", workflow)
-        self.assertIn("options:{temperature:0.75, num_predict:12000}", workflow)
-        self.assertIn("options:{temperature:0.6, num_predict:800}", workflow)
+        # The creative temperature is 10x the original presets (clamped to the
+        # highest value the models can still use coherently).
+        self.assertIn("options:{temperature:2.0, top_p:0.99, num_predict:1600}", workflow)
+        self.assertIn("options:{temperature:2.0, top_p:0.99, num_predict:12000}", workflow)
+        self.assertIn("options:{temperature:2.0, top_p:0.99, num_predict:2000}", workflow)
+        self.assertIn("options:{temperature:2.0, top_p:0.99, num_predict:800}", workflow)
+        for legacy in ("temperature:0.9,", "temperature:1.5,", "temperature:0.45,", "temperature:0.75,", "temperature:0.6,"):
+            self.assertNotIn(legacy, workflow)
+
+    def test_workflow_streams_ai_output_and_supports_live_search(self):
+        workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
+        self.assertIn("tools/ollama_stream.py", workflow)
+        self.assertNotIn("curl --fail --silent --show-error --max-time 600", workflow)
+        self.assertGreaterEqual(workflow.count("python tools/ollama_stream.py"), 5)
+        self.assertIn("tools/ai_web_search.py", workflow)
+        self.assertIn('search_queries', workflow)
+        self.assertIn("AI search round", workflow)
+
+    def test_workflow_form_is_compact_and_lists_comma_separated_usernames(self):
+        workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
+        self.assertIn("Usernames, COMMA separated", workflow)
+        for short in ("description: 'Story topic'", "description: 'Length'", "description: 'World size'",
+                      "description: 'AI model'", "description: 'Voice'"):
+            self.assertIn(short, workflow)
+        self.assertNotIn("Real-life story topic for a fully furnished Roblox-themed short video", workflow)
+
+    def test_workflow_plans_face_animation_and_face_cameras(self):
+        workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
+        for expected in ("face_expressions", '"framing":"face"', "face_distance",
+                         "--face-animation always", "--captions dist/narration.srt",
+                         "npm run test:face", "full creative authority"):
+            self.assertIn(expected, workflow)
 
     def test_studio_runtime_uses_native_rbxm_animation_tracks(self):
         from tools.build_studio_experience import make_config, server_lua

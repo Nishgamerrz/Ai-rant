@@ -131,8 +131,11 @@ def main():
     if len(sys.argv) == 6 and not truncate:
         raise SystemExit("the optional arguments must be --truncate TOPIC")
 
+    # Word limits scale with the requested length. The old hard 100-word cap
+    # silently rejected every 90-180 second short, so long videos could never
+    # pass this gate.
     minimum = max(1, int(duration * 1.5))
-    maximum = min(100, int(duration * 5 / 3))
+    maximum = max(24, int(duration * 5 / 3))
     try:
         payload = json.loads(response_path.read_text(encoding="utf-8"))
         text = re.sub(r"\s+", " ", extract_narration(payload)).strip()

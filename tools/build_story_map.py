@@ -74,9 +74,67 @@ def default_camera_shots(duration, usernames=()):
     return [
         {"time": round(duration * index / last, 2), "position": pos, "target": target,
          "transition": "smooth" if index == 0 else mode,
-         "focus_username": usernames[index % len(usernames)] if usernames else "world"}
+         "focus_username": usernames[index % len(usernames)] if usernames else "world",
+         "framing": "face" if usernames and index in {max(1, last // 3), max(2, (2 * last) // 3)} else "auto",
+         "face_distance": 2.45}
         for index, (pos, target, mode) in enumerate(chosen)
     ]
+
+
+FACE_EXPRESSIONS = ("neutral", "happy", "sad", "surprised", "worried", "angry", "excited", "thinking")
+FACE_FRAMINGS = {"auto", "wide", "face", "close", "closeup", "close-up"}
+
+
+def default_face_expressions(duration, usernames=()):
+    """A story-shaped feeling arc: hook, doubt, turn, relief, warm ending.
+
+    The AI is asked to replace this with its own beat-perfect timeline; this
+    default keeps the renderer's faces alive even if the model omits it.
+    """
+    beats = [
+        (0.00, "neutral", 0.65), (0.10, "thinking", 0.70), (0.26, "worried", 0.80),
+        (0.44, "surprised", 0.90), (0.58, "thinking", 0.60), (0.72, "happy", 0.85),
+        (0.86, "excited", 0.90), (0.96, "happy", 1.00),
+    ]
+    lead = usernames[0] if usernames else ""
+    return [
+        {"time": round(duration * fraction, 2), "expression": expression,
+         "intensity": intensity, "username": lead}
+        for fraction, expression, intensity in beats
+    ]
+
+
+def normalize_face_expressions(entries, duration, usernames=()):
+    """Keep the AI's expression switches on a sane, ordered, story-long timeline."""
+    valid_names = {name.casefold(): name for name in usernames}
+    cleaned = {}
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        expression = str(entry.get("expression", "")).strip().lower()
+        if expression not in FACE_EXPRESSIONS:
+            continue
+        time = entry.get("time")
+        if isinstance(time, bool) or not isinstance(time, (int, float)) or not 0 <= float(time) <= duration:
+            continue
+        intensity = entry.get("intensity", 0.8)
+        if isinstance(intensity, bool) or not isinstance(intensity, (int, float)):
+            intensity = 0.8
+        username = str(entry.get("username", "") or "").strip()
+        username = valid_names.get(username.casefold(), "") if username else ""
+        cleaned[round(float(time), 2)] = {
+            "time": round(float(time), 2),
+            "expression": expression,
+            "intensity": round(max(0.0, min(1.0, float(intensity))), 2),
+            "username": username,
+        }
+    timeline = [cleaned[key] for key in sorted(cleaned)]
+    if len(timeline) < 3:
+        return default_face_expressions(duration, usernames)
+    if timeline[0]["time"] > 0.5:
+        timeline.insert(0, {"time": 0.0, "expression": "neutral", "intensity": 0.7,
+                            "username": timeline[0]["username"]})
+    return timeline[:40]
 
 
 def normalize_camera_shots(shots, duration, usernames=()):
@@ -106,12 +164,21 @@ def normalize_camera_shots(shots, duration, usernames=()):
             focus = valid_names[focus.casefold()]
         else:
             focus = usernames[index % len(usernames)] if usernames else "world"
+        framing = str(shot.get("framing", "auto") or "auto").strip().lower()
+        if framing not in FACE_FRAMINGS:
+            framing = "auto"
+        shot_face_distance = shot.get("face_distance", 2.45)
+        if isinstance(shot_face_distance, bool) or not isinstance(shot_face_distance, (int, float)):
+            shot_face_distance = 2.45
+        shot_face_distance = min(4.0, max(1.6, float(shot_face_distance)))
         clean.append({
             "time": round(float(time), 2),
             "position": [round(float(v), 2) for v in pos],
             "target": [round(float(v), 2) for v in target],
             "transition": transition,
             "focus_username": focus,
+            "framing": framing,
+            "face_distance": round(float(shot_face_distance), 2),
         })
         previous = time
     if clean[0]["time"] != 0:
@@ -120,7 +187,15 @@ def normalize_camera_shots(shots, duration, usernames=()):
         last = dict(clean[-1])
         last["time"] = float(duration)
         last["transition"] = "smooth"
+        last["framing"] = "auto"
         clean.append(last)
+    # Roblox-style story shorts always land at least two face close-ups; if the
+    # AI forgot them, promote the two most emotional mid-shots instead.
+    face_indices = [index for index, shot in enumerate(clean) if shot["framing"] == "face"]
+    if duration >= 30 and len(face_indices) < 2 and usernames:
+        for index in (len(clean) // 3, (2 * len(clean)) // 3):
+            if index < len(clean) and clean[index]["focus_username"] != "world":
+                clean[index]["framing"] = "face"
     return clean
 
 
@@ -345,6 +420,7 @@ def procedural_fallback_plan(theme, story, duration, usernames=()):
         "ambient_color": ambient,
         "props": props,
         "camera_shots": default_camera_shots(duration, usernames),
+        "face_expressions": default_face_expressions(duration, usernames),
         "character_placements": default_character_placements(usernames),
     }
 
@@ -764,6 +840,7 @@ def validate(plan, duration=90, usernames=(), min_props=16, visual_request=""):
         "ambient_color": color(plan.get("ambient_color"), [185, 205, 225]),
         "props": clean_props,
         "camera_shots": normalize_camera_shots(plan.get("camera_shots"), duration, usernames),
+        "face_expressions": normalize_face_expressions(plan.get("face_expressions"), duration, usernames),
         "character_placements": normalize_character_placements(plan.get("character_placements"), usernames, visual_request),
     }
 

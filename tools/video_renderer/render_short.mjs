@@ -26,7 +26,13 @@ function argumentsFromProcess(argv) {
     if (!args[key]) throw new Error(`Missing --${key.replaceAll('_', '-')}`);
   }
   args.duration = Number(args.duration);
-  if (![30, 45, 60].includes(args.duration)) throw new Error('Duration must be 30, 45, or 60 seconds.');
+  if (![30, 45, 60, 90, 120, 150, 180].includes(args.duration)) {
+    throw new Error('Duration must be 30, 45, 60, 90, 120, 150, or 180 seconds.');
+  }
+  args.face_animation = args.face_animation ?? 'auto';
+  if (!['auto', 'off', 'always'].includes(args.face_animation)) {
+    throw new Error('--face-animation must be auto, always, or off.');
+  }
   return args;
 }
 
@@ -55,8 +61,10 @@ function buildHtml(data) {
   import { PLYLoader } from '/modules/three/examples/jsm/loaders/PLYLoader.js';
   import { STLLoader } from '/modules/three/examples/jsm/loaders/STLLoader.js';
   import { TDSLoader } from '/modules/three/examples/jsm/loaders/TDSLoader.js';
-  import { animateAvatarRig, applyRobloxAnimationRig, buildAvatarRig } from '/avatar_rig.mjs';
-  import { chooseSafeCamera } from '/scene_camera.mjs';
+  import { animateAvatarRig, applyRobloxAnimationRig, buildAvatarRig, measureHeadRegion } from '/avatar_rig.mjs';
+  import { chooseFaceCamera, chooseSafeCamera } from '/scene_camera.mjs';
+  import { applyFaceHeadMotion, blinkSchedule, createFaceRig, defaultFaceTimeline, faceStateAt,
+    normalizeExpressionTimeline, parseSrt, speechPulses, syntheticPulses } from '/face_rig.mjs';
   const DATA=JSON.parse(document.getElementById('render-data').textContent);
   await RAPIER.init();
   const physicsWorld=new RAPIER.World({x:0,y:-18,z:0});physicsWorld.timestep=1/60;
@@ -279,11 +287,62 @@ function buildHtml(data) {
       }
     }
   }
+  // Animated faces. The AI world plan owns the expression timeline, so a cut to a
+  // new feeling happens at the exact second the AI chose, and the mouth follows
+  // the narration captions the narration step already produced.
+  const captions = parseSrt(DATA.captions || '');
+  const expressionTimeline = normalizeExpressionTimeline(
+    DATA.plan.face_expressions, DATA.duration, DATA.profiles.map(profile => profile.username));
+  const fallbackTimeline = expressionTimeline.length
+    ? expressionTimeline : defaultFaceTimeline(DATA.duration);
+  const faceSpeechPulses = captions.length ? speechPulses(captions) : syntheticPulses(DATA.duration, 11);
+  window.facePlanSummary = {
+    source: expressionTimeline.length ? 'ai-timeline' : 'generated-fallback',
+    expressionSwitches: fallbackTimeline.length,
+    captionCues: captions.length,
+    mouthPulses: faceSpeechPulses.length,
+  };
+  function attachAnimatedFace(head,rig,index,frontDirection,mode){
+    if(!head||mode==='off')return null;
+    const region=measureHeadRegion(THREE,rig);
+    const width=Math.max(.42,Math.min(1.5,region.size[0]*.86));
+    const height=Math.max(.3,Math.min(1.1,region.size[1]*.68));
+    const frontSign=Number(frontDirection?.[2]??1)>=0?1:-1;
+    // The rig is measured at rest, so the head joint's world position is its
+    // rig-space origin and the face anchor is a plain offset from it. Doing this
+    // without worldToLocal keeps the face glued on even if matrices are stale.
+    const headOrigin=head.getWorldPosition(new THREE.Vector3());
+    const anchor=new THREE.Vector3(
+      region.center[0]-headOrigin.x,
+      region.center[1]-headOrigin.y,
+      (frontSign>=0?region.maxZ+.012:region.minZ-.012)-headOrigin.z);
+    const face=createFaceRig(THREE,{headBone:head,width,height,seed:index*23+7});
+    face.mesh.position.copy(anchor);
+    if(frontSign<0)face.mesh.rotation.y=Math.PI;
+    head.add(face.mesh);
+    return face;
+  }
+  function updateActorFace(actor,t){
+    if(!actor.face)return;
+    const state=faceStateAt(t,{
+      timeline:fallbackTimeline,
+      username:actor.username,
+      pulses:faceSpeechPulses,
+      blinks:actor.blinks,
+      seed:actor.face.seed,
+      speaking:true,
+    });
+    actor.face.update(state);
+    if(actor.rig)applyFaceHeadMotion(THREE,actor.rig,state);
+    actor.faceState=state;
+  }
   function registerActor(root,point,index,placement,username,rig=null,animationClips=null,animationScale=1,frontDirection=[0,0,1]){
     const lead=placement?.role==='lead'||index===0;
     addRequestedAvatarEffects(root,rig,placement?.visual_effects,frontDirection);
+    const face=rig?.Head?attachAnimatedFace(rig.Head,rig,index,frontDirection,DATA.faceAnimation):null;
     actors.push({root,username:String(username||''),baseX:Number(point[0]),baseY:Number(point[1]),baseZ:Number(point[2]),
-      phase:index*1.73,lead,stride:lead?2.1:1.15,rig,animationClips,animationScale});
+      phase:index*1.73,lead,stride:lead?2.1:1.15,rig,animationClips,animationScale,face,
+      blinks:blinkSchedule(index*31+5,DATA.duration+4,lead?1.15:.9)});
   }
   async function loadAvatar(profile,index){
     const username=profile.username,place=placements.get(username.toLowerCase());
@@ -380,6 +439,22 @@ function buildHtml(data) {
     const targetB=focusPoint(actorFor(b,Math.min(index+1,shots.length-1)),b);
     const target=targetA.lerp(targetB,alpha).lerp(planned,0.2);
     const desired=mix('position');
+    // Roblox story shorts cut to the character's face for the emotional beat.
+    // The AI sets framing:"face" on those shots and the camera closes right in.
+    const framingA=String(a.framing||a.shot_type||'auto').toLowerCase();
+    const framingB=String(b.framing||b.shot_type||'auto').toLowerCase();
+    const useFace=alpha>=0.5?['face','close','closeup','close-up'].includes(framingB)
+                          :['face','close','closeup','close-up'].includes(framingA);
+    const focusActor=alpha>=0.5?actorFor(b,Math.min(index+1,shots.length-1)):actorFor(a,index);
+    if(useFace&&focusActor){
+      const head=focusActor.rig?.Head
+        ? focusActor.rig.Head.getWorldPosition(new THREE.Vector3())
+        : new THREE.Vector3(focusActor.root.position.x,focusActor.root.position.y+5.35,focusActor.root.position.z);
+      const faceDistance=Math.max(2.0,Math.min(3.4,Number(a.face_distance||b.face_distance||2.45)));
+      const faceView=chooseFaceCamera(head.toArray(),desired.toArray(),cameraBlockers,faceDistance);
+      camera.position.set(faceView[0],faceView[1],faceView[2]);camera.lookAt(head);camera.updateMatrixWorld(true);
+      return;
+    }
     const preferred= index===0 ? [23,48] : (index>=shots.length-1 ? [14,28] : [17,36]);
     const safe=chooseSafeCamera(target.toArray(),desired.toArray(),cameraBlockers,preferred[0],preferred[1]);
     camera.position.set(safe[0],safe[1],safe[2]);camera.lookAt(target);camera.updateMatrixWorld(true);
@@ -411,9 +486,16 @@ function buildHtml(data) {
       actor.root.rotation.z=0;
       if(actor.rig)animateAvatarRig(actor.rig,t,actor.phase,jumpPose);
     }
+    updateActorFace(actor,t);
+    actor.root.updateMatrixWorld(true);
   }
   window.sceneReady=avatarPromise.then(()=>{
     window.avatarRigSummary={total:actors.length,rigged:actors.filter(actor=>actor.rig).length,nativeAnimations:actors.filter(actor=>actor.rig&&actor.animationClips?.walk).length};
+    window.faceRigSummary={faces:actors.filter(actor=>actor.face).length,
+      expressionSwitches:fallbackTimeline.length,
+      expressionSource:expressionTimeline.length?'ai-timeline':'generated-fallback',
+      faceShots:(DATA.plan.camera_shots||[]).filter(shot=>['face','close','closeup','close-up'].includes(String(shot.framing||shot.shot_type||'').toLowerCase())).length,
+      captions:captions.length};
     renderer.compile(scene,camera);return true;
   });
   window.renderAt=async(t)=>{
@@ -442,6 +524,7 @@ function createStaticServer(html, avatarRoot) {
     if (pathname === '/') { response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); response.end(html); return; }
     if (pathname === '/avatar_rig.mjs') { serveFile(response, join(ROOT, 'avatar_rig.mjs')); return; }
     if (pathname === '/scene_camera.mjs') { serveFile(response, join(ROOT, 'scene_camera.mjs')); return; }
+    if (pathname === '/face_rig.mjs') { serveFile(response, join(ROOT, 'face_rig.mjs')); return; }
     if (pathname.startsWith('/modules/')) {
       const path = resolve(ROOT, 'node_modules', normalize(pathname.slice('/modules/'.length)));
       if (!path.startsWith(resolve(ROOT, 'node_modules') + '/')) { response.writeHead(403); response.end(); return; }
@@ -478,7 +561,11 @@ async function main() {
     }
     return p;
   });
-  const data={plan,profiles:orderedProfiles,duration:args.duration};
+  // Caption timings drive the mouth so lip movement lands on the spoken words.
+  const captionCues = args.captions && existsSync(args.captions)
+    ? readFileSync(args.captions, 'utf8') : '';
+  const data={plan,profiles:orderedProfiles,duration:args.duration,
+    captions:captionCues,faceAnimation:args.face_animation};
   const server=createStaticServer(buildHtml(data),resolve(ASSET_ROOT,'dist/avatar-assets'));
   await new Promise((ok,fail)=>{server.once('error',fail);server.listen(0,'127.0.0.1',ok);});
   const address=server.address();
@@ -494,10 +581,15 @@ async function main() {
     if(!ready)throw new Error('3D map and actual Roblox avatars failed to load.');
     const simulation=await page.evaluate(()=>window.physicsSummary);
     const avatarRigging=await page.evaluate(()=>window.avatarRigSummary);
+    const faces=await page.evaluate(()=>window.faceRigSummary);
+    console.log(`Animated faces: ${faces.faces}/${avatarRigging.total} avatar(s), ${faces.expressionSwitches} AI-scheduled expression switch(es) (${faces.expressionSource}), ${faces.faceShots} face close-up shot(s), ${faces.captions} caption cue(s) driving mouth movement.`);
     console.log(`Rapier simulation ready for ${simulation.dynamicProps} dynamic AI prop(s) and ${simulation.staticProps} static world collider(s); ${orderedProfiles.length} authentic avatar(s) use collision-free scripted paths.`);
     console.log(`Avatar sources: ${orderedProfiles.map(profile => `${profile.username}=${profile.model_source || (profile.thumbnail_ready ? 'official-thumbnail-fallback' : 'unknown')}`).join(', ')}.`);
     console.log(`Automatic avatar limb rigs: ${avatarRigging.rigged}/${avatarRigging.total} mesh(es) skinned to R15-style joints.`);
     console.log(`Native Roblox walk clips retargeted: ${avatarRigging.nativeAnimations}/${avatarRigging.total} avatar(s).`);
+    if (args.face_animation !== 'off' && faces.faces !== avatarRigging.total) {
+      throw new Error(`Face animation blocked: only ${faces.faces}/${avatarRigging.total} avatars received an animated face.`);
+    }
     if (avatarRigging.rigged !== avatarRigging.total) {
       throw new Error(`Moving-limb MP4 blocked: only ${avatarRigging.rigged}/${avatarRigging.total} avatars loaded as 3D meshes. A 2D thumbnail cannot animate limbs. Make the username-matched RBXM MeshParts or an authorized Roblox 3D avatar mesh accessible, then rerun; no static-limb MP4 will be packaged.`);
     }
