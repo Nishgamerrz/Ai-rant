@@ -12,8 +12,10 @@
 export const EXPRESSIONS = ['neutral', 'happy', 'sad', 'surprised', 'worried', 'angry', 'excited', 'thinking'];
 
 export const DEFAULT_PALETTE = {
-  line: [44, 34, 34],
-  mouth: [92, 40, 44],
+  line: [42, 32, 30],
+  sclera: [252, 250, 244],
+  pupil: [34, 28, 34],
+  mouth: [86, 52, 50],
   tongue: [214, 118, 128],
   teeth: [250, 250, 250],
   glint: [255, 255, 255],
@@ -226,84 +228,119 @@ function rgba(color, alpha = 1) {
  */
 export function drawFace(ctx, state, palette = DEFAULT_PALETTE, size = 512) {
   const line = palette.line || DEFAULT_PALETTE.line;
+  const sclera = palette.sclera || DEFAULT_PALETTE.sclera;
+  const pupil = palette.pupil || DEFAULT_PALETTE.pupil;
+  const mouthColor = palette.mouth || DEFAULT_PALETTE.mouth;
   ctx.clearRect(0, 0, size, size);
-  const eyeY = size * 0.44;
-  const eyeOffset = size * 0.155;
-  const openness = 1 - state.blink;
-  const eyeHeight = size * (0.075 + state.eyeSquint * 0.03 + (state.expression === 'surprised' ? 0.02 : 0)) * Math.max(0.04, openness);
-  const eyeWidth = size * 0.075;
+
+  const centerX = size / 2;
+  const eyeY = size * 0.43;
+  const eyeOffset = size * 0.16;
+  const openness = Math.max(0, 1 - state.blink);
+  const squint = state.eyeSquint;
+  const wide = state.expression === 'surprised' ? 1.1 : 1;
+  const eyeWidth = size * (0.085 - Math.max(0, squint) * 0.018) * wide;
+  // Positive squint = happy/angry narrowing, negative = wide surprised eyes.
+  const eyeHeight = size * (0.092 - squint * 0.024) * wide * Math.max(0.06, openness);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
 
   // Blush gives the cheerful beats a readable, friendly face.
   if (state.cheek > 0.05) {
-    ctx.fillStyle = rgba(palette.blush || DEFAULT_PALETTE.blush, 0.32 * state.cheek);
+    ctx.fillStyle = rgba(palette.blush || DEFAULT_PALETTE.blush, 0.3 * state.cheek);
     for (const side of [-1, 1]) {
       ctx.beginPath();
-      ctx.ellipse(size / 2 + side * size * 0.27, size * 0.56, size * 0.075, size * 0.045, 0, 0, Math.PI * 2);
+      ctx.ellipse(centerX + side * size * 0.28, size * 0.565, size * 0.078, size * 0.042, 0, 0, Math.PI * 2);
       ctx.fill();
     }
   }
 
   for (const side of [-1, 1]) {
-    const cx = size / 2 + side * eyeOffset + state.gaze[0] * size * 0.03;
-    const cy = eyeY + state.gaze[1] * size * 0.02;
+    const cx = centerX + side * eyeOffset + state.gaze[0] * size * 0.035;
+    const cy = eyeY + state.gaze[1] * size * 0.022;
     if (openness < 0.16) {
+      // Closed/blinking eye: a soft curved lid line, like a real blink frame.
       ctx.strokeStyle = rgba(line, 0.95);
-      ctx.lineWidth = size * 0.014;
-      ctx.lineCap = 'round';
+      ctx.lineWidth = size * 0.017;
       ctx.beginPath();
       ctx.moveTo(cx - eyeWidth, cy);
-      ctx.lineTo(cx + eyeWidth, cy);
+      ctx.quadraticCurveTo(cx, cy + eyeHeight * 0.35, cx + eyeWidth, cy);
       ctx.stroke();
     } else {
-      ctx.fillStyle = rgba(line, 0.95);
+      // White eye with a dark pupil and glint, matching Roblox story-short faces.
+      ctx.fillStyle = rgba(sclera, 1);
       ctx.beginPath();
       ctx.ellipse(cx, cy, eyeWidth, eyeHeight, 0, 0, Math.PI * 2);
       ctx.fill();
+      ctx.strokeStyle = rgba(line, 0.9);
+      ctx.lineWidth = size * 0.012;
+      ctx.stroke();
+      const pupilRadius = Math.min(eyeWidth, eyeHeight) * 0.62;
+      const px = cx + state.gaze[0] * eyeWidth * 0.5;
+      const py = cy + state.gaze[1] * eyeHeight * 0.45;
+      ctx.fillStyle = rgba(pupil, 1);
+      ctx.beginPath();
+      ctx.ellipse(px, py, pupilRadius * 0.86, pupilRadius, 0, 0, Math.PI * 2);
+      ctx.fill();
       if (eyeHeight > size * 0.035) {
-        ctx.fillStyle = rgba(palette.glint || DEFAULT_PALETTE.glint, 0.92);
+        ctx.fillStyle = rgba(palette.glint || DEFAULT_PALETTE.glint, 0.95);
         ctx.beginPath();
-        ctx.ellipse(cx - eyeWidth * 0.3, cy - eyeHeight * 0.35, eyeWidth * 0.26, eyeHeight * 0.24, 0, 0, Math.PI * 2);
+        ctx.ellipse(px - pupilRadius * 0.3, py - pupilRadius * 0.35,
+          pupilRadius * 0.28, pupilRadius * 0.24, 0, 0, Math.PI * 2);
         ctx.fill();
       }
     }
-    // Eyebrows carry most of the expression change, so their angle matters.
-    const browY = eyeY - size * 0.115 - state.brow * size * 0.04;
-    const inner = cx - side * eyeWidth * 1.05;
-    const outer = cx + side * eyeWidth * 1.15;
-    ctx.strokeStyle = rgba(line, 0.9);
-    ctx.lineWidth = size * 0.016;
-    ctx.lineCap = 'round';
+    // Thick, angled eyebrows: they carry most of the expression change.
+    const browLift = state.brow * size * 0.045;
+    const browY = eyeY - size * 0.135 - browLift;
+    const innerX = cx - side * eyeWidth * 1.02;
+    const outerX = cx + side * eyeWidth * 1.18;
+    const innerY = browY - state.brow * size * 0.034;
+    const outerY = browY + state.brow * size * 0.012;
+    ctx.strokeStyle = rgba(line, 0.95);
+    ctx.lineWidth = size * 0.026;
     ctx.beginPath();
-    ctx.moveTo(outer, browY + state.brow * size * 0.006);
-    ctx.lineTo(inner, browY - state.brow * size * 0.028);
+    ctx.moveTo(outerX, outerY);
+    ctx.quadraticCurveTo((innerX + outerX) / 2, Math.min(innerY, outerY) - size * 0.008, innerX, innerY);
     ctx.stroke();
   }
 
-  // Mouth: open for speech, curved by the current expression.
-  const mouthY = size * 0.68;
-  const halfWidth = size * 0.105 * state.mouthWide;
-  const openHeight = size * (0.012 + state.mouth * 0.095);
+  // Mouth: a thin, clean line when closed (the reference look), opening only
+  // while words are spoken. The path is rebuilt after clipping so no stray
+  // outline from the inner-mouth shapes is ever stroked.
+  const mouthY = size * 0.665;
+  const halfWidth = size * 0.093 * state.mouthWide;
+  const openHeight = size * (0.012 + state.mouth * 0.072);
   const curve = state.smile * size * 0.05;
-  ctx.beginPath();
-  ctx.moveTo(size / 2 - halfWidth, mouthY);
-  ctx.quadraticCurveTo(size / 2, mouthY + curve * 2 - openHeight * 0.9, size / 2 + halfWidth, mouthY);
-  ctx.quadraticCurveTo(size / 2, mouthY + openHeight + Math.max(0, curve) * 0.4, size / 2 - halfWidth, mouthY);
-  ctx.closePath();
-  ctx.fillStyle = rgba(palette.mouth || DEFAULT_PALETTE.mouth, 0.95);
-  ctx.fill();
-  if (openHeight > size * 0.03) {
+  const mouthPath = () => {
+    ctx.beginPath();
+    ctx.moveTo(centerX - halfWidth, mouthY - curve * 0.35);
+    ctx.quadraticCurveTo(centerX, mouthY + curve * 2 - openHeight * 0.25, centerX + halfWidth, mouthY - curve * 0.35);
+    if (openHeight > size * 0.018) {
+      ctx.quadraticCurveTo(centerX, mouthY + openHeight + Math.max(0, curve) * 0.6,
+        centerX - halfWidth, mouthY - curve * 0.35);
+      ctx.closePath();
+    }
+  };
+  mouthPath();
+  if (openHeight > size * 0.018) {
+    ctx.fillStyle = rgba(palette.mouth || DEFAULT_PALETTE.mouth, 0.96);
+    ctx.fill();
     ctx.save();
     ctx.clip();
-    ctx.fillStyle = rgba(palette.tongue || DEFAULT_PALETTE.tongue, 0.85);
+    ctx.fillStyle = rgba(palette.tongue || DEFAULT_PALETTE.tongue, 0.55);
     ctx.beginPath();
-    ctx.ellipse(size / 2, mouthY + openHeight * 0.95, halfWidth * 0.62, openHeight * 0.42, 0, 0, Math.PI * 2);
+    ctx.ellipse(centerX, mouthY + openHeight * 0.98, halfWidth * 0.55, openHeight * 0.36, 0, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = rgba(palette.teeth || DEFAULT_PALETTE.teeth, 0.95);
-    ctx.fillRect(size / 2 - halfWidth, mouthY - openHeight, halfWidth * 2, openHeight * 0.28);
+    if (state.expression === 'happy' || state.expression === 'excited') {
+      ctx.fillStyle = rgba(palette.teeth || DEFAULT_PALETTE.teeth, 0.92);
+      ctx.fillRect(centerX - halfWidth, mouthY - openHeight * 0.6, halfWidth * 2, openHeight * 0.26);
+    }
     ctx.restore();
+    mouthPath();
   }
-  ctx.strokeStyle = rgba(line, 0.6);
-  ctx.lineWidth = size * 0.007;
+  ctx.strokeStyle = rgba(mouthColor, 0.95);
+  ctx.lineWidth = size * (openHeight > size * 0.018 ? 0.006 : 0.014);
   ctx.stroke();
   return state;
 }

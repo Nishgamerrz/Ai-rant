@@ -89,13 +89,26 @@ function recordingContext() {
   };
 }
 const painter = recordingContext();
-drawFace(painter, afterSwitch, undefined, 512);
+drawFace(painter, { ...afterSwitch, mouth: 0.7 }, undefined, 512);
 assert.ok(painter.calls.length > 30, 'painting a face must draw eyes, brows and a mouth');
 assert.ok(painter.calls.some(([name]) => name === 'quadraticCurveTo'), 'the mouth must be curved, not a box');
-const closedEyes = recordingContext();
-drawFace(closedEyes, { ...afterSwitch, blink: 1, mouth: 0 }, undefined, 512);
-assert.ok(!closedEyes.calls.some(([name]) => name === 'strokeText' || name === 'fillText'),
+const styles = painter.calls.filter(([name]) => name === 'fillStyle').map(([, value]) => value);
+assert.ok(styles.some((value) => value.includes('252,250,244')),
+  'eyes must be painted with white sclera like the Roblox story-short reference');
+assert.ok(styles.some((value) => value.includes('34,28,34')), 'eyes must have a dark pupil');
+assert.ok(painter.calls.filter(([name]) => name === 'ellipse').length >= 6,
+  'two sclera, two pupils and two eyebrows worth of shapes must be drawn');
+const closedMouth = recordingContext();
+drawFace(closedMouth, { ...afterSwitch, mouth: 0, smile: 0.6 }, undefined, 512);
+assert.ok(closedMouth.calls.some(([name]) => name === 'stroke'),
+  'a closed mouth must be a clean stroked line');
+const blinking = recordingContext();
+drawFace(blinking, { ...afterSwitch, blink: 1, mouth: 0 }, undefined, 512);
+assert.ok(!blinking.calls.some(([name]) => name === 'strokeText' || name === 'fillText'),
   'faces must never render text');
+const scleraWhileBlinking = blinking.calls.filter(([name, value]) => name === 'fillStyle'
+  && String(value).includes('252,250,244'));
+assert.equal(scleraWhileBlinking.length, 0, 'a blink must not paint open sclera');
 
 // --- canvas-backed face mesh -------------------------------------------------
 function fakeDocument() {
