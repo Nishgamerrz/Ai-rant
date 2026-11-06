@@ -25,6 +25,10 @@ def clean(text: str) -> str:
     return " ".join(str(text).split())[-PREVIEW:]
 
 
+class ThinkingUnsupported(Exception):
+    """Raised when the selected model has no reasoning channel at all."""
+
+
 def stream(request: dict, url: str, label: str, timeout: float, quiet: bool) -> dict:
     request = {**request, "stream": True}
     payload = json.dumps(request).encode("utf-8")
@@ -34,7 +38,14 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool) -> 
     started = time.time()
     last_report = 0.0
     tokens = 0
-    with urllib.request.urlopen(http, timeout=timeout) as response:
+    try:
+        handle = urllib.request.urlopen(http, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")
+        if exc.code == 400 and "think" in detail.lower():
+            raise ThinkingUnsupported(detail.strip()[:300]) from exc
+        raise
+    with handle as response:
         for raw in response:
             line = raw.decode("utf-8", "replace").strip()
             if not line:
@@ -96,11 +107,22 @@ def main() -> None:
     args = parser.parse_args()
 
     request = json.loads(args.request.read_text(encoding="utf-8"))
+    thinking_on = bool(request.get("think"))
     print(f"[{args.label}] sending {request.get('model', 'model')} request "
-          f"(temperature {request.get('options', {}).get('temperature', 'default')}); "
-          f"live thinking is printed below.", flush=True)
+          f"(temperature {request.get('options', {}).get('temperature', 'default')}, "
+          f"thinking {'on' if thinking_on else 'off'}); live thinking is printed below.", flush=True)
     try:
-        result = stream(request, args.url, args.label, args.timeout, args.quiet)
+        try:
+            result = stream(request, args.url, args.label, args.timeout, args.quiet)
+        except ThinkingUnsupported as exc:
+            # Thinking is requested for every preset, but a few architectures
+            # (for example the mllama vision models) have no reasoning channel.
+            # Answer normally instead of failing the whole run.
+            print(f"[{args.label}] this model has no thinking channel ({exc}); "
+                  f"answering without reasoning tokens.", flush=True)
+            request = {**request, "think": False}
+            result = stream(request, args.url, args.label, args.timeout, args.quiet)
+            result["thinking_unsupported"] = True
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         print(f"[{args.label}] streaming request failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc

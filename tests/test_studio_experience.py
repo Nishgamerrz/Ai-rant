@@ -85,7 +85,7 @@ class StudioExperienceTests(unittest.TestCase):
         order = [line.strip().strip("- ") for line in options.splitlines() if line.strip().startswith("- ")]
         self.assertEqual(order, ["fast", "medium", "hard", "smart_11b", "animation_best"],
                          "the 11B preset must be listed directly under hard")
-        self.assertIn("smart_11b) SELECTED_MODEL=llama3.2-vision:11b; MODEL_THINKING=false", workflow)
+        self.assertIn("smart_11b) SELECTED_MODEL=llama3.2-vision:11b; MODEL_THINKING=true", workflow)
         self.assertIn("'llama32-vision-11b-v1'", workflow)
         # The 11B weights need the large-model disk gate, not the small-model one.
         gate = workflow[workflow.index("Reclaim runner disk space"):workflow.index("cache_restore_allowed=$CACHE_RESTORE_ALLOWED")]
@@ -106,6 +106,25 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("options:{temperature:2.0, top_p:0.99, num_predict:800}", workflow)
         for legacy in ("temperature:0.9,", "temperature:1.5,", "temperature:0.45,", "temperature:0.75,", "temperature:0.6,"):
             self.assertNotIn(legacy, workflow)
+
+    def test_every_preset_runs_with_thinking_enabled(self):
+        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+        case_block = workflow[workflow.index('case "$MODEL_QUALITY" in'):]
+        case_block = case_block[:case_block.index("esac")]
+        selections = [line.strip() for line in case_block.splitlines() if "SELECTED_MODEL=" in line]
+        self.assertEqual(len(selections), 5, "all five presets must be mapped")
+        for line in selections:
+            self.assertIn("MODEL_THINKING=true", line, f"thinking must be on for: {line}")
+        self.assertNotIn("MODEL_THINKING=false", case_block)
+        self.assertIn("thinking mode: $MODEL_THINKING (on for every preset)", workflow)
+
+    def test_stream_helper_survives_models_without_a_thinking_channel(self):
+        helper = (ROOT / "tools" / "ollama_stream.py").read_text(encoding="utf-8")
+        self.assertIn("class ThinkingUnsupported", helper)
+        self.assertIn('"think": False', helper)
+        self.assertIn("thinking_unsupported", helper)
+        # A model that rejects thinking must still produce a usable answer file.
+        self.assertIn("except ThinkingUnsupported", helper)
 
     def test_workflow_streams_ai_output_and_supports_live_search(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
