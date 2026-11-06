@@ -80,32 +80,53 @@ export function buildAvatarRig(THREE, model) {
     return ['Hips', 'Spine', 'Chest', 'Neck'];
   }
 
+  // Roblox avatars are made of rigid parts, so skinning must be rigid too.
+  // Blending one vertex across two bones (the previous behaviour) is what made
+  // arms and legs visibly stretch like rubber when a joint rotated. Every
+  // vertex now follows exactly one bone at full weight, and the bone is chosen
+  // by distance to that bone's *segment* (origin -> child), which keeps the
+  // forearm/hand/calf bindings anatomically correct.
+  const boneSegments = bones.map((bone) => {
+    const start = bone.getWorldPosition(new THREE.Vector3());
+    const child = bone.children.find((item) => item.isBone);
+    const end = child ? child.getWorldPosition(new THREE.Vector3()) : start.clone();
+    return { name: bone.name, start, end };
+  });
+  const segmentsByName = new Map(boneSegments.map((segment) => [segment.name, segment]));
+
+  function distanceToSegment(point, segment) {
+    const ax = segment.start.x, ay = segment.start.y, az = segment.start.z;
+    const bx = segment.end.x - ax, by = segment.end.y - ay, bz = segment.end.z - az;
+    const lengthSq = bx * bx + by * by + bz * bz;
+    const t = lengthSq > 1e-9
+      ? Math.max(0, Math.min(1, ((point.x - ax) * bx + (point.y - ay) * by + (point.z - az) * bz) / lengthSq))
+      : 0;
+    const dx = point.x - (ax + bx * t), dy = point.y - (ay + by * t), dz = point.z - (az + bz * t);
+    return Math.sqrt(dx * dx + dy * dy + dz * dz);
+  }
+
   function addSkinWeights(geometry) {
     const position = geometry.getAttribute('position');
     if (!position?.count) throw new Error('Avatar OBJ contains an empty mesh.');
     const indices = new Uint16Array(position.count * 4);
     const weights = new Float32Array(position.count * 4);
+    const point = new THREE.Vector3();
     for (let vertex = 0; vertex < position.count; vertex += 1) {
-      const x = position.getX(vertex), y = position.getY(vertex), z = position.getZ(vertex);
-      const nearest = candidatesFor(x, y)
-        .map((name) => {
-          const point = bonePositions.get(name);
-          const dx = x - point[0], dy = y - point[1], dz = z - point[2];
-          return { index: boneIndices.get(name), distance: Math.sqrt(dx * dx + dy * dy + dz * dz) };
-        })
-        .sort((a, b) => a.distance - b.distance)
-        .slice(0, 2);
-      const first = nearest[0], second = nearest[1];
-      const firstInfluence = 1 / ((first.distance + 0.08) ** 4);
-      const secondInfluence = second ? 1 / ((second.distance + 0.08) ** 4) : 0;
-      const total = firstInfluence + secondInfluence;
-      const offset = vertex * 4;
-      indices[offset] = first.index;
-      weights[offset] = firstInfluence / total;
-      if (second) {
-        indices[offset + 1] = second.index;
-        weights[offset + 1] = secondInfluence / total;
+      point.set(position.getX(vertex), position.getY(vertex), position.getZ(vertex));
+      let bestIndex = 0;
+      let bestDistance = Infinity;
+      for (const name of candidatesFor(point.x, point.y)) {
+        const segment = segmentsByName.get(name);
+        if (!segment) continue;
+        const distance = distanceToSegment(point, segment);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestIndex = boneIndices.get(name);
+        }
       }
+      const offset = vertex * 4;
+      indices[offset] = bestIndex;
+      weights[offset] = 1;
     }
     geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(indices, 4));
     geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(weights, 4));
@@ -218,9 +239,18 @@ export function applyRobloxAnimationRig(THREE, bones, clip, time, loop = true, p
     const alpha=span>1e-8?clamp((sampleTime-a.time)/span,0,1):0;
     const rotation=a.rotation.clone().slerp(b.rotation,alpha);
     const weight=a.weight+(b.weight-a.weight)*alpha;
-    const position=a.position.clone().lerp(b.position,alpha).multiplyScalar(positionScale*weight);
+    // Roblox Animate Poses are rotations. Replaying their CFrame position deltas
+    // on this generated skeleton pushed limb bones away from their sockets,
+    // which is what looked like stretching arms. Only the root/hip may translate,
+    // and even then by a small, clamped amount so the body never detaches.
     bone.quaternion.identity().slerp(rotation,weight);
-    bone.position.add(position);
+    if(boneName==='Root'||boneName==='Hips'){
+      const offset=a.position.clone().lerp(b.position,alpha).multiplyScalar(positionScale*weight);
+      offset.x=clamp(offset.x,-0.12,0.12);
+      offset.z=clamp(offset.z,-0.12,0.12);
+      offset.y=clamp(offset.y,-0.18,0.18);
+      bone.position.add(offset);
+    }
     applied+=1;
   }
   return applied;

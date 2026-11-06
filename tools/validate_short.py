@@ -70,7 +70,7 @@ def main() -> None:
     parser.add_argument("--characters", type=Path)
     parser.add_argument("--profiles", type=Path)
     parser.add_argument("--map-plan", type=Path)
-    parser.add_argument("--duration", required=True, type=int, choices=(30, 45, 60))
+    parser.add_argument("--duration", required=True, type=int, choices=(30, 45, 60, 90, 120, 150, 180))
     args = parser.parse_args()
 
     for label, path in (("final MP4", args.video), ("silent render", args.silent_video),
@@ -114,12 +114,18 @@ def main() -> None:
 
     narration = args.narration.read_text(encoding="utf-8").strip()
     word_count = len(WORD_RE.findall(narration))
-    min_words = max(1, int(args.duration * 1.5))
-    max_words = min(100, int(args.duration * 5 / 3))
+    min_words = max(1, int(args.duration * 1.4))
+    max_words = int(args.duration * 1.8)
     if not min_words <= word_count <= max_words:
         fail(f"narration has {word_count} words; target for {args.duration}s is {min_words}–{max_words}")
     if META_RE.search(narration):
         fail("narration contains forbidden AI/game meta-talk")
+    if args.characters and args.characters.exists():
+        cast = json.loads(args.characters.read_text(encoding="utf-8"))
+        spoken = {word.casefold() for word in WORD_RE.findall(narration)}
+        leaked = sorted({name for name in cast if isinstance(name, str) and name.casefold() in spoken})
+        if leaked:
+            fail("narration reads out selected usernames: " + ", ".join(leaked))
 
     captions = args.captions.read_text(encoding="utf-8-sig")
     cues = list(SRT_RE.finditer(captions))

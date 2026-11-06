@@ -30,9 +30,15 @@ function segmentHitsBox(start, end, box, padding = 0.35) {
   return exit > 0.035 && entry < 0.965;
 }
 
+const MIN_CAMERA_HEIGHT = 3.4;
+const SOLID_PADDING = 2.6;
+
 function clearView(target, position, blockers) {
-  if (blockers.some((box) => inside(position, box, 0.8))) return false;
-  return !blockers.some((box) => segmentHitsBox(target, position, box));
+  // Keep a generous safety margin: a camera merely grazing a wall used to fill
+  // the frame with an unexplained dark slab instead of the character.
+  if (position[1] < MIN_CAMERA_HEIGHT) return false;
+  if (blockers.some((box) => inside(position, box, SOLID_PADDING))) return false;
+  return !blockers.some((box) => segmentHitsBox(target, position, box, 0.9));
 }
 
 /** Keep the camera outside map geometry and preserve an unobstructed view of its target. */
