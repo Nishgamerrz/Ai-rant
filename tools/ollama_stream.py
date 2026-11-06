@@ -29,6 +29,10 @@ class ThinkingUnsupported(Exception):
     """Raised when the selected model has no reasoning channel at all."""
 
 
+class ModelUnusable(Exception):
+    """Raised when Ollama fails (5xx) to load or run the selected model."""
+
+
 def stream(request: dict, url: str, label: str, timeout: float, quiet: bool) -> dict:
     request = {**request, "stream": True}
     payload = json.dumps(request).encode("utf-8")
@@ -44,6 +48,10 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool) -> 
         detail = exc.read().decode("utf-8", "replace")
         if exc.code == 400 and "think" in detail.lower():
             raise ThinkingUnsupported(detail.strip()[:300]) from exc
+        if exc.code >= 500:
+            # For example llama3.2-vision: Ollama exits with
+            # "unknown model architecture: 'mllama'" and returns HTTP 500.
+            raise ModelUnusable(f"HTTP {exc.code}: {detail.strip()[:300]}") from exc
         raise
     with handle as response:
         for raw in response:
@@ -102,27 +110,53 @@ def main() -> None:
     parser.add_argument("--url", default=DEFAULT_URL)
     parser.add_argument("--timeout", type=float, default=900.0)
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--fallback-model", default="",
+                        help="known-good model to retry on when the selected one cannot run")
+    parser.add_argument("--fallback-thinking", default="false",
+                        help="whether the fallback model should use thinking (default false)")
     parser.add_argument("--keep-stream-flag", action="store_true",
                         help="keep stream:true in the written request file for debugging")
     args = parser.parse_args()
 
     request = json.loads(args.request.read_text(encoding="utf-8"))
+    model = request.get("model", "model")
     thinking_on = bool(request.get("think"))
-    print(f"[{args.label}] sending {request.get('model', 'model')} request "
+    print(f"[{args.label}] sending {model} request "
           f"(temperature {request.get('options', {}).get('temperature', 'default')}, "
           f"thinking {'on' if thinking_on else 'off'}); live thinking is printed below.", flush=True)
-    try:
+
+    def attempt(payload: dict, note: str = "") -> dict | None:
         try:
-            result = stream(request, args.url, args.label, args.timeout, args.quiet)
+            return stream(payload, args.url, args.label, args.timeout, args.quiet)
         except ThinkingUnsupported as exc:
             # Thinking is requested for every preset, but a few architectures
-            # (for example the mllama vision models) have no reasoning channel.
-            # Answer normally instead of failing the whole run.
+            # have no reasoning channel. Answer normally instead of failing.
             print(f"[{args.label}] this model has no thinking channel ({exc}); "
-                  f"answering without reasoning tokens.", flush=True)
-            request = {**request, "think": False}
-            result = stream(request, args.url, args.label, args.timeout, args.quiet)
+                  f"answering without reasoning tokens.{note}", flush=True)
+            try:
+                result = stream({**payload, "think": False}, args.url, args.label,
+                                args.timeout, args.quiet)
+            except (ModelUnusable, ThinkingUnsupported) as retry_exc:
+                print(f"[{args.label}] the model is unusable at all ({retry_exc}).", flush=True)
+                return None
             result["thinking_unsupported"] = True
+            return result
+        except ModelUnusable as exc:
+            print(f"[{args.label}] {model} cannot run here ({exc}).", flush=True)
+            return None
+
+    try:
+        result = attempt(request)
+        if result is None and args.fallback_model and args.fallback_model != model:
+            print(f"[{args.label}] switching to the known-good fallback model "
+                  f"{args.fallback_model} so the run continues.", flush=True)
+            fallback = {**request, "model": args.fallback_model,
+                        "think": bool(args.fallback_thinking)}
+            result = attempt(fallback, f" (fallback {args.fallback_model})")
+            if result is not None:
+                result["fallback_model"] = args.fallback_model
+        if result is None:
+            raise SystemExit(1)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         print(f"[{args.label}] streaming request failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
@@ -130,6 +164,7 @@ def main() -> None:
         print(f"[{args.label}] the model returned an empty answer.", file=sys.stderr)
         raise SystemExit(1)
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    result["model"] = request.get("model") if "fallback_model" not in result else result["fallback_model"]
     args.output.write_text(json.dumps(result, ensure_ascii=False) + "\n", encoding="utf-8")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
