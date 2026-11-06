@@ -111,6 +111,30 @@ def main() -> None:
             missing = [name for name in usernames if name.casefold() not in placed]
             if missing:
                 fail("map plan does not place all named characters: " + ", ".join(missing))
+            # Face animation gate: the AI must schedule expression switches and
+            # at least two close-ups of a face, like a Roblox story short.
+            expressions = map_plan.get("face_expressions")
+            if not isinstance(expressions, list) or len(expressions) < 3:
+                fail("map plan is missing the AI face-expression timeline (need at least 3 beats)")
+            previous = -1.0
+            for entry in expressions:
+                if not isinstance(entry, dict):
+                    fail("face-expression timeline contains a non-object beat")
+                timestamp = entry.get("time")
+                if not isinstance(timestamp, (int, float)) or not 0 <= timestamp <= args.duration:
+                    fail(f"face-expression beat has an invalid time: {entry}")
+                if timestamp < previous:
+                    fail("face-expression beats are not in time order")
+                previous = float(timestamp)
+            shots = [shot for shot in map_plan.get("camera_shots", []) if isinstance(shot, dict)]
+            face_shots = [shot for shot in shots
+                          if str(shot.get("framing", "")).lower() in {"face", "close", "closeup", "close-up"}]
+            if len(face_shots) < 2:
+                fail(f"map plan has {len(face_shots)} face close-up shot(s); at least 2 are required")
+            if any(not str(shot.get("focus_username", "")).strip() for shot in face_shots):
+                fail("every face close-up must follow a named character")
+            print(f"Face animation plan verified: {len(expressions)} AI expression beats, "
+                  f"{len(face_shots)} face close-up shot(s).")
 
     narration = args.narration.read_text(encoding="utf-8").strip()
     word_count = len(WORD_RE.findall(narration))
@@ -180,11 +204,16 @@ def main() -> None:
     for fraction in (0.1, 0.5, 0.9):
         sample_frame(args.video, video_seconds * fraction, 1440, 2560)
 
+    face_note = ""
+    if args.map_plan and args.map_plan.is_file():
+        planned = json.loads(args.map_plan.read_text(encoding="utf-8"))
+        face_note = (f"{len(planned.get('face_expressions', []))} face-expression beats, "
+                     f"{sum(1 for shot in planned.get('camera_shots', []) if str(shot.get('framing', '')).lower() == 'face')} face close-ups, ")
     print(
         f"SHORT APPROVED: {args.video.name}; 1440x2560, {float(fps):g} fps, "
         f"{video_seconds:.2f}s, H.264/AAC, {word_count} narration words, "
         f"{cast_count} named cast member(s), {avatar_model_count} avatar mesh(es) and {avatar_thumbnail_count} Roblox avatar thumbnail(s) verified, "
-        f"{len(cues)} caption cues, "
+        f"{len(cues)} caption cues, {face_note}"
         "full decode and 3 visual samples passed."
     )
     if "GITHUB_STEP_SUMMARY" in os.environ:

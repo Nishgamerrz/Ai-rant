@@ -180,10 +180,18 @@ def clean_camera_shots(plan, report):
             report["lifted_camera_shots"] += 1
         if not shot.get("transition") in {"smooth", "snap"}:
             shot["transition"] = "smooth"
+        framing = str(shot.get("framing", "auto") or "auto").lower()
+        if framing not in {"auto", "wide", "face", "close", "closeup", "close-up"}:
+            framing = "auto"
+        try:
+            face_distance = min(4.0, max(1.6, float(shot.get("face_distance", 2.45))))
+        except (TypeError, ValueError):
+            face_distance = 2.45
         fixed.append({"time": round(min(duration, float(shot.get("time", 0))), 2),
                       "position": [round(value, 2) for value in position],
                       "target": [round(value, 2) for value in target],
-                      "transition": shot["transition"], "focus_username": focus})
+                      "transition": shot["transition"], "focus_username": focus,
+                      "framing": framing, "face_distance": round(face_distance, 2)})
     if fixed:
         fixed[0]["time"] = 0.0
         fixed.sort(key=lambda item: item["time"])
@@ -242,6 +250,43 @@ def top_up(plan, target, report):
     return plan
 
 
+def review_face_timeline(plan, report):
+    """Re-read the AI expression timeline: ordered, in-range, every beat kept."""
+    duration = float(plan.get("duration") or 30.0)
+    usernames = [str(person.get("username", "")) for person in plan.get("character_placements") or []]
+    valid = {name.casefold() for name in usernames if name}
+    expressions = ("neutral", "happy", "sad", "surprised", "worried", "angry", "excited", "thinking")
+    kept = {}
+    for entry in plan.get("face_expressions") or []:
+        if not isinstance(entry, dict):
+            report["dropped_face_beats"] += 1
+            continue
+        expression = str(entry.get("expression", "")).lower()
+        try:
+            time = float(entry.get("time"))
+        except (TypeError, ValueError):
+            report["dropped_face_beats"] += 1
+            continue
+        if expression not in expressions or not 0 <= time <= duration:
+            report["dropped_face_beats"] += 1
+            continue
+        username = str(entry.get("username", "") or "")
+        if username and username.casefold() not in valid:
+            username = ""
+        kept[round(time, 2)] = {"time": round(time, 2), "expression": expression,
+                                "intensity": round(min(1.0, max(0.0, float(entry.get("intensity", 0.8) or 0.8))), 2),
+                                "username": username}
+    timeline = [kept[key] for key in sorted(kept)]
+    if len(timeline) >= 3:
+        if timeline[0]["time"] > 0.5:
+            timeline.insert(0, {"time": 0.0, "expression": "neutral", "intensity": 0.7, "username": ""})
+        plan["face_expressions"] = timeline
+    report["face_beats"] = len(plan.get("face_expressions") or [])
+    report["face_closeups"] = sum(
+        1 for shot in plan.get("camera_shots") or [] if shot.get("framing") == "face")
+    return plan
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("map", type=Path)
@@ -260,10 +305,12 @@ def main():
     for index in range(max(1, args.passes)):
         report = {key: 0 for key in (
             "dropped_invalid_parts", "dropped_off_platform_parts", "dropped_camera_blockers",
-            "dropped_overlapping_parts", "dropped_invalid_shots", "lifted_camera_shots", "added_decor_parts")}
+            "dropped_overlapping_parts", "dropped_invalid_shots", "lifted_camera_shots", "added_decor_parts",
+            "dropped_face_beats")}
         before = len(plan.get("props", []))
         plan = review_pass(plan, report)
         plan = clean_camera_shots(plan, report)
+        plan = review_face_timeline(plan, report)
         if args.target_parts:
             plan = top_up(plan, args.target_parts, report)
         report["pass"] = index + 1
