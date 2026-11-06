@@ -55,10 +55,11 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("sudo rm -rf /usr/local/lib/android/sdk", workflow)
         self.assertIn("8 GiB for download and working files", workflow)
         self.assertIn("rm -f ollama.tar.zst", workflow)
-        self.assertIn("ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'animation_best' && 'deepseek-r1-8b-v1' || inputs.model_quality == 'hard' && 'qwen3-8b-v3' || 'qwen3-v2' }}", workflow)
+        self.assertIn("ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'animation_best' && 'deepseek-r1-8b-v1' || inputs.model_quality == 'smart_11b' && 'llama32-vision-11b-v1' || inputs.model_quality == 'hard' && 'qwen3-8b-v3' || 'qwen3-v2' }}", workflow)
         self.assertIn("fast) SELECTED_MODEL=qwen3:1.7b", workflow)
         self.assertIn("medium) SELECTED_MODEL=qwen3:4b", workflow)
         self.assertIn("hard) SELECTED_MODEL=qwen3:8b", workflow)
+        self.assertIn("smart_11b) SELECTED_MODEL=llama3.2-vision:11b", workflow)
         self.assertIn("animation_best) SELECTED_MODEL=deepseek-r1:8b; MODEL_THINKING=true", workflow)
         self.assertIn("OLLAMA_THINKING=$MODEL_THINKING", workflow)
         self.assertIn("ollama_stream.py", workflow)
@@ -77,6 +78,23 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("individually named, grid-aligned editable Parts", workflow)
         self.assertIn("Show the public AI build plan and tools", workflow)
         self.assertIn("not private chain-of-thought", workflow)
+
+    def test_eleven_billion_preset_sits_under_hard_and_is_fully_wired(self):
+        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+        options = workflow[workflow.index("      model_quality:"):workflow.index("      voice_style:")]
+        order = [line.strip().strip("- ") for line in options.splitlines() if line.strip().startswith("- ")]
+        self.assertEqual(order, ["fast", "medium", "hard", "smart_11b", "animation_best"],
+                         "the 11B preset must be listed directly under hard")
+        self.assertIn("smart_11b) SELECTED_MODEL=llama3.2-vision:11b; MODEL_THINKING=false", workflow)
+        self.assertIn("'llama32-vision-11b-v1'", workflow)
+        # The 11B weights need the large-model disk gate, not the small-model one.
+        gate = workflow[workflow.index("Reclaim runner disk space"):workflow.index("cache_restore_allowed=$CACHE_RESTORE_ALLOWED")]
+        self.assertIn('"$MODEL_QUALITY" = "smart_11b"', gate)
+        self.assertEqual(gate.count('"$MODEL_QUALITY" = "smart_11b"'), 1)
+        self.assertIn("smart_11b llama3.2-vision:11b (10.7B)", workflow)
+        # Keeping the existing promises intact.
+        self.assertNotIn("qwen3:14b", workflow)
+        self.assertIn("animation_best) SELECTED_MODEL=deepseek-r1:8b; MODEL_THINKING=true", workflow)
 
     def test_workflow_uses_higher_creative_model_temperatures(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
