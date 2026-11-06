@@ -1,0 +1,19 @@
+# Build output and downloaded models
+dist/
+.review/
+*.mp4
+*.zip
+*.pdf
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS
+.DS_Store

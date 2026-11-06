@@ -125,8 +125,8 @@ castFolder.Parent = map
 
 -- Bright, readable daylight and Roblox's own built-in sky textures prevent a black sky.
 Lighting.ClockTime = 14
-Lighting.Brightness = 3
-Lighting.ExposureCompensation = 0.05
+Lighting.Brightness = 3.2
+Lighting.ExposureCompensation = 0.15
 Lighting.GlobalShadows = true
 Lighting.ShadowSoftness = 0.25
 local ambient = plan.ambient_color or {175, 185, 205}
@@ -145,14 +145,12 @@ sky.SkyboxUp = "rbxasset://textures/sky/sky512_up.tex"
 sky.CelestialBodiesShown = true
 sky.StarCount = 0
 sky.Parent = Lighting
-local atmosphere = Lighting:FindFirstChildOfClass("Atmosphere") or Instance.new("Atmosphere")
-atmosphere.Density = 0.2
-atmosphere.Offset = 0.1
-atmosphere.Color = Color3.fromRGB(199, 226, 255)
-atmosphere.Decay = Color3.fromRGB(115, 158, 205)
-atmosphere.Haze = 0.45
-atmosphere.Glare = 0.08
-atmosphere.Parent = Lighting
+-- No atmospheric haze/fog: a thick Atmosphere darkened the world and hid the cast.
+for _, item in ipairs(Lighting:GetChildren()) do
+    if item:IsA("Atmosphere") then item:Destroy() end
+end
+Lighting.FogEnd = 100000
+Lighting.FogStart = 100000
 
 -- Add point lights only; this world intentionally has no visible words or signs.
 for _, object in ipairs(map:GetDescendants()) do
@@ -585,33 +583,25 @@ def make_place(server_script: str, local_script: str, plan, cast) -> str:
         for face in sky_assets
     )
     sky = item("Sky", ref(), sky_props)
-    atmosphere = item("Atmosphere", ref(), [
-        color3_element("Color", [199, 226, 255]),
-        color3_element("Decay", [115, 158, 205]),
-        '<float name="Density">0.2</float>',
-        '<float name="Glare">0.08</float>',
-        '<float name="Haze">0.45</float>',
-        xml_string("Name", "GeneratedAtmosphere"),
-        '<float name="Offset">0.1</float>',
-    ])
+    atmosphere = None
     ambient = plan.get("ambient_color", [175, 185, 205])
     outdoor_ambient = [max(ambient[0], 150), max(ambient[1], 160), max(ambient[2], 175)]
     lighting = item("Lighting", ref(), [
         color3_element("Ambient", ambient),
-        '<float name="Brightness">3</float>',
+        '<float name="Brightness">3.2</float>',
         '<float name="ClockTime">14</float>',
-        '<float name="EnvironmentDiffuseScale">0.45</float>',
-        '<float name="EnvironmentSpecularScale">0.3</float>',
-        '<float name="ExposureCompensation">0.05</float>',
+        '<float name="EnvironmentDiffuseScale">0.55</float>',
+        '<float name="EnvironmentSpecularScale">0.35</float>',
+        '<float name="ExposureCompensation">0.15</float>',
         color3_element("FogColor", [199, 226, 255]),
         '<float name="FogEnd">100000</float>',
-        '<float name="FogStart">0</float>',
+        '<float name="FogStart">100000</float>',
         '<bool name="GlobalShadows">true</bool>',
         xml_string("Name", "Lighting"),
         color3_element("OutdoorAmbient", outdoor_ambient),
         '<float name="ShadowSoftness">0.25</float>',
         '<string name="TimeOfDay">14:00:00</string>',
-    ], sky + atmosphere)
+    ], sky)
 
     server_script_item = item("Script", ref(), [
         '<bool name="Disabled">false</bool>',

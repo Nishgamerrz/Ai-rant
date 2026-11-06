@@ -63,7 +63,15 @@ function buildHtml(data) {
   const fixedWorldBody=physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed());
   const dynamicPropBodies=new Map();let dynamicPropCount=0,staticPropCount=0;
   physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(320,1,320).setTranslation(0,-1.08,0).setFriction(.9),fixedWorldBody);
+  const castLaneHazard=(part)=>{
+    const [x,y,z]=part.position||[],[sx,sy,sz]=part.size||[];
+    if(![x,y,z,sx,sy,sz].every(Number.isFinite))return true;
+    if(Math.max(sx,sy,sz)>70)return true;
+    const blocks=y-sy/2<7&&y+sy/2>2;
+    return blocks&&Math.abs(x)<20&&z>4&&z<54;
+  };
   for(const part of DATA.plan.props||[]){
+    if(castLaneHazard(part))continue;
     const [x,y,z]=part.position,[sx,sy,sz]=part.size;
     if(part.physics==='dynamic'&&(part.shape==='Block'||part.shape==='Ball')&&Math.max(sx,sy,sz)<=12){
       const body=physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(x,y,z)
@@ -81,20 +89,34 @@ function buildHtml(data) {
     }
   }
   window.physicsSummary={dynamicProps:dynamicPropCount,staticProps:staticPropCount};
-  const rgb=(value)=>new THREE.Color(value[0]/255,value[1]/255,value[2]/255);
-  const skyColor=rgb(DATA.plan.ambient_color||[180,205,230]).lerp(new THREE.Color(0x93c9f2),.45);
-  const scene=new THREE.Scene(); scene.background=skyColor; scene.fog=new THREE.Fog(skyColor,420,1050);
+  // Bright, readable palette guard: a near-black map Part next to the camera
+  // used to read as an unexplained black box across the whole frame, so every
+  // colour is lifted to a minimum luminance before it reaches the GPU.
+  const sanitize=(value,floor=104)=>{
+    const c=[0,1,2].map(i=>Math.max(0,Math.min(255,Math.round(Number(value?.[i]??128)))));
+    const luminance=.2126*c[0]+.7152*c[1]+.0722*c[2];
+    if(luminance>=floor)return c;
+    const blend=Math.min(1,(floor-luminance)/Math.max(1,floor));
+    const target=[168,180,196];
+    return c.map((channel,i)=>Math.round(channel*(1-blend*0.86)+target[i]*(blend*0.86)));
+  };
+  const rgb=(value)=>new THREE.Color(...sanitize(value).map(v=>v/255));
+  const skyColor=rgb(DATA.plan.ambient_color||[186,210,238]).lerp(new THREE.Color(0x9fd0f4),.5);
+  const scene=new THREE.Scene(); scene.background=skyColor;
   const renderer=new THREE.WebGLRenderer({antialias:true,alpha:false,powerPreference:'high-performance'});
   renderer.setPixelRatio(1); renderer.setSize(${WIDTH},${HEIGHT},false); renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFSoftShadowMap;
-  renderer.outputColorSpace=THREE.SRGBColorSpace; renderer.toneMapping=THREE.ACESFilmicToneMapping; renderer.toneMappingExposure=1.08;
+  renderer.outputColorSpace=THREE.SRGBColorSpace; renderer.toneMapping=THREE.NoToneMapping;
   document.getElementById('frame').prepend(renderer.domElement);
-  const camera=new THREE.PerspectiveCamera(43,${WIDTH}/${HEIGHT},0.15,1800);
-  scene.add(new THREE.HemisphereLight(0xe6f4ff,0x66755a,2.15));
-  const sun=new THREE.DirectionalLight(0xfff1d3,3.1); sun.position.set(-160,240,130); sun.castShadow=true; sun.shadow.mapSize.set(1024,1024); sun.shadow.camera.left=-340; sun.shadow.camera.right=340; sun.shadow.camera.top=340; sun.shadow.camera.bottom=-340; scene.add(sun);
-  const fill=new THREE.DirectionalLight(0xa8ceff,0.8); fill.position.set(100,100,-140); scene.add(fill);
-  const floor=new THREE.Mesh(new THREE.PlaneGeometry(640,640),new THREE.MeshStandardMaterial({color:rgb(DATA.plan.ground_color||[92,160,104]),roughness:0.96}));
-  floor.rotation.x=-Math.PI/2; floor.position.y=-0.08; floor.receiveShadow=true; scene.add(floor);
-  const foundation=new THREE.Mesh(new THREE.BoxGeometry(640,2,640),new THREE.MeshStandardMaterial({color:rgb(DATA.plan.ground_color||[92,160,104]),roughness:1})); foundation.position.set(0,-1.08,0); foundation.receiveShadow=true; scene.add(foundation);
+  const camera=new THREE.PerspectiveCamera(42,${WIDTH}/${HEIGHT},0.4,1600);
+  scene.add(new THREE.HemisphereLight(0xf2f9ff,0x9aa88f,2.9));
+  scene.add(new THREE.AmbientLight(0xffffff,0.75));
+  const sun=new THREE.DirectionalLight(0xfff4dc,2.5); sun.position.set(-150,260,150); sun.castShadow=true; sun.shadow.mapSize.set(2048,2048); sun.shadow.camera.left=-320; sun.shadow.camera.right=320; sun.shadow.camera.top=320; sun.shadow.camera.bottom=-320; sun.shadow.camera.near=10; sun.shadow.camera.far=900; sun.shadow.bias=-0.0006; sun.shadow.normalBias=0.45; scene.add(sun);
+  const fill=new THREE.DirectionalLight(0xcfe4ff,1.05); fill.position.set(160,120,-160); scene.add(fill);
+  const rim=new THREE.DirectionalLight(0xffffff,0.6); rim.position.set(0,60,220); scene.add(rim);
+  const groundRgb=sanitize(DATA.plan.ground_color||[126,182,120],118);
+  const floor=new THREE.Mesh(new THREE.PlaneGeometry(760,760),new THREE.MeshStandardMaterial({color:new THREE.Color(...groundRgb.map(v=>v/255)),roughness:0.95}));
+  floor.rotation.x=-Math.PI/2; floor.position.y=-0.06; floor.receiveShadow=true; scene.add(floor);
+  const foundation=new THREE.Mesh(new THREE.BoxGeometry(760,2.4,760),new THREE.MeshStandardMaterial({color:new THREE.Color(...groundRgb.map(v=>v/255)),roughness:1})); foundation.position.set(0,-1.26,0); foundation.receiveShadow=true; scene.add(foundation);
   const geometry={Block:new THREE.BoxGeometry(1,1,1),Ball:new THREE.SphereGeometry(0.5,16,12),Cylinder:new THREE.CylinderGeometry(0.5,0.5,1,14)};
   const settings={Plastic:[0,.78],SmoothPlastic:[0,.38],Concrete:[0,.93],Grass:[0,1],Slate:[0,.91],Wood:[0,.8],Metal:[.62,.38],Neon:[0,.25],Glass:[.08,.13],Brick:[0,.93],Asphalt:[0,1]};
   const buckets=new Map();
@@ -141,10 +163,47 @@ function buildHtml(data) {
     }
     slab('Roof Eave',[x,y1+.35,z],[sx*1.06,.7,sz*1.06],roofColor,'SmoothPlastic');
   }
-  for(const p of DATA.plan.props||[]){
+  // Frame audit. A single oversized or dark Part sitting in the camera's working
+  // area produced the "black box over the character" artefact. Props are snapped
+  // to a 0.25-stud grid and anything that would swallow the shot is dropped or
+  // shrunk instead of being rendered as a wall across the lens.
+  const GRID=.25, CAST_MIN_Z=6, CAST_MAX_Z=52;
+  const snap=(v)=>Math.round(Number(v||0)/GRID)*GRID;
+  const groundLevel=0;
+  function propIsCameraHazard(p){
+    const [x,y,z]=p.position,[sx,sy,sz]=p.size;
+    if(![x,y,z,sx,sy,sz].every(Number.isFinite))return true;
+    const maxSpan=Math.max(sx,sy,sz);
+    if(maxSpan>70)return true;
+    const halfH=sy/2;
+    const blocksCast=y-halfH<7&&y+halfH>2;
+    const nearCast=Math.abs(x)<20&&z>CAST_MIN_Z-2&&z<CAST_MAX_Z+2;
+    if(blocksCast&&nearCast)return true;
+    return false;
+  }
+  let droppedProps=0,alignedProps=0;
+  const safeProps=[];
+  for(const raw of DATA.plan.props||[]){
+    if(!Array.isArray(raw?.position)||!Array.isArray(raw?.size)){droppedProps+=1;continue;}
+    const size=raw.size.map(v=>Math.max(.5,Math.min(70,Math.abs(Number(v)||.5))));
+    const position=[snap(raw.position[0]),Math.max(.5,snap(raw.position[1])),snap(raw.position[2])];
+    const p={...raw,position,size,color:sanitize(raw.color||[150,170,196])};
+    if(propIsCameraHazard(p)){droppedProps+=1;continue;}
+    alignedProps+=1;
+    safeProps.push(p);
+  }
+  DATA.plan.props=safeProps;
+  window.mapAudit={alignedParts:alignedProps,droppedHazards:droppedProps};
+  for(const p of safeProps){
     const name=(p.name||'').toLowerCase();
     const core=buildingWords.some(w=>name.includes(w))&&!componentWords.some(w=>name.includes(w))&&p.size[0]>=10&&p.size[1]>=6&&p.size[2]>=8;
     if(core)makeFurnishedShell(p);else addPart(p);
+  }
+  // Cast lane stays completely clear so no wall, roof or prop can cross a face.
+  for(let z=CAST_MIN_Z;z<=CAST_MAX_Z;z+=6){
+    for(let x=-18;x<=18;x+=6){
+      addPart({name:'Plaza Paving Tile',shape:'Block',material:'Concrete',position:[x,.03,z],size:[5.7,.14,5.7],color:[196,202,210]});
+    }
   }
   // Batch ordinary architecture into instanced meshes, so generously furnished AI maps render smoothly.
   const matrix=new THREE.Matrix4(),position=new THREE.Vector3(),scale=new THREE.Vector3(),quaternion=new THREE.Quaternion();

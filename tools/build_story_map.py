@@ -43,26 +43,44 @@ def default_plan():
 
 
 def default_camera_shots(duration, usernames=()):
-    """A mix of smooth camera sweeps and story-beat snap cuts for the rendered short."""
-    beats = [0, .16, .32, .48, .64, .80, 1.0]
+    """A mix of smooth camera sweeps and story-beat snap cuts for the rendered short.
+
+    Long shorts (up to 180s) need more beats than a 30s clip, so the storyboard
+    length scales with the requested duration instead of holding on one angle.
+    """
     views = [
-        ([0, 32, 76], [0, 3, 24], "smooth"),
-        ([-16, 12, 48], [0, 3, 24], "smooth"),
-        ([18, 10, 38], [8, 4, 24], "snap"),
-        ([22, 14, 10], [0, 3, 24], "smooth"),
-        ([-10, 8, 38], [0, 3, 24], "snap"),
-        ([8, 10, 54], [0, 3, 24], "smooth"),
-        ([0, 28, 84], [0, 3, 24], "smooth"),
+        ([0, 26, 60], [0, 4, 24], "smooth"),
+        ([-13, 11, 45], [0, 4, 24], "smooth"),
+        ([15, 9, 36], [6, 4, 24], "snap"),
+        ([19, 12, 15], [0, 4, 24], "smooth"),
+        ([-11, 8, 36], [0, 4, 24], "snap"),
+        ([9, 9, 48], [0, 4, 24], "smooth"),
+        ([-17, 13, 26], [0, 4, 24], "snap"),
+        ([0, 18, 58], [0, 4, 24], "smooth"),
+        ([-9, 7, 20], [4, 4, 24], "snap"),
+        ([13, 15, 44], [0, 4, 24], "smooth"),
+        ([6, 8, 22], [0, 4, 24], "snap"),
+        ([-21, 16, 52], [0, 4, 24], "smooth"),
+        ([10, 6, 30], [2, 4, 24], "snap"),
+        ([0, 34, 92], [0, 4, 24], "smooth"),
+        ([-7, 10, 32], [0, 4, 24], "snap"),
+        ([17, 11, 40], [0, 4, 24], "smooth"),
     ]
+    count = max(5, min(len(views), int(round(duration / 8)) + 2))
+    chosen = views[:count]
+    if chosen[-1][2] != "smooth":
+        chosen[-1] = (chosen[-1][0], chosen[-1][1], "smooth")
+    last = count - 1
     return [
-        {"time": round(duration * ratio, 2), "position": pos, "target": target, "transition": mode,
+        {"time": round(duration * index / last, 2), "position": pos, "target": target,
+         "transition": "smooth" if index == 0 else mode,
          "focus_username": usernames[index % len(usernames)] if usernames else "world"}
-        for index, (ratio, (pos, target, mode)) in enumerate(zip(beats, views))
+        for index, (pos, target, mode) in enumerate(chosen)
     ]
 
 
 def normalize_camera_shots(shots, duration, usernames=()):
-    if not isinstance(shots, list) or not 4 <= len(shots) <= 12:
+    if not isinstance(shots, list) or not 4 <= len(shots) <= 24:
         return default_camera_shots(duration, usernames)
     clean, previous = [], -1.0
     valid_names = {name.casefold(): name for name in usernames}
@@ -331,7 +349,7 @@ def procedural_fallback_plan(theme, story, duration, usernames=()):
     }
 
 
-def expand_plan(plan, target_props=1260):
+def expand_plan(plan, target_props=3000):
     """Turn a compact AI landmark blueprint into a full, themed furnished build."""
     source_props = list(plan.get("props", []))
     if len(source_props) >= target_props:
@@ -401,11 +419,22 @@ def expand_plan(plan, target_props=1260):
             tail = f" {suffix}"
             name = base_name[:40 - len(tail)] + tail
             suffix += 1
+        def snap(value, low, high):
+            return round(min(high, max(low, round(float(value) / 0.5) * 0.5)), 2)
+
         try:
-            p = [round(float(value), 2) for value in position]
-            s = [round(max(0.5, min(64.0, float(value))), 2) for value in size]
+            p = [snap(position[0], -250, 250), snap(position[1], 0.25, 250), snap(position[2], -250, 250)]
+            s = [snap(value, 0.5, 64) for value in size]
             c = [max(0, min(255, int(value))) for value in color]
-        except (TypeError, ValueError):
+            # Same brightness floor as validate(): no expanded detail may be a
+            # near-black slab that swallows the character on screen.
+            luminance = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+            if luminance < 104:
+                blend = min(1.0, (104 - luminance) / 104)
+                target = [176, 186, 200]
+                c = [round(channel * (1 - blend * 0.9) + target[i] * (blend * 0.9))
+                     for i, channel in enumerate(c)]
+        except (TypeError, ValueError, IndexError):
             return False
         if (len(p) != 3 or len(s) != 3 or len(c) != 3 or not -250 <= p[0] <= 250
                 or not 0 <= p[1] <= 250 or not -250 <= p[2] <= 250
@@ -579,7 +608,17 @@ def expand_plan(plan, target_props=1260):
                       ("Tree Crown", "Ball", "Grass", [5, 4.5, 5], primary), ("Story Bench", "Block", "Wood", [5, 1, 2], [145, 99, 62]),
                       ("Story Lantern", "Block", "Neon", [1, 3.2, 1], accent), ("Wonder Marker", "Ball", "SmoothPlastic", [2.5, 2.5, 2.5], accent)],
     }[family]
-    motif_offsets = [(0, 0, 0), (-5, -3, 0), (5, -3, 0), (-4, 4, 0), (4, 4, 0), (0, -5, 0), (0, 3, 0), (0, 0, 5)]
+    base_motif_offsets = [(0, 0, 0), (-5, -3, 0), (5, -3, 0), (-4, 4, 0), (4, 4, 0), (0, -5, 0), (0, 3, 0), (0, 0, 5)]
+    # Extra rings of themed clusters let one site carry several aligned motif
+    # groups, so 5-10x denser worlds stay evenly spread instead of stacking.
+    extra_rings = [
+        [(-7, 0, 0), (7, 0, 0), (0, 7, 0), (0, -7, 0), (-6, -6, 0), (6, -6, 0), (-6, 6, 0), (6, 6, 0)],
+        [(-9, 2, 0), (9, 2, 0), (-2, 9, 0), (2, -9, 0), (-8, -2, 0), (8, -2, 0), (-2, -8, 0), (2, 8, 0)],
+        [(-11, -4, 0), (11, -4, 0), (-4, 11, 0), (4, -11, 0), (-10, 5, 0), (10, 5, 0), (5, -10, 0), (-5, 10, 0)],
+    ]
+    motif_offsets = list(base_motif_offsets)
+    for ring in extra_rings:
+        motif_offsets.extend(ring)
     # 13x13, 40-stud-spaced motif sites provide enough distinct clusters for the
     # requested 3x world-detail target without piling geometry near spawn.
     x_sites = list(range(-240, 241, 40))
@@ -610,15 +649,23 @@ def expand_plan(plan, target_props=1260):
         if len(expanded) >= target_props:
             break
         site_id = f"{x + 250:03d}-{z + 250:03d}"
-        for motif_index, ((label, shape, material, size, color), (dx, dz, _dy)) in enumerate(zip(motif_palette, motif_offsets)):
-            height = size[1]
+        for motif_index, (dx, dz, _dy) in enumerate(motif_offsets):
+            # Cycle the palette across every offset ring so a single site can
+            # carry several aligned, tinted motif groups instead of only eight.
+            label, shape, material, size, color = motif_palette[motif_index % len(motif_palette)]
             lower_label = label.casefold()
             lift = (4.0 if any(word in lower_label for word in ("crown", "canopy")) else
                     2.0 if any(word in lower_label for word in ("orb", "bloom", "anemone", "flower")) else
                     0.7 if any(word in lower_label for word in ("stem", "spire", "blade", "pillar", "beacon", "post", "column", "obelisk", "lantern")) else 0.0)
-            variant = (x // 55 + z // 55 + motif_index) % len(scale_variants)
+            ring = motif_index // len(motif_palette)
+            variant = (x // 55 + z // 55 + motif_index + ring) % len(scale_variants)
             scale_factor = scale_variants[variant]
-            varied_size = [round(max(0.5, dimension * scale_factor), 2) for dimension in size]
+            # Rings sit inside one 40-stud site, so extra rings are capped to a
+            # 6-stud footprint. That keeps every motif group aligned and
+            # non-overlapping instead of z-fighting with its neighbour.
+            footprint_cap = 12.0 if ring == 0 else 6.0
+            varied_size = [round(max(0.5, min(footprint_cap, dimension * scale_factor)), 2)
+                           for dimension in size]
             varied_color = tint(color, tint_variants[(variant + 1) % len(tint_variants)])
             position = [x + dx, varied_size[1] / 2 + lift, z + dz]
             add(f"{label} Site {site_id}", shape, material, position, varied_size, varied_color)
@@ -657,15 +704,22 @@ def validate(plan, duration=90, usernames=(), min_props=16, visual_request=""):
             return default
         return value
 
+    MIN_LUMINANCE = 104
+
     def visible_prop_color(value, default):
-        """Lift near-black map colors so buildings remain readable in the lit 3D scene."""
+        """Lift dark map colors so nothing renders as an unlit black slab in 3D."""
         rgb = list(color(value, default))
         luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
-        if luminance < 72:
-            target = [112, 124, 142]
-            blend = min(1.0, (72 - luminance) / 65)
-            rgb = [round(channel * (1 - blend) + target[i] * blend) for i, channel in enumerate(rgb)]
+        if luminance < MIN_LUMINANCE:
+            target = [176, 186, 200]
+            blend = min(1.0, (MIN_LUMINANCE - luminance) / max(1, MIN_LUMINANCE))
+            rgb = [round(channel * (1 - blend * 0.9) + target[i] * (blend * 0.9)) for i, channel in enumerate(rgb)]
         return rgb
+
+    # Everything snaps to a 0.5-stud grid: coplanar faces then line up exactly
+    # instead of flickering/z-fighting, which is what "not aligned" looked like.
+    def align(value):
+        return round(max(0.5, round(float(value) / 0.5) * 0.5), 2)
 
     clean_props = []
     unique_prop_names = set()
@@ -697,8 +751,8 @@ def validate(plan, duration=90, usernames=(), min_props=16, visual_request=""):
         unique_prop_names.add(name_key)
         clean_props.append({
             "name": prop_name, "shape": shape, "material": material,
-            "position": [round(float(v), 2) for v in pos],
-            "size": [round(float(v), 2) for v in size],
+            "position": [align(value) for value in pos],
+            "size": [align(value) for value in size],
             "color": visible_prop_color(prop.get("color"), [120, 145, 180]),
             "physics": ("dynamic" if prop.get("physics") == "dynamic" and shape in {"Block", "Ball"}
                         and max(float(v) for v in size) <= 12 else "static"),
@@ -793,7 +847,7 @@ def main():
     parser.add_argument("--theme", default="", help="explicit visual-theme cue for procedural fallback")
     parser.add_argument("--story", default="", help="story context for procedural fallback")
     parser.add_argument("--min-props", type=int, default=8, help="minimum unique AI landmark/building anchors")
-    parser.add_argument("--target-props", type=int, default=1260, help="minimum furnished world Parts after deterministic expansion")
+    parser.add_argument("--target-props", type=int, default=3000, help="minimum furnished world Parts after deterministic expansion (1260=standard, 3000=dense, 5000=ultra)")
     parser.add_argument("--usernames", type=Path, help="JSON file containing the ordered Roblox cast")
     parser.add_argument("--story-topic", default="", help="explicit user request used to gate optional avatar-body effects")
     args = parser.parse_args()
@@ -801,10 +855,10 @@ def main():
     usernames = json.loads(args.usernames.read_text(encoding="utf-8")) if args.usernames else []
     if not isinstance(usernames, list) or any(not isinstance(name, str) for name in usernames):
         raise SystemExit("usernames file must be a JSON array of strings")
-    if not 30 <= duration <= 60:
-        raise SystemExit("duration must be 30 to 60 seconds")
-    if args.target_props < 1200:
-        raise SystemExit("target-props must be at least 1200 furnished Parts (three times the former 420-Part target)")
+    if not 30 <= duration <= 180:
+        raise SystemExit("duration must be 30 to 180 seconds")
+    if not 1200 <= args.target_props <= 8000:
+        raise SystemExit("target-props must be between 1200 and 8000 furnished Parts")
     if args.fallback:
         raw_plan = procedural_fallback_plan(args.theme, args.story, duration, usernames)
         source_label = "theme/story procedural fallback"

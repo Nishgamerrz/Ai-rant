@@ -55,5 +55,27 @@ const nativeClip = {
 assert.equal(applyRobloxAnimationRig(THREE, { Head: head }, nativeClip, 0, false), 1);
 assert.ok(Math.abs(head.position.y - 5) < 1e-6, 'native static Pose offset must not be added on top of the generated skeleton rest offset');
 assert.equal(applyRobloxAnimationRig(THREE, { Head: head }, nativeClip, 1, false), 1);
-assert.ok(Math.abs(head.position.y - 5.3) < 1e-6, 'native animation displacement should still move the joint smoothly');
-console.log(`Avatar rig smoke test passed; automatically skinned ${rig.meshCount} mesh groups to ${rig.skeleton.bones.length} procedural R15-style joints.`);
+assert.ok(Math.abs(head.position.y - 5) < 1e-6, 'native CFrame translation must not detach a limb joint on the generated rig');
+
+// Stretch guard: limb bones must keep their rest length while native clips play,
+// because blending or translating joints is what made arms look elastic.
+const hip = rig.bones.LeftUpperLeg, knee = rig.bones.LeftLowerLeg;
+const restGap = hip.position.distanceTo(knee.position);
+const translatedClip = {
+  duration: 1,
+  keyframes: [
+    { time: 0, poses: { LeftHip: { orientation: identity, position: [0, -7, 0], weight: 1 } } },
+    { time: 1, poses: { LeftHip: { orientation: identity, position: [4, 7, 0], weight: 1 } } },
+  ],
+};
+for (const time of [0, 0.5, 1]) {
+  applyRobloxAnimationRig(THREE, rig.bones, translatedClip, time, false);
+  rig.root.updateMatrixWorld(true);
+  const gap = hip.position.distanceTo(knee.position);
+  assert.ok(Math.abs(gap - restGap) < 1e-6, 'native clip translation must not change limb length');
+}
+const hipRest = hip.position.clone();
+const hipRoot = rig.bones.Root.position.clone();
+assert.ok(hip.position.distanceTo(hipRest) < 0.5, 'hip translation stays tightly clamped');
+assert.ok(hipRoot, 'rig root must exist');
+console.log(`Avatar rig smoke test passed; rigid single-bone skinning on ${rig.meshCount} mesh groups, ${rig.skeleton.bones.length} R15-style joints, no limb stretch under native clips.`);
