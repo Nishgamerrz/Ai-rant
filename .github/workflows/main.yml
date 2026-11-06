@@ -44,6 +44,7 @@ on:
           - fast
           - medium
           - hard
+          - smart_11b
           - animation_best
       voice_style:
         description: 'Voice'
@@ -176,14 +177,14 @@ jobs:
           AVAILABLE_GIB=$((AVAILABLE_KB / 1024 / 1024))
           echo "Free storage after cleanup: ${AVAILABLE_GIB} GiB."
           CACHE_RESTORE_ALLOWED=true
-          if [ "$MODEL_QUALITY" = "hard" ] || [ "$MODEL_QUALITY" = "animation_best" ]; then
+          if [ "$MODEL_QUALITY" = "hard" ] || [ "$MODEL_QUALITY" = "smart_11b" ] || [ "$MODEL_QUALITY" = "animation_best" ]; then
             if [ "$AVAILABLE_KB" -lt $((8 * 1024 * 1024)) ]; then
-              echo "Only ${AVAILABLE_GIB} GiB is free after cleanup; the selected 8B model needs at least 8 GiB for download and working files." >&2
+              echo "Only ${AVAILABLE_GIB} GiB is free after cleanup; the selected 8B/11B model needs at least 8 GiB for download and working files." >&2
               exit 1
             fi
             if [ "$AVAILABLE_KB" -lt $((12 * 1024 * 1024)) ]; then
               CACHE_RESTORE_ALLOWED=false
-              echo "Less than 12 GiB is free; skipping the selected 8B-model cache archive to avoid exhausting runner storage."
+              echo "Less than 12 GiB is free; skipping the selected large-model cache archive to avoid exhausting runner storage."
             fi
           fi
           echo "cache_restore_allowed=$CACHE_RESTORE_ALLOWED" >> "$GITHUB_OUTPUT"
@@ -194,7 +195,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.ollama/models
-          key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'animation_best' && 'deepseek-r1-8b-v1' || inputs.model_quality == 'hard' && 'qwen3-8b-v3' || 'qwen3-v2' }}
+          key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'animation_best' && 'deepseek-r1-8b-v1' || inputs.model_quality == 'smart_11b' && 'llama32-vision-11b-v1' || inputs.model_quality == 'hard' && 'qwen3-8b-v3' || 'qwen3-v2' }}
 
       - name: Download the selected AI model for story and world/camera planning
         env:
@@ -214,6 +215,7 @@ jobs:
             fast) SELECTED_MODEL=qwen3:1.7b; MODEL_THINKING=false ;;
             medium) SELECTED_MODEL=qwen3:4b; MODEL_THINKING=false ;;
             hard) SELECTED_MODEL=qwen3:8b; MODEL_THINKING=false ;;
+            smart_11b) SELECTED_MODEL=llama3.2-vision:11b; MODEL_THINKING=false ;;
             animation_best) SELECTED_MODEL=deepseek-r1:8b; MODEL_THINKING=true ;;
             *) echo "Unknown model quality: $MODEL_QUALITY" >&2; exit 1 ;;
           esac
@@ -228,7 +230,8 @@ jobs:
             echo "- Model: $SELECTED_MODEL"
             echo "- Restored preset cache: ${MODEL_CACHE_HIT:-false}"
             echo "- Used for story and map/camera planning; thinking mode: $MODEL_THINKING."
-            echo "- Presets: fast qwen3:1.7b, medium qwen3:4b, hard qwen3:8b, animation_best deepseek-r1:8b."
+            echo "- Presets: fast qwen3:1.7b, medium qwen3:4b, hard qwen3:8b, smart_11b llama3.2-vision:11b (10.7B), animation_best deepseek-r1:8b."
+            echo "- smart_11b is the strongest true 11B option on Ollama: llama3.2-vision:11b (10.7B params, 128K context, ~6 GB Q4_K_M). It is used text-only here for narration and the world/camera/face plan, and it is the model that follows long strict JSON blueprints most reliably at that size."
             echo "- animation_best is the ~5.2 GB, 128K-context, text-only DeepSeek-R1 reasoning model for world/shot planning; it is not a mesh editor. Avatar mesh loading and native Roblox animation retargeting remain unchanged."
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -237,7 +240,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ~/.ollama/models
-          key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'animation_best' && 'deepseek-r1-8b-v1' || inputs.model_quality == 'hard' && 'qwen3-8b-v3' || 'qwen3-v2' }}
+          key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'animation_best' && 'deepseek-r1-8b-v1' || inputs.model_quality == 'smart_11b' && 'llama32-vision-11b-v1' || inputs.model_quality == 'hard' && 'qwen3-8b-v3' || 'qwen3-v2' }}
 
       - name: Resolve username-matched local avatar models and prepare assets for the short
         env:
