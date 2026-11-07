@@ -406,26 +406,31 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertLess(gate, move)
 
 
-class AlwaysDelegateTests(unittest.TestCase):
-    """The AI must use the sub-agent on every run, and the run must not depend on it."""
+class SubAgentIsOptionalTests(unittest.TestCase):
+    """The sub-agent is a helper the AI can reach for, not a chore per run."""
 
     def setUp(self):
         self.workflow = WORKFLOW.read_text(encoding="utf-8")
 
-    def test_the_narration_prompt_forbids_an_empty_task_list(self):
-        self.assertIn("YOU MUST USE THE GEMINI SUB-AGENT ON EVERY RUN", self.workflow)
-        self.assertIn('NEVER RETURN AN EMPTY "subagent_tasks" LIST', self.workflow)
-        self.assertIn("too long or too short for the word target", self.workflow)
+    def test_the_narration_prompt_is_an_offer_not_an_order(self):
+        self.assertIn("YOU HAVE A GEMINI SUB-AGENT, AND YOU USE IT WHEN YOU NEED IT", self.workflow)
+        self.assertIn("there is no quota and no rule that you must ask", self.workflow.lower())
+        self.assertIn('if you can write the story yourself, just write it and return '
+                      '"subagent_tasks":[]', self.workflow)
 
-    def test_the_schema_makes_the_task_list_required(self):
-        self.assertEqual(self.workflow.count('required:["narration","subagent_tasks"]'), 2)
+    def test_it_says_when_asking_helps(self):
+        self.assertIn("beyond you or you are unsure", self.workflow)
+        self.assertIn("cutting a draft down to the exact word count", self.workflow)
+        self.assertIn("expanding one that came out short", self.workflow)
 
-    def test_the_world_planner_is_told_to_always_delegate(self):
-        self.assertIn("YOU MUST USE THE GEMINI SUB-AGENT ON EVERY RUN: delegate at least one",
-                      self.workflow)
-        self.assertIn('export HELPER_ROUND="$helper_round"', self.workflow)
+    def test_no_mandate_is_left_in_either_prompt(self):
+        self.assertNotIn("NEVER RETURN AN EMPTY", self.workflow)
+        self.assertNotIn("YOU MUST USE THE GEMINI SUB-AGENT", self.workflow)
 
-    def test_a_model_that_delegates_nothing_still_gets_a_gemini_check(self):
+    def test_the_schema_does_not_force_a_task_list(self):
+        self.assertEqual(self.workflow.count('required:["narration","subagent_tasks"]'), 0)
+
+    def test_a_model_that_asks_for_nothing_gets_no_invented_task(self):
         start = self.workflow.index("python - <<'PYD' || true")
         block = self.workflow[start:self.workflow.index("\n          PYD", start)]
         script = "\n".join(line[10:] for line in block.splitlines()[1:])
@@ -440,14 +445,10 @@ class AlwaysDelegateTests(unittest.TestCase):
                                     env={**os.environ, "DURATION_SECONDS": "133"})
             self.assertEqual(result.returncode, 0, result.stderr)
             written = json.loads((work / "story_subagent_tasks.json").read_text(encoding="utf-8"))
-            self.assertEqual(len(written["tasks"]), 1)
-            task = written["tasks"][0]
-            self.assertEqual(task["kind"], "verify")
-            self.assertEqual(task["topic"], "narration")
-            self.assertIn("Max slept in.", task["input"])
-            self.assertIn("delegated nothing", result.stdout)
+            self.assertEqual(written["tasks"], [])
+            self.assertIn("did not need the sub-agent", result.stdout)
 
-    def test_a_model_that_does_delegate_is_left_alone(self):
+    def test_a_model_that_asks_for_help_is_obeyed(self):
         start = self.workflow.index("python - <<'PYD' || true")
         block = self.workflow[start:self.workflow.index("\n          PYD", start)]
         script = "\n".join(line[10:] for line in block.splitlines()[1:])
