@@ -58,8 +58,14 @@ a short vertical Roblox-style story video.
   people, same situation, same mechanic, same outcome. Do not replace their idea
   with your own, and do not turn a "what if" premise into a scene that merely
   happens to be at midnight.
-- If the text opens with a premise ("In a world where ...", "What if ..."), keep
-  that opening word for word. It is the idea of the story, not scene-setting.
+- If the text opens with a premise, that premise is the whole story and must stay
+  exactly where it is. It can be "In a world where ...", "In this world where ...",
+  "In a world in which ...", "What if ...", "Imagine a world where ...", "Suppose
+  ..." or "Let's say ...". Begin your rewrite with that same opening, word for
+  word, and never delete, shorten or paraphrase it. Do not replace it with a time
+  or a place ("At midnight", "One night", "In a small town"): those are scene-
+  setting, and the premise is the idea the video is built from.
+- If the text has no such premise, do not invent one.
 - The rule that grants the wish, the power or the twist must survive unchanged:
   who gets it, when, and why the characters behave as they do.
 - You may add one or two concrete, ordinary details that make the scene easier to
@@ -102,20 +108,34 @@ def build_prompt(text: str, kind: str = "story") -> str:
     return "\n\n".join([rules, TOPIC_NOTE, f"{label} to clean up:\n{text.strip()}"])
 
 
-# A story prompt is a premise, not a scene: "In a world where ..." or "What if ..."
-# is what the later prompts build the story from. Gemini likes to rewrite it as a
-# paragraph of scene-setting, which quietly replaces the idea with a moment.
-PREMISE_OPENERS = ("in a world where", "in a world", "what if", "imagine a world")
+# A story prompt is a premise, not a scene. "In a world where ...", "In this world
+# where ...", "What if ..." - that clause is the idea every later prompt builds the
+# map, the cast, the narration and the ending from. Gemini likes to rewrite it as
+# scene-setting ("At midnight, two brothers ..."), which quietly replaces the idea
+# with a moment, so the premise is protected rather than left to chance.
+WORLD_PHRASE = re.compile(
+    r"\b(?:in|of)\s+(?:a|an|this|our|one|another|the)\s+"
+    r"(?:world|universe|land|town|city|realm|country|village|planet|time|time period)\b",
+    re.IGNORECASE,
+)
+PREMISE_PATTERNS = (
+    ("world", WORLD_PHRASE),
+    ("what if", re.compile(r"\bwhat\s+if\b", re.IGNORECASE)),
+    ("imagine", re.compile(r"\bimagine\s+(?:a|an|this|that|if|what)\b", re.IGNORECASE)),
+    ("suppose", re.compile(r"\b(?:suppose|let's say)\b", re.IGNORECASE)),
+)
 
 
-def premise_of(text: str) -> str | None:
-    """The family of premise an opener belongs to ("in a world where" and
-    "in a world" count as the same idea, so a small rewording is still allowed)."""
-    lowered = " ".join((text or "").split()).casefold()
-    for opener in PREMISE_OPENERS:
-        if lowered.startswith(opener):
-            return "in a world" if opener.startswith("in a world") else opener
-    return None
+def premises(text: str) -> set[str]:
+    """Every kind of premise clause the text uses ("world", "what if", ...)."""
+    flat = " ".join((text or "").split())
+    return {name for name, pattern in PREMISE_PATTERNS if pattern.search(flat)}
+
+
+def starts_with_premise(text: str) -> bool:
+    """True when the first clause is the premise, in any of its usual shapes."""
+    flat = " ".join((text or "").split())
+    return any(pattern.match(flat) for _, pattern in PREMISE_PATTERNS)
 
 
 def _tidy_punctuation(text: str) -> str:
@@ -163,10 +183,15 @@ def sanitize(reply: str, raw: str) -> tuple[str | None, str]:
     bare, raw_bare = text.rstrip(".!? ").casefold(), raw.strip().rstrip(".!? ").casefold()
     if bare and bare == raw_bare:
         return None, "the reply was identical to the input"
-    raw_premise = premise_of(raw)
-    if raw_premise and premise_of(text) != raw_premise:
-        return None, (f"the reply dropped the {raw_premise!r} premise and became a "
-                      "scene instead of a what-if")
+    raw_premises, text_premises = premises(raw), premises(text)
+    if raw_premises and not text_premises:
+        return None, ("the reply deleted the "
+                      + "/".join(sorted(raw_premises))
+                      + " premise and became a scene instead of a what-if")
+    if raw_premises and starts_with_premise(raw) and not starts_with_premise(text):
+        return None, ("the reply moved the "
+                      + "/".join(sorted(raw_premises))
+                      + " premise out of the opening and turned it into scene-setting")
     return text, "ok"
 
 
