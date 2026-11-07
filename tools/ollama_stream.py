@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -18,6 +19,18 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_URL = "http://127.0.0.1:11434/api/chat"
+
+
+# A local thinking model can loop on the same paragraph ("let me count again",
+# "another attempt:") and burn the whole budget without ever finishing. Any run
+# of one sentence repeated back-to-back is treated as a loop.
+LOOP_RE = re.compile(r"(\S.{39,400}?)\1{1,}", re.DOTALL)
+
+
+def looks_stuck(text: str) -> bool:
+    """True when the model keeps repeating the same sentence instead of finishing."""
+    tail = " ".join(str(text)[-6000:].split())
+    return bool(LOOP_RE.search(tail))
 
 
 class ThinkingUnsupported(Exception):
@@ -43,6 +56,8 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool) -> 
     # which looked like the text was being replaced instead of streamed.
     thinking_open = False
     answer_open = False
+    repeated = False
+    seen = 0
     try:
         handle = urllib.request.urlopen(http, timeout=timeout)
     except urllib.error.HTTPError as exc:
@@ -82,11 +97,30 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool) -> 
                         print(f"[{label}] answer \u25b8 ", end="", flush=True)
                         answer_open = True
                     print(piece_content, end="", flush=True)
+            # Watch the reasoning channel while it streams: that is where a local
+            # model loops ("let me count again", "another attempt:"). The answer is
+            # only checked at the end, so a legitimate list of similar JSON objects
+            # in a world plan is never mistaken for a loop.
+            if not repeated and piece_thinking:
+                seen += len(piece_thinking)
+                if seen > 1200 and looks_stuck("".join(thinking)):
+                    repeated = True
+                    if not quiet:
+                        if answer_open or thinking_open:
+                            print(flush=True)
+                        print(f"[{label}] the model is looping on the same words instead of "
+                              f"finishing; telling it to stop repeating and write the answer once.",
+                              flush=True)
             if event.get("done"):
                 tokens = int(event.get("eval_count") or 0)
                 done_reason = str(event.get("done_reason") or "")
     answer = "".join(content)
     reasoning = "".join(thinking)
+    if not repeated and done_reason == "length" and looks_stuck(answer):
+        repeated = True
+        if not quiet:
+            print(f"[{label}] the answer itself is repeating and was cut off; "
+                  f"it will be finished with a steering instruction.", flush=True)
     elapsed = time.time() - started
     if not quiet:
         if answer_open or thinking_open:
@@ -103,6 +137,7 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool) -> 
         "eval_count": tokens,
         "done_reason": done_reason,
         "truncated": done_reason == "length",
+        "repeated": repeated,
         "label": label,
         "elapsed_seconds": round(elapsed, 1),
     }
@@ -146,27 +181,45 @@ def main() -> None:
         # mysteriously short story and burn a whole retry round; finish it here
         # by repeating the same request with a larger ceiling.
         ceiling = int((payload.get("options") or {}).get("num_predict") or 0)
-        if result.get("done_reason") == "length" and ceiling:
+        cut_off = result.get("done_reason") == "length"
+        looping = bool(result.get("repeated"))
+        if (cut_off or looping) and ceiling:
             bigger = next_token_budget(ceiling)
-            if bigger > ceiling:
-                # Retry WITHOUT the reasoning channel: re-thinking the same prompt
-                # doubles the wall time (a 20-minute narration becomes 40), while a
-                # plain answer at the bigger ceiling finishes in a fraction of it.
-                # The reasoning the user wanted to watch has already been printed.
+            if cut_off and bigger > ceiling:
                 print(f"[{args.label}] the model hit its {ceiling}-token ceiling and was cut off{note}; "
-                      f"finishing the answer again with num_predict={bigger} and reasoning off "
-                      f"so a slow preset does not pay for the thinking twice.", flush=True)
-                retry_payload = {**payload, "think": False,
-                                 "options": {**(payload.get("options") or {}),
-                                             "num_predict": bigger}}
-                retried = stream(retry_payload, args.url, args.label, args.timeout, args.quiet)
-                retried["token_ceiling_retry"] = bigger
-                if retried.get("done_reason") != "length":
-                    return retried
-                print(f"[{args.label}] still cut off at num_predict={bigger}; keeping the longest answer. "
-                      f"Shorten the reasoning instructions or raise the preset budget.", flush=True)
-                if len(retried.get("response") or "") >= len(result.get("response") or ""):
-                    result = retried
+                      f"asking again with num_predict={bigger} and thinking still on.", flush=True)
+            elif looping and bigger > ceiling:
+                print(f"[{args.label}] re-sending with num_predict={bigger} and an explicit "
+                      f"instruction to stop repeating itself.", flush=True)
+            else:
+                return result
+            # Thinking stays ON for every retry: the user chose to watch the model
+            # reason every time. The steering message is what stops it looping --
+            # it is told plainly that it was repeating and must write the complete
+            # answer once instead of starting another draft.
+            steer = (
+                "You were repeating yourself and running out of room. Do NOT restate the "
+                "plan, do NOT count words again, and do NOT start another draft. "
+                "Write the final, complete answer now, in one pass."
+                if looping else
+                "Your previous answer was cut off before it finished. Continue and write the "
+                "final, complete answer now, in one pass."
+            )
+            retry_payload = {
+                **payload,
+                "messages": [*(payload.get("messages") or []),
+                             {"role": "user", "content": steer}],
+                "options": {**(payload.get("options") or {}), "num_predict": bigger},
+            }
+            retried = stream(retry_payload, args.url, args.label, args.timeout, args.quiet)
+            retried["token_ceiling_retry"] = bigger
+            retried["steered_after_repeat"] = looping
+            if retried.get("done_reason") != "length" and not retried.get("repeated"):
+                return retried
+            print(f"[{args.label}] still stuck at num_predict={bigger}; keeping the longest answer. "
+                  f"Shorten the reasoning instructions or raise the preset budget.", flush=True)
+            if len(retried.get("response") or "") >= len(result.get("response") or ""):
+                result = retried
         return result
 
     def attempt(payload: dict, note: str = "") -> dict | None:

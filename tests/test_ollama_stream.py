@@ -106,7 +106,7 @@ class TruncatedResponseTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, msg=result.stderr[-2000:])
                 self.assertIn("CUT OFF at the token ceiling", result.stdout)
                 self.assertIn("num_predict=", result.stdout)
-                self.assertIn("reasoning off", result.stdout)
+                self.assertIn("thinking still on", result.stdout)
                 data = json.loads(output_path.read_text(encoding="utf-8"))
                 self.assertEqual(json.loads(data["response"]), {"narration": "COMPLETE STORY"})
                 self.assertEqual(data["done_reason"], "stop")
@@ -119,8 +119,12 @@ class TruncatedResponseTests(unittest.TestCase):
         self.assertGreater(budgets[1], budgets[0])
         # The retry drops thinking: re-reasoning the same prompt would double the
         # wall time on a slow CPU preset, which is exactly what we are fixing.
+        # Thinking is never switched off for a retry: the user watches it every time.
         self.assertTrue(handler.requests[0].get("think"))
-        self.assertFalse(handler.requests[1].get("think"))
+        self.assertTrue(handler.requests[1].get("think"))
+        # The retry carries a plain instruction to finish rather than redraft.
+        steer = handler.requests[1]["messages"][-1]["content"]
+        self.assertIn("cut off", steer)
 
 
 class _PieceByPiece(BaseHTTPRequestHandler):
@@ -208,19 +212,61 @@ class RuntimeSpeedTests(unittest.TestCase):
         seconds, duration = 600, 120
         self.assertEqual(seconds + duration * 5, 1200)
 
-    def test_no_retry_storm(self):
-        self.assertIn("for attempt in 1 2; do", self.workflow)
-        self.assertNotIn("for attempt in 1 2 3; do", self.workflow)
-        self.assertIn("for search_round in 1; do", self.workflow)
-        self.assertNotIn("for search_round in 1 2; do", self.workflow)
+    def test_search_many_times_but_never_loop(self):
+        # The AI may research as often as it needs...
+        self.assertIn("for search_round in 1 2 3 4; do", self.workflow)
+        # ...but the same query twice ends the loop instead of repeating it.
+        self.assertIn('if [ "$QUERIES" = "$PREVIOUS_QUERIES" ]; then', self.workflow)
+        self.assertIn("PREVIOUS_QUERIES=", self.workflow)
+        # Narration may be corrected up to three times, then the guard finishes it.
+        self.assertIn("for attempt in 1 2 3; do", self.workflow)
+        self.assertNotIn("for attempt in 1 2 3 4", self.workflow)
 
     def test_planning_asks_for_brief_reasoning(self):
         self.assertIn("THINK BRIEFLY: this runs on a CPU-only machine", self.workflow)
         self.assertNotIn("re-read your own blueprint three times", self.workflow)
 
+    def test_thinking_stays_on_in_every_retry(self):
+        helper = (ROOT / "tools" / "ollama_stream.py").read_text(encoding="utf-8")
+        # The only think-off path left is a model with no reasoning channel at all.
+        self.assertEqual(helper.count('"think": False'), 1)
+        self.assertIn("no thinking channel", helper)
+        self.assertIn("thinking still on", helper)
+        self.assertIn("steered_after_repeat", helper)
+        self.assertIn("looks_stuck", helper)
+
     def test_console_reports_throughput(self):
         helper = (ROOT / "tools" / "ollama_stream.py").read_text(encoding="utf-8")
         self.assertIn("tok/s", helper)
+
+
+class RepetitionTests(unittest.TestCase):
+    """A looping model must be spotted and told to stop, not left to spin."""
+
+    def test_detects_a_repeated_sentence(self):
+        from ollama_stream import looks_stuck
+
+        self.assertTrue(looks_stuck(
+            "Let me count the words again. Jordan finds the wallet and decides. " * 20))
+        self.assertTrue(looks_stuck("let me try again. " * 200))
+
+    def test_does_not_flag_ordinary_reasoning(self):
+        from ollama_stream import looks_stuck
+
+        story = (
+            "Jordan found a wallet. He thought about keeping it. Then he returned it "
+            "to the office. The owner thanked him and he felt lighter. "
+        ) * 2
+        self.assertFalse(looks_stuck(story))
+        self.assertFalse(looks_stuck(
+            '{"name":"Chair_1","shape":"Block"},{"name":"Chair_2","shape":"Block"}'))
+
+    def test_a_loop_is_steered_instead_of_restarted(self):
+        helper = (ROOT / "tools" / "ollama_stream.py").read_text(encoding="utf-8")
+        self.assertIn("looping on the same words", helper)
+        self.assertIn("You were repeating yourself", helper)
+        self.assertIn("do NOT start another draft", helper)
+        self.assertIn("steered_after_repeat", helper)
 
 
 if __name__ == "__main__":
