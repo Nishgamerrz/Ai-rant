@@ -500,6 +500,10 @@ jobs:
           else:
               print('All requested avatars have 3D meshes; RBXM originals and conversions are validated.')
           PY
+          # Same check the quality gate runs at the very end of the job - run it here,
+          # in the first minutes, so a broken avatar can never cost a 50-minute render.
+          python tools/say.py plan "Checking that every requested avatar has an authentic Roblox asset before any AI or render time is spent."
+          python tools/check_avatar_assets.py dist/avatar_profiles.json
 
       - name: Prepare the search tool (searches only run when the AI asks)
         run: |

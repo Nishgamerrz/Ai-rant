@@ -130,3 +130,72 @@ class NarrationFillTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AvatarPreflightTests(unittest.TestCase):
+    """The same check must run in the first minutes as well as at the gate.
+
+    Run #84 discovered its missing avatar 52 minutes and 3840 frames too late.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.profiles = self.root / "avatar_profiles.json"
+        self.assets = self.root / "avatar-assets"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def write_profile(self, payload: list) -> None:
+        import json
+        self.profiles.write_text(json.dumps(payload), encoding="utf-8")
+
+    def write_asset(self, user_id: str, name: str, payload: bytes = b"mesh") -> None:
+        path = self.assets / user_id / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+
+    def run_check(self):
+        import contextlib
+        from io import StringIO
+        sys.path.insert(0, str(ROOT / "tools"))
+        import check_avatar_assets
+        out, err = StringIO(), StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = check_avatar_assets.check(self.profiles)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_glb_mesh_passes_before_the_run_starts(self):
+        self.write_asset("777", "noob.glb")
+        self.write_profile([{"username": "noob", "user_id": 777, "model_ready": True,
+                             "model_file": "noob.glb", "model_format": "glb"}])
+        code, out, _ = self.run_check()
+        self.assertEqual(code, 0)
+        self.assertIn("authentic 3D mesh", out)
+
+    def test_a_portrait_only_avatar_is_allowed_but_reported(self):
+        self.write_asset("777", "avatar.png", b"\x89PNG")
+        self.write_profile([{"username": "noob", "user_id": 777, "model_ready": False,
+                             "thumbnail_ready": True,
+                             "thumbnail": str(self.assets / "777" / "avatar.png")}])
+        code, out, _ = self.run_check()
+        self.assertEqual(code, 0)
+        self.assertIn("portrait", out)
+
+    def test_an_avatar_with_nothing_fails_immediately(self):
+        self.write_profile([{"username": "ghost", "user_id": 999, "model_ready": True,
+                             "model_file": "ghost.glb", "model_format": "glb",
+                             "mesh_error": "asset privacy"}])
+        code, _, err = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("ghost", err)
+        self.assertIn("stopping now instead of after the render", err)
+
+    def test_the_workflow_runs_the_preflight_right_after_the_avatars(self):
+        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+        fetched = workflow.index("tools/convert_rbxm_avatar.py")
+        preflight = workflow.index("tools/check_avatar_assets.py")
+        later = workflow.index("Write a believable real-life story")
+        self.assertLess(fetched, preflight)
+        self.assertLess(preflight, later)
