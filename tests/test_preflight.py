@@ -8,8 +8,10 @@ step and the blueprint repair below are what stop that.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -189,3 +191,55 @@ class PreflightDiagnosticsTests(unittest.TestCase):
     def test_the_workflow_installs_a_missing_browser_before_checking(self):
         self.assertIn("Chromium is not on disk", WORKFLOW)
         self.assertIn("npx playwright install --with-deps chromium", WORKFLOW)
+
+
+class PreflightArgumentTests(unittest.TestCase):
+    """The preflight must be able to run the renderer without a real render.
+
+    Run #78 failed at the start because the preflight called the renderer with no
+    --duration, which tripped the duration bounds check before Chromium was even
+    launched. This runs the real script against a stub browser so the arguments
+    are parsed exactly as they are on the runner.
+    """
+
+    def _run(self, *args):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            shutil.copy(ROOT / "tools" / "video_renderer" / "render_short.mjs", tmp / "render_short.mjs")
+            stub = tmp / "node_modules" / "playwright"
+            stub.mkdir(parents=True)
+            (stub / "package.json").write_text('{"name":"playwright","version":"0.0.0","type":"module","main":"index.mjs"}', encoding="utf-8")
+            (stub / "index.mjs").write_text(
+                "export const chromium = {\n"
+                "  executablePath: () => '/nonexistent/chrome',\n"
+                "  launch: async () => { throw new Error('stub browser unavailable'); },\n"
+                "};\n", encoding="utf-8")
+            mapping = tmp / "map.json"
+            mapping.write_text("{}", encoding="utf-8")
+            argv = [node, str(tmp / "render_short.mjs")] + [a.replace("MAP", str(mapping)) for a in args]
+            result = subprocess.run(argv, capture_output=True, text=True, cwd=tmp, timeout=120)
+            return result.returncode, result.stdout + result.stderr
+
+    def test_preflight_gets_past_argument_parsing(self):
+        code, output = self._run("--map", "MAP", "--preflight")
+        self.assertNotIn("Duration must be between", output)
+        self.assertNotIn("Missing --duration", output)
+        # It reaches the browser step, which the stub deliberately breaks.
+        self.assertIn('preflight failed at "start Chromium"', output)
+        self.assertIn("stub browser unavailable", output)
+        self.assertEqual(code, 1)
+
+    def test_a_real_render_still_needs_a_length(self):
+        code, output = self._run("--map", "MAP", "--output", "out.mp4", "--characters", "a",
+                                 "--profiles", "p")
+        self.assertIn("Missing --duration", output)
+        self.assertEqual(code, 1)
+
+    def test_a_length_outside_the_allowed_window_is_still_rejected(self):
+        code, output = self._run("--map", "MAP", "--output", "out.mp4", "--characters", "a",
+                                 "--profiles", "p", "--duration", "2")
+        self.assertIn("Duration must be between 15 and 300 seconds, got 2.", output)
+        self.assertEqual(code, 1)
