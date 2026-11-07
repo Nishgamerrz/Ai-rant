@@ -91,8 +91,9 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool) -> 
     if not quiet:
         if answer_open or thinking_open:
             print(flush=True)
+        rate = f", {tokens / elapsed:.1f} tok/s" if elapsed >= 1 and tokens else ""
         print(f"[{label}] \u2713 finished in {elapsed:.0f}s: {len(answer):,} answer chars, "
-              f"{len(reasoning):,} reasoning chars, {tokens} tokens"
+              f"{len(reasoning):,} reasoning chars, {tokens} tokens{rate}"
               f"{', CUT OFF at the token ceiling' if done_reason == 'length' else ''}.", flush=True)
     return {
         "message": {"role": "assistant", "content": answer, "thinking": reasoning},
@@ -148,11 +149,16 @@ def main() -> None:
         if result.get("done_reason") == "length" and ceiling:
             bigger = next_token_budget(ceiling)
             if bigger > ceiling:
+                # Retry WITHOUT the reasoning channel: re-thinking the same prompt
+                # doubles the wall time (a 20-minute narration becomes 40), while a
+                # plain answer at the bigger ceiling finishes in a fraction of it.
+                # The reasoning the user wanted to watch has already been printed.
                 print(f"[{args.label}] the model hit its {ceiling}-token ceiling and was cut off{note}; "
-                      f"asking again with num_predict={bigger}. "
-                      f"Most of the budget goes to reasoning when thinking is on.", flush=True)
-                retry_payload = {**payload, "options": {**(payload.get("options") or {}),
-                                                         "num_predict": bigger}}
+                      f"finishing the answer again with num_predict={bigger} and reasoning off "
+                      f"so a slow preset does not pay for the thinking twice.", flush=True)
+                retry_payload = {**payload, "think": False,
+                                 "options": {**(payload.get("options") or {}),
+                                             "num_predict": bigger}}
                 retried = stream(retry_payload, args.url, args.label, args.timeout, args.quiet)
                 retried["token_ceiling_retry"] = bigger
                 if retried.get("done_reason") != "length":
