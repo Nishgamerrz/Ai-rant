@@ -296,3 +296,42 @@ class PromptTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RichnessReportTests(unittest.TestCase):
+    """The run log must say whether the AI actually used shapes, lamps and effects.
+
+    Run #82 produced 5000 plain Blocks with no light of its own, and nothing in
+    the log said so - it only showed up in the finished video. The world review
+    now counts them, so the next run answers the question by itself.
+    """
+
+    def test_the_world_review_counts_shapes_lamps_and_effects(self):
+        self.assertIn("from collections import Counter", WORKFLOW)
+        self.assertIn("World detail: shapes", WORKFLOW)
+        self.assertIn("lamp(s)", WORKFLOW)
+        self.assertIn("particle effect(s)", WORKFLOW)
+        self.assertIn("world_richness.json", WORKFLOW)
+
+    def test_a_plain_block_world_is_called_out_without_forcing_anything(self):
+        self.assertIn("is made only of plain blocks with no lamps or effects", WORKFLOW)
+        self.assertIn("nothing is forced", WORKFLOW)
+
+    def test_the_step_summary_lists_them_too(self):
+        self.assertIn("- Shapes: {', '.join(", WORKFLOW)
+        self.assertIn("- Lamps: {lights}; particle effects:", WORKFLOW)
+
+    def test_the_counts_match_what_the_validator_keeps(self):
+        import json
+        plan = bsm.validate(plan_with({
+            "name": "Lamp Probe", "shape": "triangle", "material": "Neon",
+            "position": [4, 5, -45], "size": [4, 6, 4], "color": [255, 200, 140],
+            "light": True, "effect": "gold sparkles",
+        }), 30, (), 2)
+        shapes = {}
+        for prop in plan["props"]:
+            shapes[prop["shape"]] = shapes.get(prop["shape"], 0) + 1
+        self.assertEqual(shapes.get("Wedge"), 1)
+        self.assertEqual(sum(1 for p in plan["props"] if p.get("light")), 1)
+        self.assertEqual(sum(1 for p in plan["props"] if p.get("effect")), 1)
+        json.dumps({"shapes": shapes})  # the report is plain JSON

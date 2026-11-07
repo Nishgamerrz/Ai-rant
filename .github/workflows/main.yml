@@ -965,15 +965,36 @@ jobs:
           off_grid = sum(1 for p in plan['props']
                          if any(abs(round(v / 0.5) * 0.5 - v) > 1e-9 for v in p['position'][::2] + p['size'])
                          or any(abs(round(v / 0.25) * 0.25 - v) > 1e-9 for v in p['position'][1::2]))
+          # How rich the world actually came out. The AI may ask for triangles,
+          # lamps and particle effects; this is the line that says whether it did,
+          # so a world of nothing but plain blocks is visible at a glance instead of
+          # only in the finished video.
+          from collections import Counter
+          shapes = Counter(p.get('shape', 'Block') for p in plan['props'])
+          fancy = {name: count for name, count in shapes.items() if name != 'Block'}
+          lights = sum(1 for p in plan['props'] if p.get('light'))
+          effects = Counter(p['effect']['family'] for p in plan['props'] if p.get('effect'))
+          families = ', '.join(f"{count} {name}" for name, count in effects.most_common()) or 'none'
           print(f"Reviewed world: {len(plan['props'])} Parts, {len(plan['camera_shots'])} camera shots, "
                 f"{removed} camera blockers removed, {overlaps} overlapping Parts removed, "
                 f"{dark} dark Parts, {off_grid} off-grid Parts.")
+          print(f"World detail: shapes {dict(shapes)}; {lights} lamp(s); "
+                f"{sum(effects.values())} particle effect(s) ({families}).")
+          if not fancy and not lights and not effects:
+              print("Note: the world is made only of plain blocks with no lamps or effects. "
+                    "The next run may ask the AI for them; nothing is forced.")
+          with open('dist/world_richness.json', 'w', encoding='utf-8') as handle:
+              json.dump({'shapes': dict(shapes), 'lights': lights,
+                         'effects': dict(effects)}, handle, indent=1)
           if dark or off_grid:
               raise SystemExit('world review left unreadable or misaligned Parts')
           with open(Path(__import__('os').environ['GITHUB_STEP_SUMMARY']), 'a', encoding='utf-8') as out:
               out.write(f"## World review\n- {len(plan['props'])} aligned, brightly lit Parts\n"
                         f"- {len(plan['camera_shots'])} camera shots with no geometry in the lens\n"
-                        f"- {removed} camera blockers and {overlaps} overlapping Parts removed\n")
+                        f"- {removed} camera blockers and {overlaps} overlapping Parts removed\n"
+                        f"- Shapes: {', '.join(f'{c} {n}' for n, c in shapes.most_common())}\n"
+                        f"- Lamps: {lights}; particle effects: {sum(effects.values())}"
+                        f"{f' ({families})' if families != 'none' else ''}\n")
           PY
 
       - name: Synthesize the selected narrator voice and readable captions
