@@ -188,7 +188,8 @@ jobs:
                   f'- **Avatar cast:** {clean(os.environ.get("CAST_NAMES", ""))}\n'
                   '- **Tools:** selected Ollama model, Roblox public avatar APIs, optional web research, edge-tts, Three.js + Rapier, Chromium, FFmpeg, Python validation, ReportLab, ZIP.\n'
                   '- **Prompt cleanup:** the typed story prompt and theme are spell-checked and lightly enriched by the Gemini sub-agent before planning; the correction is never mentioned in the text.\n'
-                  '- **Pipeline:** story and furnished world/camera plan → narration audio → overlay-free MP4 + Studio project → quality checks and package.\n'
+                  '- **Pipeline:** story and furnished world/camera plan → narration audio → MP4 with the narration captions burned in + Studio project → quality checks and package.\n'
+                  '- **Captions:** the spoken line is drawn on screen, centred and a little above the middle of the vertical frame, in bold outlined story-short style. No usernames, titles or other text.\n'
                   '- **Username lookup:** the public Roblox Users API resolves entered usernames to IDs keylessly; no manual ID is needed.\n'
                   '- **Local model:** username-matched OBJ, glTF/GLB, FBX, COLLADA, PLY, STL, and 3DS files are auto-rigged for the MP4; direct local geometry takes priority over RBXM asset references.\n'
                   '- **Animation:** matching RBXM walk/jump KeyframeSequences are retargeted onto the local mesh rig; inaccessible native clips block MP4 instead of being replaced by fake limb motion.\n'
@@ -223,6 +224,7 @@ jobs:
           npm run test:avatar-obj
           npm run test:face
           npm run test:avatar-glb
+          npm run test:caption-overlay
 
       - name: Install RBXM parser and validate username model
         run: |
@@ -873,20 +875,33 @@ jobs:
         env:
           VOICE_STYLE: ${{ inputs.voice_style }}
         run: |
+          # The delivery is modelled on the Roblox story shorts people watch:
+          # a young, bright, quick male read with a lifted pitch, not the slow
+          # audiobook cadence the old -8% rate produced. The rate stays near
+          # normal so the voice still fills the chosen length instead of leaving
+          # dead air at the end.
           case "$VOICE_STYLE" in
-            male) VOICE=en-US-GuyNeural; RATE=-8%; PITCH=+0Hz ;;
-            female) VOICE=en-US-AriaNeural; RATE=-8%; PITCH=+0Hz ;;
-            thin_male) VOICE=en-US-EricNeural; RATE=-8%; PITCH=+6Hz ;;
+            male) VOICE_CANDIDATES="en-US-BrianNeural en-US-GuyNeural"; RATE=+4%; PITCH=+4Hz ;;
+            female) VOICE_CANDIDATES="en-US-AvaMultilingualNeural en-US-AriaNeural"; RATE=+4%; PITCH=+4Hz ;;
+            thin_male) VOICE_CANDIDATES="en-US-EricNeural en-US-GuyNeural"; RATE=+4%; PITCH=+12Hz ;;
             *) echo "Unknown voice choice: $VOICE_STYLE" >&2; exit 1 ;;
           esac
-          edge-tts --voice "$VOICE" --rate="$RATE" --pitch="$PITCH" \
-            --file dist/narration.txt --write-media dist/narration.mp3 \
-            --write-subtitles dist/narration.srt
+          VOICE=""
+          for CANDIDATE in $VOICE_CANDIDATES; do
+            if edge-tts --voice "$CANDIDATE" --rate="$RATE" --pitch="$PITCH" \
+              --file dist/narration.txt --write-media dist/narration.mp3 \
+              --write-subtitles dist/narration.srt && [ -s dist/narration.mp3 ]; then
+              VOICE="$CANDIDATE"
+              break
+            fi
+            echo "Narrator voice $CANDIDATE was unavailable; trying the next one."
+          done
+          test -n "$VOICE" || { echo "No narrator voice could be synthesized." >&2; exit 1; }
           test -s dist/narration.srt
           {
             echo "## Selected narrator"
-            echo "- Style: $VOICE_STYLE ($VOICE, rate $RATE, pitch $PITCH)"
-            echo "- Slower narration rate applied: $RATE"
+            echo "- Style: $VOICE_STYLE ($VOICE, rate $RATE, pitch $PITCH): short-form story-short delivery."
+            echo "- Rate $RATE keeps the read lively while still filling the chosen length."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "NARRATOR_VOICE=$VOICE" >> "$GITHUB_ENV"
           echo "NARRATOR_RATE=$RATE" >> "$GITHUB_ENV"
@@ -895,9 +910,15 @@ jobs:
           import os
           seconds = MP3('dist/narration.mp3').info.length
           maximum = int(os.environ['DURATION_SECONDS']) + 1
-          print(f'Selected voiceover duration: {seconds:.1f} seconds (short limit {maximum}s)')
+          target = int(os.environ['DURATION_SECONDS'])
+          print(f'Selected voiceover duration: {seconds:.1f} seconds (short limit {maximum}s, target {target}s)')
           if not 5 <= seconds <= maximum:
               raise SystemExit('Voiceover duration is empty or exceeds the selected short length.')
+          # A faster short-form read can finish well before the video does, which
+          # leaves dead air. Warn loudly; the ffmpeg pad keeps the file valid.
+          if seconds < target * 0.72:
+              print(f'Warning: the narration ends {target - seconds:.1f}s before the video does; '
+                    f'the selected rate ({os.environ.get("NARRATOR_RATE", "")}) is quick for this length.')
           PY
 
       - name: Package the runnable Roblox Studio experience
@@ -1020,7 +1041,7 @@ jobs:
           }
           prompt = (
               'Write a concise, friendly 100–160 word final creation summary for the user. '
-              'Summarize only the completed story, world theme, furnishing, real Roblox avatars, AI-timed animated faces and face close-up cameras, narration audio, and the overlay-free rendered MP4 deliverables in this data. '
+              'Summarize only the completed story, world theme, furnishing, real Roblox avatars, AI-timed animated faces and face close-up cameras, narration audio, the on-screen narration captions and the rendered MP4 deliverables in this data. '
               'Do not reveal or imitate private chain-of-thought. Do not claim Roblox Studio runtime testing. '
               'Do not invent features not present in the data. Return only JSON with a summary string.\nDATA: '
               + json.dumps(context, ensure_ascii=False)
