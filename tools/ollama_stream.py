@@ -18,11 +18,6 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_URL = "http://127.0.0.1:11434/api/chat"
-PREVIEW = 90
-
-
-def clean(text: str) -> str:
-    return " ".join(str(text).split())[-PREVIEW:]
 
 
 class ThinkingUnsupported(Exception):
@@ -40,8 +35,14 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool) -> 
     content: list[str] = []
     thinking: list[str] = []
     started = time.time()
-    last_report = 0.0
     tokens = 0
+    done_reason = ""
+    # Live console: every streamed piece is printed verbatim the moment it
+    # arrives, so the log fills in letter by letter. The old code reprinted a
+    # truncated "thinking... 2,117 chars, 333s - ...tail" line every two seconds,
+    # which looked like the text was being replaced instead of streamed.
+    thinking_open = False
+    answer_open = False
     try:
         handle = urllib.request.urlopen(http, timeout=timeout)
     except urllib.error.HTTPError as exc:
@@ -67,39 +68,51 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool) -> 
             piece_content = message.get("content") or ""
             if piece_thinking:
                 thinking.append(piece_thinking)
+                if not quiet:
+                    if not thinking_open:
+                        print(f"[{label}] thinking \u25b8 ", end="", flush=True)
+                        thinking_open = True
+                    print(piece_thinking, end="", flush=True)
             if piece_content:
                 content.append(piece_content)
+                if not quiet:
+                    if not answer_open:
+                        if thinking_open:
+                            print(flush=True)
+                        print(f"[{label}] answer \u25b8 ", end="", flush=True)
+                        answer_open = True
+                    print(piece_content, end="", flush=True)
             if event.get("done"):
                 tokens = int(event.get("eval_count") or 0)
-            now = time.time()
-            if not quiet and now - last_report > 2.0:
-                last_report = now
-                elapsed = now - started
-                if piece_thinking and not content:
-                    print(f"[{label}] thinking… {sum(len(p) for p in thinking):,} chars, {elapsed:.0f}s "
-                          f"· …{clean(''.join(thinking))}", flush=True)
-                elif content:
-                    print(f"[{label}] writing… {sum(len(p) for p in content):,} chars, {elapsed:.0f}s "
-                          f"· …{clean(''.join(content))}", flush=True)
-                else:
-                    print(f"[{label}] waiting for the model… {elapsed:.0f}s", flush=True)
+                done_reason = str(event.get("done_reason") or "")
     answer = "".join(content)
     reasoning = "".join(thinking)
     elapsed = time.time() - started
     if not quiet:
-        print(f"[{label}] ✓ finished in {elapsed:.0f}s: {len(answer):,} answer chars, "
-              f"{len(reasoning):,} reasoning chars, {tokens} tokens.", flush=True)
-        if reasoning:
-            print(f"[{label}] reasoning preview: …{clean(reasoning)}", flush=True)
+        if answer_open or thinking_open:
+            print(flush=True)
+        print(f"[{label}] \u2713 finished in {elapsed:.0f}s: {len(answer):,} answer chars, "
+              f"{len(reasoning):,} reasoning chars, {tokens} tokens"
+              f"{', CUT OFF at the token ceiling' if done_reason == 'length' else ''}.", flush=True)
     return {
         "message": {"role": "assistant", "content": answer, "thinking": reasoning},
         "response": answer,
         "thinking": reasoning,
         "done": True,
         "eval_count": tokens,
+        "done_reason": done_reason,
+        "truncated": done_reason == "length",
         "label": label,
         "elapsed_seconds": round(elapsed, 1),
     }
+
+
+MAX_PREDICT_CEILING = 16384
+
+
+def next_token_budget(current: int) -> int:
+    """Double the ceiling, with a floor that fits a full story and its reasoning."""
+    return min(MAX_PREDICT_CEILING, max(int(current) * 2, 4096))
 
 
 def main() -> None:
@@ -125,17 +138,41 @@ def main() -> None:
           f"(temperature {request.get('options', {}).get('temperature', 'default')}, "
           f"thinking {'on' if thinking_on else 'off'}); live thinking is printed below.", flush=True)
 
+    def run_once(payload: dict, note: str) -> dict:
+        result = stream(payload, args.url, args.label, args.timeout, args.quiet)
+        # A reasoning model can spend the whole num_predict budget thinking and
+        # stop mid-sentence (`done_reason: "length"`). That used to surface as a
+        # mysteriously short story and burn a whole retry round; finish it here
+        # by repeating the same request with a larger ceiling.
+        ceiling = int((payload.get("options") or {}).get("num_predict") or 0)
+        if result.get("done_reason") == "length" and ceiling:
+            bigger = next_token_budget(ceiling)
+            if bigger > ceiling:
+                print(f"[{args.label}] the model hit its {ceiling}-token ceiling and was cut off{note}; "
+                      f"asking again with num_predict={bigger}. "
+                      f"Most of the budget goes to reasoning when thinking is on.", flush=True)
+                retry_payload = {**payload, "options": {**(payload.get("options") or {}),
+                                                         "num_predict": bigger}}
+                retried = stream(retry_payload, args.url, args.label, args.timeout, args.quiet)
+                retried["token_ceiling_retry"] = bigger
+                if retried.get("done_reason") != "length":
+                    return retried
+                print(f"[{args.label}] still cut off at num_predict={bigger}; keeping the longest answer. "
+                      f"Shorten the reasoning instructions or raise the preset budget.", flush=True)
+                if len(retried.get("response") or "") >= len(result.get("response") or ""):
+                    result = retried
+        return result
+
     def attempt(payload: dict, note: str = "") -> dict | None:
         try:
-            return stream(payload, args.url, args.label, args.timeout, args.quiet)
+            return run_once(payload, note)
         except ThinkingUnsupported as exc:
             # Thinking is requested for every preset, but a few architectures
             # have no reasoning channel. Answer normally instead of failing.
             print(f"[{args.label}] this model has no thinking channel ({exc}); "
                   f"answering without reasoning tokens.{note}", flush=True)
             try:
-                result = stream({**payload, "think": False}, args.url, args.label,
-                                args.timeout, args.quiet)
+                result = run_once({**payload, "think": False}, note)
             except (ModelUnusable, ThinkingUnsupported) as retry_exc:
                 print(f"[{args.label}] the model is unusable at all ({retry_exc}).", flush=True)
                 return None
