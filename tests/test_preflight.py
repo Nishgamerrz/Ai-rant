@@ -139,3 +139,53 @@ class DefaultTopicTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PreflightDiagnosticsTests(unittest.TestCase):
+    """A preflight failure must name the stage, not print a stack frame."""
+
+    def setUp(self):
+        self.renderer = (ROOT / "tools" / "video_renderer" / "render_short.mjs").read_text(encoding="utf-8")
+        self.preflight = (ROOT / "tools" / "preflight.py").read_text(encoding="utf-8")
+
+    def test_the_renderer_reports_the_stage_that_broke(self):
+        for stage in ("start Chromium", "load the page", "build the 3D scene",
+                      "draw one frame", "check the frame"):
+            self.assertIn(stage, self.renderer)
+        self.assertIn('preflight failed at "${stage}"', self.renderer)
+
+    def test_it_lists_what_the_browser_said(self):
+        self.assertIn("What the browser said:", self.renderer)
+        self.assertIn("requestfailed", self.renderer)
+        self.assertIn("pageerror", self.renderer)
+
+    def test_it_tries_several_webgl_settings(self):
+        self.assertIn("GL_CONFIGS", self.renderer)
+        self.assertIn("'--use-gl=swiftshader'", self.renderer)
+        self.assertIn("Chromium could not start with any WebGL setting", self.renderer)
+        # Both the preflight and the real render use the same launcher.
+        self.assertEqual(self.renderer.count("await launchBrowser()"), 2)
+
+    def test_it_says_whether_the_browser_binary_exists(self):
+        self.assertIn("MISSING", self.renderer)
+        self.assertIn("chromium.executablePath()", self.renderer)
+
+    def test_the_helper_does_not_truncate_to_the_last_stack_line(self):
+        self.assertIn("def explain(", self.preflight)
+        self.assertIn("interesting = [row for row in rows", self.preflight)
+        self.assertNotIn("splitlines()[-1:]", self.preflight)
+
+    def test_explain_finds_the_error_line(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from preflight import explain
+
+        output = ("node:internal/errors:1\n"
+                  "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'playwright'\n"
+                  "    at ModuleLoader.resolve\n    at async main\n")
+        text = explain(output)
+        self.assertIn("Cannot find package 'playwright'", text)
+        self.assertTrue(text.strip().splitlines()[0].startswith("Error [ERR_MODULE_NOT_FOUND]"))
+
+    def test_the_workflow_installs_a_missing_browser_before_checking(self):
+        self.assertIn("Chromium is not on disk", WORKFLOW)
+        self.assertIn("npx playwright install --with-deps chromium", WORKFLOW)

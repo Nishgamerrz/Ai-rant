@@ -242,6 +242,13 @@ jobs:
 
       - name: 'Preflight: prove every tool and the renderer work before the AI starts'
         run: |
+          # If the browser download above was skipped or cached away, install it
+          # here: the preflight is about to start a real Chromium.
+          BROWSER=$(cd tools/video_renderer && node --input-type=module -e "import {chromium} from 'playwright'; console.log(chromium.executablePath())" 2>/dev/null || true)
+          if [ -z "$BROWSER" ] || [ ! -x "$BROWSER" ]; then
+            python tools/say.py warning "Chromium is not on disk (${BROWSER:-unknown path}); installing it before the preflight."
+            (cd tools/video_renderer && npx playwright install --with-deps chromium)
+          fi
           # Everything expensive that has ever broken this workflow broke at the
           # END of an hour: the renderer's page template, a missing node module,
           # a browser with no WebGL. This step starts Chromium, loads the real

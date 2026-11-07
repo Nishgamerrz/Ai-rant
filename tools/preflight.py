@@ -51,6 +51,27 @@ def check(label: str, fn) -> None:
         fail(f"{label}: {type(exc).__name__}: {exc}")
 
 
+def explain(output: str, lines: int = 25) -> str:
+    """The useful part of a subprocess failure, not just the last stack line.
+
+    A Node crash ends with a stack frame, so reporting only the final line threw
+    away the one line that says what broke.
+    """
+    rows = [row for row in output.splitlines() if row.strip()]
+    if not rows:
+        return "no output"
+    interesting = [row for row in rows
+                   if row.lstrip().startswith(("Error", "TypeError", "RangeError",
+                                               "Error [", "  FAIL", "RuntimeError"))]
+    picked = interesting[:2] + rows[-lines:]
+    seen, unique = set(), []
+    for row in picked:
+        if row not in seen:
+            seen.add(row)
+            unique.append(row)
+    return "\n".join(unique)
+
+
 def python_sources():
     """Every Python file in the repo must at least compile."""
     broken = []
@@ -71,7 +92,7 @@ def renderer_syntax():
     assert scripts, "no renderer scripts found"
     for script in scripts:
         result = subprocess.run([node, "--check", str(script)], capture_output=True, text=True)
-        assert result.returncode == 0, f"{script.name}: {result.stderr.strip().splitlines()[:1]}"
+        assert result.returncode == 0, f"{script.name}: {explain(result.stderr, 4)}"
 
 
 def page_template():
@@ -79,7 +100,7 @@ def page_template():
     assert node, "node is not installed"
     result = subprocess.run([node, str(RENDERER / "template_check.mjs")],
                             capture_output=True, text=True, cwd=RENDERER)
-    assert result.returncode == 0, (result.stderr or result.stdout).strip().splitlines()[-1]
+    assert result.returncode == 0, explain(result.stderr or result.stdout, 4)
 
 
 def renderer_modules():
@@ -105,7 +126,7 @@ def plan_schema():
         out = Path(tmp) / "schema.json"
         result = subprocess.run([sys.executable, str(schema_path), "--usernames", str(cast),
                                  "--output", str(out)], capture_output=True, text=True, cwd=ROOT)
-        assert result.returncode == 0, (result.stderr or result.stdout).strip().splitlines()[-1]
+        assert result.returncode == 0, explain(result.stderr or result.stdout, 4)
         schema = json.loads(out.read_text(encoding="utf-8"))
         assert isinstance(schema, dict) and schema.get("properties"), "the plan schema is empty"
         required = schema.get("required") or []
@@ -133,9 +154,9 @@ def render_frame():
         result = subprocess.run([node, str(RENDERER / "render_short.mjs"),
                                  "--map", str(map_path), "--preflight"],
                                 capture_output=True, text=True, cwd=ROOT, timeout=600)
-        tail = (result.stdout + result.stderr).strip().splitlines()[-1:] or ["no output"]
-        assert result.returncode == 0, tail[0]
-        assert "Render preflight passed" in result.stdout, tail[0]
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0, explain(combined)
+        assert "Render preflight passed" in result.stdout, explain(combined)
 
 
 def main() -> int:
