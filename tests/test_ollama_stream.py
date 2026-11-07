@@ -222,10 +222,10 @@ class RuntimeSpeedTests(unittest.TestCase):
 
     def test_search_many_times_but_never_loop(self):
         # The AI may research as often as it needs...
-        self.assertIn("for search_round in 1 2 3 4; do", self.workflow)
-        # ...but the same query twice ends the loop instead of repeating it.
-        self.assertIn('if [ "$QUERIES" = "$PREVIOUS_QUERIES" ]; then', self.workflow)
-        self.assertIn("PREVIOUS_QUERIES=", self.workflow)
+        self.assertIn("for helper_round in 1 2 3 4; do", self.workflow)
+        # ...but asking for the identical help twice ends the loop.
+        self.assertIn('if [ "$HELP_SIG" = "$PREVIOUS_HELP" ]; then', self.workflow)
+        self.assertIn("PREVIOUS_HELP=", self.workflow)
         # Narration may be corrected up to three times, then the guard finishes it.
         self.assertIn("for attempt in 1 2 3; do", self.workflow)
         self.assertNotIn("for attempt in 1 2 3 4", self.workflow)

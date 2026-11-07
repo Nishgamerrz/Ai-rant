@@ -85,6 +85,16 @@ def build_schema(usernames=()) -> dict:
         },
         "required": ["username", "role", "position"],
     }
+    subagent_task = {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"},
+            "kind": {"type": "string", "enum": ["edit", "answer", "verify", "code", "name"]},
+            "instruction": {"type": "string"},
+            "input": {"type": "string"},
+        },
+        "required": ["kind", "instruction"],
+    }
     return {
         "type": "object",
         "properties": {
@@ -102,6 +112,9 @@ def build_schema(usernames=()) -> dict:
             "camera_shots": {"type": "array", "items": shot, "minItems": 6},
             "face_expressions": {"type": "array", "items": beat, "minItems": 6},
             "search_queries": {"type": "array", "items": {"type": "string"}},
+            # The local model may delegate up to three fiddly jobs to the Gemini
+            # sub-agent; the workflow runs them and asks again with the answers.
+            "subagent_tasks": {"type": "array", "items": subagent_task},
         },
         "required": ["name", "theme", "props", "character_placements",
                      "camera_shots", "face_expressions", "search_queries"],
