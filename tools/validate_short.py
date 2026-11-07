@@ -35,13 +35,36 @@ def seconds(timestamp: str) -> float:
     return int(hours) * 3600 + int(minutes) * 60 + float(rest)
 
 
-def avatar_asset_type(profile: dict) -> str | None:
-    """Return the available authentic Roblox source: full mesh or public avatar image."""
-    model = Path(profile.get("model_obj", ""))
-    material = Path(profile.get("model_mtl", ""))
-    if (profile.get("model_ready") and model.is_file() and model.stat().st_size > 0
-            and material.is_file() and material.stat().st_size > 0):
-        return "mesh"
+def avatar_asset_type(profile: dict, asset_dir: Path | None = None):
+    """Which authentic avatar asset this profile really has on disk.
+
+    A GLB/glTF/FBX/DAE/PLY/STL/3DS model carries its materials inside the file,
+    so it has no .mtl - but the old check demanded one from every model and
+    rejected a run whose video had already been rendered:
+
+        SHORT NOT APPROVED: authentic Roblox avatar mesh and thumbnail are
+        both missing for noob
+
+    for users/noob.glb, which the renderer had loaded and rigged successfully a
+    few minutes earlier. A separate material file is now required only for OBJ.
+    """
+    model = Path(profile.get("model_obj") or "")
+    if not (model.is_file() and model.stat().st_size > 0) and asset_dir:
+        name = str(profile.get("model_file") or "").strip()
+        if name:
+            candidate = asset_dir / name
+            if candidate.is_file() and candidate.stat().st_size > 0:
+                model = candidate
+    if profile.get("model_ready") and model.is_file() and model.stat().st_size > 0:
+        fmt = str(profile.get("model_format") or model.suffix.lstrip(".")).casefold()
+        if fmt != "obj":
+            return "mesh"
+        material = Path(profile.get("model_mtl") or "")
+        if material.is_file() and material.stat().st_size > 0:
+            return "mesh"
+        embedded = asset_dir / "avatar.mtl" if asset_dir else None
+        if embedded and embedded.is_file() and embedded.stat().st_size > 0:
+            return "mesh"
     thumbnail = Path(profile.get("thumbnail", ""))
     if profile.get("thumbnail_ready") and thumbnail.is_file() and thumbnail.stat().st_size > 0:
         return "thumbnail"
@@ -101,7 +124,10 @@ def main() -> None:
             profiles_by_name = {item.get("username", "").casefold(): item for item in profiles if isinstance(item, dict)}
             for name in usernames:
                 profile = profiles_by_name.get(name.casefold(), {})
-                source = avatar_asset_type(profile)
+                asset_dir = None
+                if args.profiles and profile.get("user_id"):
+                    asset_dir = args.profiles.parent / "avatar-assets" / str(profile["user_id"])
+                source = avatar_asset_type(profile, asset_dir)
                 if source is None:
                     fail(f"authentic Roblox avatar mesh and thumbnail are both missing for {name}")
                 if source == "mesh":
