@@ -92,6 +92,12 @@ def build_schema(usernames=()) -> dict:
             "kind": {"type": "string", "enum": ["edit", "answer", "verify", "code", "name"]},
             "instruction": {"type": "string"},
             "input": {"type": "string"},
+            # Which file rules Gemini should be given with the task, and the file
+            # its answer should replace (whole file in, whole file out).
+            "topic": {"type": "string",
+                      "enum": ["map", "cameras", "faces", "narration",
+                               "animation", "models", "code"]},
+            "apply_to": {"type": "string"},
         },
         "required": ["kind", "instruction"],
     }

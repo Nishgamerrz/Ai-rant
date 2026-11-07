@@ -16,8 +16,15 @@ Request file (JSON):
       "tasks": [
         {"id": "t1", "kind": "edit|answer|verify|code|name",
          "instruction": "what to do", "input": "text to work on",
+         "topic": "map|cameras|faces|narration|animation|models|code",  # optional
          "apply_to": "dist/narration.txt"}      # optional, edit only
       ]
+
+Before the task, Gemini is given the rules of the files it may be changing
+(`gemini_workspace.py`): the blueprint's key names, enums and ranges, the prop
+grid/lane/overlap rules, the camera and face timing rules, the narration rules,
+the R15 animation format, the users/ model rules and the tooling conventions -
+plus the instruction to hand back a complete file, never a diff.
     }
 
 Output file (JSON):
@@ -44,6 +51,11 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from gemini_workspace import guide as file_guide  # noqa: E402
+from gemini_workspace import topics_for  # noqa: E402
 
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 DEFAULT_MODEL = "gemini-2.5-flash"
@@ -86,6 +98,11 @@ def _clean_task(task, index: int) -> dict | None:
         "instruction": instruction[:MAX_INSTRUCTION_CHARS],
         "input": str(task.get("input") or "")[:MAX_INPUT_CHARS],
     }
+    # The local AI may point at a specific part of the manual ("topic":"cameras");
+    # otherwise the guide picks the topics from the instruction and the path.
+    topic = str(task.get("topic") or "").strip().lower()
+    if topic:
+        cleaned["topic"] = topic[:60]
     apply_to = task.get("apply_to")
     if kind == "edit" and isinstance(apply_to, str) and apply_to.strip():
         cleaned["apply_to"] = apply_to.strip()
@@ -114,12 +131,23 @@ def build_prompt(task: dict, context: str = "") -> str:
     parts = [SYSTEM_RULES]
     if context:
         parts.append(f"Run context:\n{context}")
+    # Tell Gemini exactly how the files it may be asked to change are shaped:
+    # the blueprint's key names and ranges, the camera/face rules, the narration
+    # rules, the R15 animation format, the users/ models and the tooling.
+    reference = file_guide({**task, "context": context})
+    if reference:
+        parts.append(reference)
     parts.append(f"Task kind: {task['kind']}")
     parts.append(f"Task:\n{task['instruction']}")
+    if task.get("apply_to"):
+        parts.append(f"This answer replaces the file {task['apply_to']}.")
     if task.get("input"):
         parts.append(f"Working text:\n{task['input']}")
     if task["kind"] == "edit":
-        parts.append("Return only the edited text.")
+        parts.append("Return only the edited text, as the complete new file contents."
+                     if task.get("apply_to") else "Return only the edited text.")
+    elif task["kind"] == "code":
+        parts.append("Return only the complete code, no fences and no commentary.")
     return "\n\n".join(parts)
 
 
@@ -204,6 +232,11 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
             continue
         print(f"[gemini sub-agent] {task['kind']} task {task['id']} -> {model}: "
               f"{task['instruction'][:100]}", flush=True)
+        topics = topics_for({**task, "context": request.get("context", "")})
+        if topics:
+            target = f" for {task['apply_to']}" if task.get("apply_to") else ""
+            print(f"[gemini sub-agent] giving it the file rules{target}: "
+                  f"{', '.join(topics)}.", flush=True)
         try:
             text = call_gemini(build_prompt(task, request.get("context", "")),
                                api_key=api_key, model=model, timeout=timeout, url=url)
