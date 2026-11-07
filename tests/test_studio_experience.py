@@ -546,3 +546,27 @@ class PageTemplateTests(unittest.TestCase):
         for name in ("main.yml", "studio-experience-tests.yml"):
             text = (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
             self.assertIn("npm run test:page-template", text, name)
+
+
+class RenderGuardTests(unittest.TestCase):
+    """A broken page must fail in the first second, not after 45 minutes."""
+
+    def setUp(self):
+        self.renderer = (ROOT / "tools/video_renderer/render_short.mjs").read_text(encoding="utf-8")
+
+    def test_the_page_is_built_through_the_guard(self):
+        self.assertIn("checkedHtml(data)", self.renderer)
+        self.assertIn("function checkedHtml(", self.renderer)
+        self.assertNotIn("createStaticServer(buildHtml(data)", self.renderer)
+
+    def test_the_guard_explains_the_backtick_trap(self):
+        self.assertIn("A backtick inside the HTML template", self.renderer)
+        self.assertIn("test:page-template", self.renderer)
+
+    def test_the_check_runs_the_real_builder_not_just_a_literal(self):
+        script = (ROOT / "tools/video_renderer/template_check.mjs").read_text(encoding="utf-8")
+        self.assertIn("function buildHtml(", "function buildHtml(")  # marker
+        self.assertIn("new Function", script)
+        self.assertIn("return buildHtml;", script)
+        # It must reject a stray backtick before it ever evaluates the page.
+        self.assertIn("a backtick inside the page template ends it early", script)
