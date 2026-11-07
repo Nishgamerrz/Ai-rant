@@ -40,6 +40,20 @@ def looks_stuck(text: str) -> bool:
 
 CONSOLE_LOCK = threading.Lock()
 
+# The reasoning is printed inside a light frame so it is obviously one block of
+# machine thought rather than part of the answer. Only a left rule and two caps
+# are drawn: the log wraps text at a width this process cannot know, so a closed
+# right edge would break apart on long lines.
+BOX_WIDTH = 72
+BOX_LEFT = "\u2502 "
+BOX_TOP = "\u250c\u2500 "
+BOX_BOTTOM = "\u2514"
+
+# A model start-up on a CPU runner can take minutes before the first token, and a
+# thinking model pauses mid-sentence. One quiet line is useful; a line every
+# fifteen seconds buried the model's actual words, so the note is capped.
+HEARTBEAT_NOTES = 3
+
 
 class TypedConsole:
     """Write the live model output one character at a time, in colour.
@@ -65,6 +79,8 @@ class TypedConsole:
         self.out = out or sys.stdout
         self.colour = "answer"
         self._open = ""
+        self._box = ""
+        self._line_start = True
 
     @property
     def pacing(self) -> bool:
@@ -72,6 +88,9 @@ class TypedConsole:
 
     def use(self, kind: str) -> None:
         """Switch the colour for everything written next (thinking vs answer)."""
+        if self._box and kind != "thinking":
+            with CONSOLE_LOCK:
+                self._close_box_locked()
         self.colour = kind
 
     def _switch(self, kind: str | None = None) -> None:
@@ -90,14 +109,18 @@ class TypedConsole:
         with CONSOLE_LOCK:
             self._switch()
             for character in text:
+                if self._box and self._line_start and character != "\n":
+                    self.out.write(BOX_LEFT)
                 self.out.write(character)
                 self.out.flush()
+                self._line_start = character == "\n"
                 if self.pacing:
                     time.sleep(self.delay)
                     self.spent += self.delay
 
     def line(self, text: str = "", kind: str = "") -> None:
         with CONSOLE_LOCK:
+            self._close_box_locked()
             if self._open:
                 self.out.write(RESET)
                 self._open = ""
@@ -105,24 +128,73 @@ class TypedConsole:
                 text = paint(text, kind, stream=self.out)
             self.out.write(text + "\n")
             self.out.flush()
+            self._line_start = True
 
     def newline(self) -> None:
         self.line("")
 
+    # -- the framed reasoning pane ---------------------------------------
+    def _frame(self, text: str) -> None:
+        """Write one border line in the near-invisible frame colour."""
+        self.out.write(RESET + paint(text, "frame", stream=self.out) + "\n")
+        self.out.flush()
+        self._open = ""
+
+    def _close_box_locked(self) -> None:
+        if not self._box:
+            return
+        if not self._line_start:
+            self.out.write("\n")
+        head = BOX_BOTTOM
+        self._frame(head + "\u2500" * max(0, BOX_WIDTH - len(head)))
+        self._box = ""
+        self._line_start = True
+
+    def open_box(self, title: str = "thinking") -> None:
+        """Start a framed panel: everything written next is boxed until switched."""
+        with CONSOLE_LOCK:
+            if self._box:
+                return
+            if not self._line_start:
+                self.out.write("\n")
+            self._box = title or "thinking"
+            head = BOX_TOP + self._box + " "
+            self._frame(head + "\u2500" * max(0, BOX_WIDTH - len(head)))
+            self._line_start = True
+
+    def close_box(self) -> None:
+        with CONSOLE_LOCK:
+            self._close_box_locked()
+
+    def note(self, text: str, kind: str = "thought") -> None:
+        """One-off note that stays inside the frame instead of breaking it."""
+        with CONSOLE_LOCK:
+            if not self._line_start:
+                self.out.write("\n")
+            rule = paint(BOX_LEFT, "frame", stream=self.out) if self._box else ""
+            self.out.write(RESET + rule + paint(text, kind, stream=self.out) + "\n")
+            self.out.flush()
+            self._open = ""
+            self._line_start = True
+
 
 class Heartbeat(threading.Thread):
-    """A quiet "still working" timer so the log never looks frozen.
+    """A very quiet "still working" note so the log never looks frozen.
 
-    A CPU runner can spend minutes loading a model before the first token, and a
-    thinking model pauses between bursts. One line every interval says how long the
-    wait has been, without reprinting or replacing any of the streamed text.
+    A CPU runner can spend minutes loading a model before the first token. The
+    old timer printed a line every fifteen seconds for the whole wait, which
+    buried the model's own words in repetition. This one writes at most
+    `HEARTBEAT_NOTES` notes per call, in the darkest colour on the palette, and
+    says in the line itself that it is a quiet note so it is clearly not output.
     """
 
-    def __init__(self, label: str, interval: float, console: TypedConsole):
+    def __init__(self, label: str, interval: float, console: TypedConsole,
+                 limit: int = HEARTBEAT_NOTES):
         super().__init__(daemon=True)
         self.label = label
         self.interval = max(2.0, float(interval))
         self.console = console
+        self.limit = max(1, int(limit))
         self.state = "waiting for the first token"
         self.activity = time.time()
         self.started = self.activity
@@ -139,19 +211,22 @@ class Heartbeat(threading.Thread):
         self._finished.set()
 
     def run(self) -> None:
-        while not self._finished.wait(min(2.0, self.interval)):
+        while not self._finished.wait(min(5.0, self.interval)):
+            if self.messages >= self.limit:
+                return
             idle = time.time() - self.activity
             if idle < self.interval:
                 continue
             if self.state == "waiting for the first token":
-                waited = time.time() - self.started
-                self.console.line(f"[{self.label}] the model is still working: "
-                                  f"{self.state} ({waited:.0f}s so far)")
+                text = (f"[{self.label}] still loading the model: "
+                        f"{time.time() - self.started:.0f}s so far")
             else:
-                self.console.line(f"[{self.label}] {self.state}: nothing new for "
-                                  f"{idle:.0f}s, still streaming")
+                text = f"[{self.label}] nothing new for {idle:.0f}s, still working"
+            self.console.note(f"{text} (quiet note {self.messages + 1}/{self.limit})")
             self.messages += 1
             self.activity = time.time()
+            if self.messages >= self.limit:
+                return
 
 
 class ThinkingUnsupported(Exception):
@@ -228,15 +303,15 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                     if not thinking_open:
                         if beat:
                             beat.touch()
-                        console.write(f"[{label}] thinking \u25b8 ")
+                        console.use("thinking")
+                        console.open_box(f"[{label}] thinking")
                         thinking_open = True
                     console.write(piece_thinking)
             if piece_content:
                 content.append(piece_content)
                 if not quiet:
                     if not answer_open:
-                        if thinking_open:
-                            console.newline()
+                        console.use("answer")   # leaving the reasoning colour closes the box
                         console.write(f"[{label}] answer \u25b8 ")
                         answer_open = True
                     console.write(piece_content)
@@ -249,8 +324,7 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                 if seen > 1200 and looks_stuck("".join(thinking)):
                     repeated = True
                     if not quiet:
-                        if answer_open or thinking_open:
-                            console.newline()
+                        console.close_box()
                         console.line(
                             f"[{label}] the model is looping on the same words instead of "
                             f"finishing; telling it to stop repeating and write the answer once.",
@@ -259,14 +333,12 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                 last_progress = time.time()
             now = time.time()
             if max_seconds and now - started_at > max_seconds:
-                if answer_open or thinking_open:
-                    console.newline()
+                console.close_box()
                 raise ModelTooSlow(
                     f"still going after {now - started_at:.0f}s "
                     f"(budget {max_seconds:.0f}s); handing this call to the faster model")
             if stall_seconds and now - last_progress > stall_seconds:
-                if answer_open or thinking_open:
-                    console.newline()
+                console.close_box()
                 raise ModelTooSlow(
                     f"no output for {stall_seconds:.0f}s; handing this call to the faster model")
             if event.get("done"):
@@ -279,12 +351,11 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
     if not repeated and done_reason == "length" and looks_stuck(answer):
         repeated = True
         if not quiet:
-            print(f"[{label}] the answer itself is repeating and was cut off; "
-                  f"it will be finished with a steering instruction.", flush=True)
+            print(paint(f"[{label}] the answer itself is repeating and was cut off; "
+                  f"it will be finished with a steering instruction.", "warning"), flush=True)
     elapsed = time.time() - started
     if not quiet:
-        if answer_open or thinking_open:
-            console.newline()
+        console.close_box()
         rate = f", {tokens / elapsed:.1f} tok/s" if elapsed >= 1 and tokens else ""
         console.line(f"[{label}] \u2713 finished in {elapsed:.0f}s: {len(answer):,} answer chars, "
                      f"{len(reasoning):,} reasoning chars, {tokens} tokens{rate}"
@@ -337,9 +408,9 @@ def main() -> None:
                         help="most seconds the typing pace may add to one call "
                              "(after that the text is written at full speed)")
     parser.add_argument("--heartbeat-seconds", type=float,
-                        default=float(os.environ.get("AI_HEARTBEAT", "15")),
-                        help="print a 'still working' line when nothing has arrived for this "
-                             "long; 0 disables it")
+                        default=float(os.environ.get("AI_HEARTBEAT", "60")),
+                        help="print one quiet 'still working' note when nothing has "
+                             "arrived for this long (at most 3 per call); 0 disables it")
     parser.add_argument("--keep-stream-flag", action="store_true",
                         help="keep stream:true in the written request file for debugging")
     args = parser.parse_args()
@@ -347,13 +418,16 @@ def main() -> None:
     request = json.loads(args.request.read_text(encoding="utf-8"))
     model = request.get("model", "model")
     thinking_on = bool(request.get("think"))
-    print(f"[{args.label}] sending {model} request "
-          f"(temperature {request.get('options', {}).get('temperature', 'default')}, "
-          f"thinking {'on' if thinking_on else 'off'}); live thinking is printed below.", flush=True)
-    print(f"[{args.label}] \u25b8 streaming live: the model's reasoning then its answer "
-          f"will appear here letter by letter as it produces them"
-          f"{'' if args.heartbeat_seconds <= 0 else ', with a waiting line every ' + str(int(args.heartbeat_seconds)) + 's'}"
-          f".", flush=True)
+    print(paint(f"[{args.label}] sending {model} request "
+                f"(temperature {request.get('options', {}).get('temperature', 'default')}, "
+                f"thinking {'on' if thinking_on else 'off'}); live thinking is printed below.",
+                "label"), flush=True)
+    quiet_note = ("" if args.heartbeat_seconds <= 0 else
+                  f" If it goes quiet you get at most {HEARTBEAT_NOTES} short notes, "
+                  f"{int(args.heartbeat_seconds)}s apart; no repeated chatter.")
+    print(paint(f"[{args.label}] \u25b8 streaming live: the model's reasoning then its answer "
+                f"will appear here letter by letter as it produces them, reasoning in a "
+                f"framed box.{quiet_note}", "notice"), flush=True)
 
     limits = {"max_seconds": args.max_seconds, "stall_seconds": args.stall_seconds,
               "type_delay": args.type_delay, "type_budget": args.type_budget,
@@ -403,8 +477,9 @@ def main() -> None:
             retried["steered_after_repeat"] = looping
             if retried.get("done_reason") != "length" and not retried.get("repeated"):
                 return retried
-            print(f"[{args.label}] still stuck at num_predict={bigger}; keeping the longest answer. "
-                  f"Shorten the reasoning instructions or raise the preset budget.", flush=True)
+            print(paint(f"[{args.label}] still stuck at num_predict={bigger}; keeping the "
+                        f"longest answer. Shorten the reasoning instructions or raise the "
+                        f"preset budget.", "warning"), flush=True)
             if len(retried.get("response") or "") >= len(result.get("response") or ""):
                 result = retried
         return result
@@ -420,15 +495,18 @@ def main() -> None:
             try:
                 result = run_once({**payload, "think": False}, note)
             except (ModelUnusable, ThinkingUnsupported) as retry_exc:
-                print(f"[{args.label}] the model is unusable at all ({retry_exc}).", flush=True)
+                print(paint(f"[{args.label}] the model is unusable at all ({retry_exc}).",
+                            "error"), flush=True)
                 return None
             result["thinking_unsupported"] = True
             return result
         except ModelTooSlow as exc:
-            print(f"[{args.label}] {model} is too slow for this run ({exc}).", flush=True)
+            print(paint(f"[{args.label}] {model} is too slow for this run ({exc}).",
+                        "warning"), flush=True)
             return None
         except ModelUnusable as exc:
-            print(f"[{args.label}] {model} cannot run here ({exc}).", flush=True)
+            print(paint(f"[{args.label}] {model} cannot run here ({exc}).", "error"),
+                  flush=True)
             return None
 
     try:
@@ -444,10 +522,12 @@ def main() -> None:
         if result is None:
             raise SystemExit(1)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        print(f"[{args.label}] streaming request failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(paint(f"[{args.label}] streaming request failed: {type(exc).__name__}: {exc}",
+                    "error"), file=sys.stderr, flush=True)
         raise SystemExit(1) from exc
     if not result["response"].strip():
-        print(f"[{args.label}] the model returned an empty answer.", file=sys.stderr)
+        print(paint(f"[{args.label}] the model returned an empty answer.", "error"),
+              file=sys.stderr, flush=True)
         raise SystemExit(1)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     result["model"] = request.get("model") if "fallback_model" not in result else result["fallback_model"]

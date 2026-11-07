@@ -224,27 +224,27 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
     results = []
     skipped = not api_key
     if skipped:
-        print(f"[gemini sub-agent] {API_KEY_ENV} is not configured; "
-              f"skipping {len(request.get('tasks', []))} delegated task(s) and continuing.",
-              flush=True)
+        print(paint(f"[gemini sub-agent] {API_KEY_ENV} is not configured; "
+                    f"skipping {len(request.get('tasks', []))} delegated task(s) and "
+                    f"continuing.", "warning"), flush=True)
     for task in request.get("tasks", []):
         if skipped:
             results.append({"id": task["id"], "kind": task["kind"], "ok": False,
                             "error": "no API key"})
             continue
-        print(f"[gemini sub-agent] {task['kind']} task {task['id']} -> {model}: "
-              f"{task['instruction'][:100]}", flush=True)
+        print(paint(f"[gemini sub-agent] {task['kind']} task {task['id']} -> {model}: "
+                    f"{task['instruction'][:100]}", "tool"), flush=True)
         topics = topics_for({**task, "context": request.get("context", "")})
         if topics:
             target = f" for {task['apply_to']}" if task.get("apply_to") else ""
-            print(f"[gemini sub-agent] giving it the file rules{target}: "
-                  f"{', '.join(topics)}.", flush=True)
+            print(paint(f"[gemini sub-agent] giving it the file rules{target}: "
+                        f"{', '.join(topics)}.", "tool"), flush=True)
         try:
             text = call_gemini(build_prompt(task, request.get("context", "")),
                                api_key=api_key, model=model, timeout=timeout, url=url)
         except GeminiUnavailable as exc:
-            print(f"[gemini sub-agent] task {task['id']} failed ({exc}); continuing without it.",
-                  file=sys.stderr, flush=True)
+            print(paint(f"[gemini sub-agent] task {task['id']} failed ({exc}); "
+                        f"continuing without it.", "error"), file=sys.stderr, flush=True)
             results.append({"id": task["id"], "kind": task["kind"], "ok": False,
                             "error": str(exc)[:300]})
             continue
@@ -257,7 +257,8 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
                 entry["applied_to"] = str(target.relative_to(root))
-                print(f"[gemini sub-agent] applied the edit to {entry['applied_to']}.", flush=True)
+                print(paint(f"[gemini sub-agent] applied the edit to "
+                            f"{entry['applied_to']}.", "success"), flush=True)
         # Show the reply itself in the console so the exchange is visible:
         # local AI asks -> Gemini answers -> the answer goes back to the local AI.
         preview = " ".join(text.split())
@@ -284,7 +285,8 @@ def main() -> None:
     raw = json.loads(args.request.read_text(encoding="utf-8"))
     request = normalize_request(raw)
     if not request["tasks"]:
-        print("[gemini sub-agent] no tasks requested.", flush=True)
+        print(paint("[gemini sub-agent] no tasks requested; nothing to delegate.",
+                    "notice"), flush=True)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps({"model": args.model, "skipped": True,
                                            "results": []}) + "\n", encoding="utf-8")

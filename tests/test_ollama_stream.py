@@ -182,7 +182,11 @@ class LiveStreamingTests(unittest.TestCase):
             stdout = result.stdout
 
         # The reasoning and the answer arrive verbatim, in order, joined together.
-        self.assertIn("[world plan] thinking \u25b8 Thinking about the beats.", stdout)
+        # The reasoning is printed inside its frame, so the body line carries the
+        # left rule and the label lives in the frame's title instead.
+        self.assertIn("\u250c\u2500 [world plan] thinking", stdout)
+        self.assertIn("\u2502 Thinking about the beats.", stdout)
+        self.assertIn("\u2514", stdout)
         self.assertIn('[world plan] answer \u25b8 {"narration":"Maya found it."}', stdout)
         # No "reappearing" summary lines that reprint a truncated tail.
         self.assertNotIn("thinking\u2026", stdout)
@@ -351,11 +355,134 @@ class TypedConsoleTests(unittest.TestCase):
         beat.stop()
         beat.join(timeout=2)
         text = "".join(recorder.writes)
-        self.assertIn("[world plan] the model is still working: waiting for the first token",
-                      text)
+        self.assertIn("[world plan] still loading the model", text)
         self.assertNotIn("\u2026", text)
         # The heartbeat only writes whole lines: it never reprints streamed text.
         self.assertTrue(all(chunk.count("\n") == 1 for chunk in recorder.writes if chunk.strip()))
+
+    def test_the_waiting_note_repeats_at_most_three_times(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from ollama_stream import HEARTBEAT_NOTES, Heartbeat, TypedConsole
+
+        self.assertEqual(HEARTBEAT_NOTES, 3)
+        recorder = _Recorder()
+        beat = Heartbeat("world plan", interval=2.0, console=TypedConsole(0, 0, out=recorder))
+        beat.start()
+        time.sleep(6.6)
+        beat.join(timeout=1)          # the thread stops itself once the cap is reached
+        self.assertFalse(beat.is_alive())
+        text = "".join(recorder.writes)
+        self.assertEqual(text.count("still loading the model"), HEARTBEAT_NOTES)
+        self.assertIn("(quiet note 3/3)", text)
+
+    def test_the_waiting_note_is_the_darkest_line_on_screen(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from console_style import CODES
+
+        def level(code):
+            return int(code.split(";")[-1].rstrip("m"))
+
+        # 232-255 is the grey ramp, where the numbers run dark to light: 240 is a
+        # dim grey, 255 near white. The quiet note must sit low on that ramp, and
+        # the frame lower still, so neither can glare next to the model's words.
+        for kind in ("thought", "frame"):
+            self.assertTrue(232 <= level(CODES[kind]) <= 244, kind)
+        self.assertLess(level(CODES["frame"]), level(CODES["thought"]))
+
+        def brightness(code):
+            value = level(code) - 16
+            if not 0 <= value < 216:
+                return None
+            r, rest = divmod(value, 36)
+            g, b = divmod(rest, 6)
+            return (r + g + b) / 3
+
+        for kind in ("thinking", "answer", "label", "notice", "success", "warning",
+                     "error", "tool", "plan"):
+            value = brightness(CODES[kind])
+            self.assertIsNotNone(value, f"{kind} should be a hue, not a grey")
+            self.assertLessEqual(value, 3.0, f"{kind} is too bright for a long run")
+
+    def test_the_palette_stays_muted(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from console_style import CODES
+
+        # Nothing may sit in the neon band (bright cyan/green/magenta 33-201 on
+        # the 256-colour wheel); those were the values that hurt to look at.
+        for kind, code in CODES.items():
+            level = int(code.split(";")[-1].rstrip("m"))
+            self.assertTrue(0 <= level <= 255, kind)
+            self.assertFalse(45 <= level <= 51, f"{kind} is neon cyan ({level})")
+            self.assertFalse(190 <= level <= 201, f"{kind} is neon magenta ({level})")
+
+
+class ThinkingBoxTests(unittest.TestCase):
+    """The reasoning is framed so it reads as one block of machine thought."""
+
+    def _console(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from ollama_stream import TypedConsole
+
+        recorder = _Recorder()
+        return TypedConsole(0, 0, out=recorder), recorder
+
+    def test_thinking_is_drawn_inside_a_frame(self):
+        console, recorder = self._console()
+        console.use("thinking")
+        console.open_box("[story plan] thinking")
+        console.write("first line\nsecond line\n")
+        console.close_box()
+        text = "".join(recorder.writes)
+        self.assertIn("\u250c\u2500 [story plan] thinking", text)
+        self.assertIn("\u2502 first line", text)
+        self.assertIn("\u2502 second line", text)
+        self.assertIn("\u2514", text)
+
+    def test_every_boxed_line_starts_with_the_left_rule(self):
+        console, recorder = self._console()
+        console.use("thinking")
+        console.open_box("thinking")
+        console.write("alpha\nbeta\n")
+        console.close_box()
+        body = [line for line in "".join(recorder.writes).splitlines()
+                if "alpha" in line or "beta" in line]
+        self.assertEqual(len(body), 2)
+        for line in body:
+            self.assertIn("\u2502 ", line)
+
+    def test_switching_to_the_answer_closes_the_frame(self):
+        console, recorder = self._console()
+        console.use("thinking")
+        console.open_box("thinking")
+        console.write("weighing two endings")
+        console.use("answer")
+        console.write(" answer text")
+        text = "".join(recorder.writes)
+        self.assertLess(text.index("\u2514"), text.index("answer text"))
+        self.assertEqual(text.count("\u250c"), 1)
+
+    def test_a_quiet_note_does_not_break_the_frame(self):
+        console, recorder = self._console()
+        console.use("thinking")
+        console.open_box("thinking")
+        console.write("half a thought")
+        console.note("[story] quiet note (quiet note 1/3)")
+        console.write(" the rest of it")
+        console.close_box()
+        text = "".join(recorder.writes)
+        self.assertIn("half a thought", text)
+        self.assertIn("the rest of it", text)
+        self.assertEqual(text.count("\u250c"), 1)   # never reopened mid-stream
+        starts = [line for line in text.splitlines() if "quiet note" in line]
+        self.assertEqual(len(starts), 1)
+        self.assertIn("\u2502 [story] quiet note", starts[0])
+
+    def test_the_stream_opens_the_frame_for_reasoning_only(self):
+        helper = (ROOT / "tools" / "ollama_stream.py").read_text(encoding="utf-8")
+        self.assertIn('console.open_box(f"[{label}] thinking")', helper)
+        self.assertIn('console.use("answer")', helper)
+        # Leaving the reasoning colour must close the box, not leave it dangling.
+        self.assertIn('if self._box and kind != "thinking":', helper)
 
 
 class TypingCommandLineTests(unittest.TestCase):
@@ -373,7 +500,7 @@ class TypingCommandLineTests(unittest.TestCase):
         self.assertIn("PYTHONUNBUFFERED: '1'", self.workflow)
         self.assertIn("AI_TYPE_DELAY: '0.002'", self.workflow)
         self.assertIn("AI_TYPE_BUDGET: '120'", self.workflow)
-        self.assertIn("AI_HEARTBEAT: '15'", self.workflow)
+        self.assertIn("AI_HEARTBEAT: '60'", self.workflow)
 
     def test_it_announces_itself_before_waiting(self):
         helper = (ROOT / "tools" / "ollama_stream.py").read_text(encoding="utf-8")
@@ -443,8 +570,12 @@ class ColourTests(unittest.TestCase):
         console = TypedConsole(delay=0, budget=0, out=recorder)
         console.use("answer")
         console.write("abcde")
-        letters = [chunk for chunk in recorder.writes if chunk and chunk not in ("\x1b[0m",)]
-        self.assertEqual("".join(letters).strip("\x1b[38;5;51m"), "abcde")
+        sys.path.insert(0, str(ROOT / "tools"))
+        from console_style import strip
+
+        letters = [chunk for chunk in recorder.writes if chunk and chunk != "\x1b[0m"]
+        self.assertEqual(strip("".join(letters)), "abcde")
+        self.assertIn("\x1b[38;5;", "".join(recorder.writes))
 
     def test_the_job_turns_colour_on(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
