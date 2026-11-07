@@ -607,27 +607,102 @@ async function writeFrame(stream, png) {
 // Rapier, the physics step and the screenshot - before the workflow spends an hour
 // planning a world. Every historical failure of this renderer (a stray backtick in
 // the template, a missing module, a GPU-less browser) shows up here in seconds.
+//
+// This runs unattended on a fresh runner, so it reports *why* it failed rather than
+// a bare stack: the stage that broke (start, page load, scene, frame), every browser
+// message, and every request that failed.
+const BASE_ARGS = ['--no-sandbox', '--disable-dev-shm-usage', '--enable-webgl',
+  '--ignore-gpu-blocklist'];
+
+// Headless Chromium draws WebGL through SwiftShader, and the flag that selects it
+// differs between releases: some images only accept ANGLE, some only plain
+// SwiftShader, and a few need no flag at all. Trying them in order turns a dead
+// run into a one-second retry.
+const GL_CONFIGS = [
+  ['--use-gl=angle', '--use-angle=swiftshader'],
+  ['--use-gl=swiftshader'],
+  ['--use-gl=angle', '--use-angle=swiftshader-webgl'],
+  [],
+];
+
+async function launchBrowser() {
+  const problems = [];
+  for (const extra of GL_CONFIGS) {
+    try {
+      const browser = await chromium.launch({ headless: true, args: [...BASE_ARGS, ...extra] });
+      const label = extra.length ? extra.join(' ') : 'default GL';
+      console.log(`Chromium started with ${label}.`);
+      return browser;
+    } catch (error) {
+      problems.push(`${extra.join(' ') || 'default'}: ${String(error.message).split('\n')[0]}`);
+    }
+  }
+  let where = '';
+  try {
+    const path = chromium.executablePath();
+    where = ` The browser it wanted is ${path} (${existsSync(path) ? 'present' : 'MISSING'}).`;
+  } catch { /* older playwright builds have no executablePath() */ }
+  throw new Error('Chromium could not start with any WebGL setting. '
+    + 'Run "npx playwright install --with-deps chromium" in tools/video_renderer.'
+    + where + ` Tried: ${problems.join(' | ')}`);
+}
+
 async function preflight(plan) {
   const data = { plan, profiles: [], duration: 2, captions: '', faceAnimation: 'off' };
-  const server = createStaticServer(checkedHtml(data), resolve(ASSET_ROOT, 'dist/avatar-assets'));
+  let stage = 'build the page';
+  let html;
+  try {
+    html = checkedHtml(data);
+  } catch (error) {
+    throw new Error(`preflight could not ${stage}: ${error.message}`);
+  }
+  const server = createStaticServer(html, resolve(ASSET_ROOT, 'dist/avatar-assets'));
   await new Promise((ok, fail) => { server.once('error', fail); server.listen(0, '127.0.0.1', ok); });
   const address = server.address();
-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--enable-webgl', '--ignore-gpu-blocklist', '--use-gl=angle', '--use-angle=swiftshader'] });
+  const messages = [];
+  let browser;
   try {
+    stage = 'start Chromium';
+    browser = await launchBrowser();
     const page = await browser.newPage({ viewport: { width: WIDTH, height: HEIGHT }, deviceScaleFactor: 1 });
-    const errors = [];
-    page.on('pageerror', error => errors.push(error.message));
-    page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+    const pageErrors = [];
+    page.on('pageerror', error => { pageErrors.push(error.message); messages.push(`[pageerror] ${error.message}`); });
+    page.on('console', message => messages.push(`[${message.type()}] ${message.text()}`));
+    page.on('requestfailed', request => messages.push(`[request failed] ${request.url()} ${request.failure()?.errorText || ''}`));
+
+    stage = 'load the page';
     await page.goto(`http://127.0.0.1:${address.port}/`, { waitUntil: 'networkidle', timeout: 120000 });
-    await page.waitForFunction(() => Boolean(window.sceneReady), null, { timeout: 120000 });
+
+    stage = 'build the 3D scene';
+    const ready = await Promise.race([
+      page.evaluate(() => window.sceneReady),
+      new Promise((_, fail) => setTimeout(() => fail(new Error('the scene never became ready (60s)')), 60000)),
+    ]).catch(error => { throw new Error(`the scene failed to build: ${error.message}`); });
+    if (!ready) throw new Error('the scene reported itself ready but returned nothing');
+
+    stage = 'draw one frame';
     await page.evaluate(() => window.renderAt(0.1));
     const shot = await page.screenshot({ type: 'jpeg', quality: 80, timeout: 30000 });
-    if (errors.length) throw new Error('the page loaded with errors: ' + errors.slice(0, 3).join(' | '));
+
+    stage = 'check the frame';
+    if (pageErrors.length) throw new Error('the page threw: ' + pageErrors.slice(0, 3).join(' | '));
     if (shot.length < 4096) throw new Error(`the rendered frame is only ${shot.length} bytes; the scene is blank`);
     const props = await page.evaluate(() => (window.physicsSummary || {}).staticProps || 0);
-    console.log(`Render preflight passed: page built, WebGL scene ready, ${props} collider(s), frame captured (${shot.length.toLocaleString()} bytes).`);
+    console.log(`Render preflight passed: page built, WebGL scene ready, ${props} collider(s), `
+      + `frame captured (${shot.length.toLocaleString()} bytes).`);
+    if (messages.length) {
+      console.log(`Browser messages during preflight (${messages.length}, not fatal):`);
+      for (const line of messages.slice(0, 10)) console.log('  ' + line);
+    }
+  } catch (error) {
+    console.error(`Render preflight failed while trying to ${stage}: ${error.message}`);
+    if (messages.length) {
+      console.error('What the browser said:');
+      for (const line of messages.slice(0, 25)) console.error('  ' + line);
+    }
+    throw new Error(`preflight failed at "${stage}": ${error.message}`);
   } finally {
-    await browser.close();
+    if (browser) await browser.close().catch(() => {});
     await new Promise(resolve => server.close(resolve));
   }
 }
@@ -659,7 +734,7 @@ async function main() {
   const server=createStaticServer(checkedHtml(data),resolve(ASSET_ROOT,'dist/avatar-assets'));
   await new Promise((ok,fail)=>{server.once('error',fail);server.listen(0,'127.0.0.1',ok);});
   const address=server.address();
-  const browser=await chromium.launch({headless:true,args:['--no-sandbox','--disable-dev-shm-usage','--enable-webgl','--ignore-gpu-blocklist','--use-gl=angle','--use-angle=swiftshader']});
+  const browser=await launchBrowser();
   let ffmpeg;
   try{
     const page=await browser.newPage({viewport:{width:WIDTH,height:HEIGHT},deviceScaleFactor:1});
