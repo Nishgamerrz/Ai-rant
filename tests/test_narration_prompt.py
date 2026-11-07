@@ -34,8 +34,10 @@ class OpeningLineTests(unittest.TestCase):
         self.assertIn("preserving the hook, choice, and ending", WORKFLOW)
 
     def test_the_default_topic_is_one_in_a_world_where_line(self):
-        self.assertIn('default: \'In a world where gravity switches off for exactly ten minutes',
-                      WORKFLOW)
+        start = WORKFLOW.index("      story_topic:")
+        block = WORKFLOW[start:WORKFLOW.index("      character_usernames:", start)]
+        self.assertIn("default: 'In a world where", block)
+        self.assertNotIn("gravity", block)
         self.assertIn('"In a world where ..." works best', WORKFLOW)
 
     def test_the_sub_agent_is_offered_for_the_hard_parts(self):

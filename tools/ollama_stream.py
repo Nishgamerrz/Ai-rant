@@ -278,7 +278,8 @@ class ModelTooSlow(Exception):
 def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
            max_seconds: float = 0.0, stall_seconds: float = 0.0,
            type_delay: float = 0.002, type_budget: float = 120.0,
-           heartbeat_seconds: float = 15.0) -> dict:
+           heartbeat_seconds: float = 15.0, min_tps: float = 0.0,
+           tps_window: float = 90.0) -> dict:
     request = {**request, "stream": True}
     payload = json.dumps(request).encode("utf-8")
     http = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
@@ -301,6 +302,8 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
     seen = 0
     last_progress = time.time()
     started_at = last_progress
+    first_output = 0.0
+    character_count = 0
     try:
         handle = urllib.request.urlopen(http, timeout=timeout)
     except urllib.error.HTTPError as exc:
@@ -360,12 +363,27 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                             kind="warning")
             if piece_thinking or piece_content:
                 last_progress = time.time()
+                if not first_output:
+                    first_output = last_progress
+                # ~4 characters per token is close enough to judge throughput.
+                character_count += (len(piece_thinking) + len(piece_content)) / 4.0
             now = time.time()
             if max_seconds and now - started_at > max_seconds:
                 console.close_box()
                 raise ModelTooSlow(
                     f"still going after {now - started_at:.0f}s "
                     f"(budget {max_seconds:.0f}s); handing this call to the faster model")
+                    # A model that keeps talking but at 0.3 tokens/s is not making progress
+            # either: one blueprint took 48 minutes that way, and the run was over
+            # before the render started. Judge the *rate*, not the wall clock, so a
+            # slow-but-steady preset is still allowed to finish on its own terms.
+            if min_tps and first_output and now - first_output > tps_window:
+                rate = character_count / max(1e-6, now - first_output)
+                if rate < min_tps:
+                    console.close_box()
+                    raise ModelTooSlow(
+                        f"streaming at {rate:.2f} tokens/s, below the {min_tps:.1f} tokens/s "
+                        f"floor; handing this call to a smaller model")
             if stall_seconds and now - last_progress > stall_seconds:
                 console.close_box()
                 raise ModelTooSlow(
@@ -440,6 +458,14 @@ def main() -> None:
                         default=float(os.environ.get("AI_HEARTBEAT", "60")),
                         help="print one quiet 'still working' note when nothing has "
                              "arrived for this long (at most 3 per call); 0 disables it")
+    parser.add_argument("--min-tps", type=float,
+                        default=float(os.environ.get("AI_MIN_TPS", "0")),
+                        help="if the streamed rate stays below this many tokens per second "
+                             "after the first --tps-window seconds, hand the call to the "
+                             "fallback model; 0 disables the check")
+    parser.add_argument("--tps-window", type=float,
+                        default=float(os.environ.get("AI_TPS_WINDOW", "90")),
+                        help="seconds of streaming before the rate is judged")
     parser.add_argument("--keep-stream-flag", action="store_true",
                         help="keep stream:true in the written request file for debugging")
     args = parser.parse_args()
@@ -459,6 +485,7 @@ def main() -> None:
                 f"framed box.{quiet_note}", "notice"), flush=True)
 
     limits = {"max_seconds": args.max_seconds, "stall_seconds": args.stall_seconds,
+              "min_tps": args.min_tps, "tps_window": args.tps_window,
               "type_delay": args.type_delay, "type_budget": args.type_budget,
               "heartbeat_seconds": args.heartbeat_seconds}
 

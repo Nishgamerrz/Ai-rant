@@ -152,6 +152,25 @@ class _PieceByPiece(BaseHTTPRequestHandler):
             self.wfile.write((json.dumps(event) + "\n").encode())
 
 
+class _SlowTrickle(BaseHTTPRequestHandler):
+    """Streams a handful of characters, then holds the connection open."""
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.end_headers()
+        for chunk in ("a", "b", "c"):
+            self.wfile.write((json.dumps({"message": {"thinking": chunk},
+                                          "done": False}) + "\n").encode())
+            self.wfile.flush()
+            time.sleep(0.6)
+
+
 class LiveStreamingTests(unittest.TestCase):
     def test_every_piece_is_printed_as_it_arrives(self):
         import tempfile
@@ -515,6 +534,68 @@ class ThinkingBoxTests(unittest.TestCase):
         self.assertIn('console.use("answer")', helper)
         # Leaving the reasoning colour must close the box, not leave it dangling.
         self.assertIn('if self._box and kind != "thinking":', helper)
+
+
+class ThroughputTests(unittest.TestCase):
+    """A model that crawls must be handed over, not left to eat the hour."""
+
+    def test_a_crawling_stream_is_handed_to_the_fallback(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from ollama_stream import ModelTooSlow, stream
+
+        handler = type("Handler", (_SlowTrickle,), {"calls": []})
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        request = {"model": "qwen3:8b", "messages": [{"role": "user", "content": "hi"}],
+                   "think": True, "options": {"num_predict": 4000}}
+        with self.assertRaises(ModelTooSlow) as caught:
+            stream(request, f"http://127.0.0.1:{server.server_port}/api/chat", "world plan",
+                   30, True, min_tps=5.0, tps_window=1.0)
+        self.assertIn("tokens/s", str(caught.exception))
+        self.assertIn("floor", str(caught.exception))
+
+    def test_a_healthy_stream_is_not_interrupted(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from ollama_stream import stream
+
+        handler = type("Handler", (_PieceByPiece,), {})
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        request = {"model": "qwen3:8b", "messages": [{"role": "user", "content": "hi"}],
+                   "think": True, "options": {"num_predict": 4000}}
+        result = stream(request, f"http://127.0.0.1:{server.server_port}/api/chat", "story",
+                       30, True, min_tps=0.001, tps_window=30.0)
+        self.assertIn("Maya found it", result["response"])
+
+    def test_the_job_sets_a_floor_and_a_window(self):
+        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+        self.assertIn("AI_MIN_TPS: '1.2'", workflow)
+        self.assertIn("AI_TPS_WINDOW: '90'", workflow)
+        helper = (ROOT / "tools" / "ollama_stream.py").read_text(encoding="utf-8")
+        for flag in ("--min-tps", "--tps-window", "AI_MIN_TPS"):
+            self.assertIn(flag, helper)
+
+    def test_the_fallback_is_always_a_different_smaller_model(self):
+        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+        self.assertIn("FALLBACK_MODEL=qwen3:4b", workflow)
+        self.assertIn("qwen3:4b|qwen3:1.7b) FALLBACK_MODEL=qwen3:8b", workflow)
+
+
+class BlueprintSizeTests(unittest.TestCase):
+    def test_the_blueprint_is_small_enough_to_finish_on_a_cpu_runner(self):
+        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+        self.assertIn("12–18 meaningful anchor props (never more than 20)", workflow)
+        self.assertIn("MAP_TOKENS > 6000 ? 6000 : MAP_TOKENS", workflow)
+
+    def test_the_plan_step_reports_its_preset(self):
+        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+        start = workflow.index("Design the complete prompt-themed 3D Roblox world")
+        block = workflow[start:start + 900]
+        self.assertIn("MODEL_QUALITY: ${{ inputs.model_quality }}", block)
 
 
 class TypingCommandLineTests(unittest.TestCase):
