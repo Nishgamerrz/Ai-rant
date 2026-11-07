@@ -1,0 +1,122 @@
+"""A thinking model must not lose its answer to the token ceiling.
+
+A real run with the `hard` preset (qwen3:8b, thinking on) spent ~500 s reasoning,
+hit the flat 1600-token num_predict ceiling and stopped mid-sentence:
+`{"narration":"... 'You're a lifesaver,' he` — 395 chars, far below the words a
+two-minute story needs. The wrapper now notices `done_reason: "length"` and asks
+again with a bigger budget instead of handing a broken answer downstream.
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import threading
+import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+
+from ollama_stream import MAX_PREDICT_CEILING, next_token_budget  # noqa: E402
+
+
+class TokenBudgetTests(unittest.TestCase):
+    def test_budget_grows_well_past_the_old_1600(self):
+        self.assertGreaterEqual(next_token_budget(1600), 4096)
+        self.assertEqual(next_token_budget(2800), 5600)
+        self.assertEqual(next_token_budget(MAX_PREDICT_CEILING), MAX_PREDICT_CEILING)
+
+    def test_workflow_scales_the_budget_with_the_story_length(self):
+        workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
+        self.assertIn("NARRATION_TOKENS=$((1600 + DURATION_SECONDS * 10))", workflow)
+        self.assertIn("REPAIR_TOKENS=$((2000 + DURATION_SECONDS * 10))", workflow)
+        self.assertIn("num_predict:$tokens}}' > narration_request.json", workflow)
+        self.assertIn("num_predict:$tokens}, messages:", workflow)
+        self.assertNotIn("num_predict:1600}}' > narration_request.json", workflow)
+        # A thinking model needs room for the answer after its reasoning.
+        self.assertNotIn("num_predict:800}}' > creation_summary_request.json", workflow)
+
+    def test_workflow_asks_for_brief_reasoning(self):
+        workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
+        self.assertIn("THINK BRIEFLY", workflow)
+
+
+class _CutOffThenComplete(BaseHTTPRequestHandler):
+    """First reply stops at the ceiling; the bigger-budget retry finishes."""
+
+    requests: list[dict] = []
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        payload = json.loads(self.rfile.read(length))
+        type(self).requests.append(payload)
+        budget = int(payload.get("options", {}).get("num_predict") or 0)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.end_headers()
+        if budget < 4096:
+            events = [
+                {"message": {"thinking": "r" * 500}, "done": False},
+                {"message": {"content": '{"narration":"Jordan spotted a leather'}, "done": False},
+                {"done": True, "done_reason": "length", "eval_count": budget},
+            ]
+        else:
+            events = [
+                {"message": {"content": json.dumps({"narration": "COMPLETE STORY"})}, "done": False},
+                {"done": True, "done_reason": "stop", "eval_count": 900},
+            ]
+        for event in events:
+            self.wfile.write((json.dumps(event) + "\n").encode())
+
+
+class TruncatedResponseTests(unittest.TestCase):
+    def test_cut_off_answer_is_retried_with_a_bigger_budget(self):
+        handler = type("Handler", (_CutOffThenComplete,), {"requests": []})
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+
+        request = {
+            "model": "qwen3:8b",
+            "messages": [{"role": "user", "content": "tell a story"}],
+            "think": True,
+            "stream": False,
+            "options": {"temperature": 2.0, "top_p": 0.99, "num_predict": 1600},
+        }
+        with self.subTest("streams a repaired answer"):
+            import tempfile
+
+            with tempfile.TemporaryDirectory() as tmp:
+                request_path = Path(tmp) / "request.json"
+                output_path = Path(tmp) / "response.json"
+                request_path.write_text(json.dumps(request), encoding="utf-8")
+                result = subprocess.run(
+                    [sys.executable, "tools/ollama_stream.py",
+                     "--request", str(request_path), "--output", str(output_path),
+                     "--label", "story narration", "--timeout", "30",
+                     "--url", f"http://127.0.0.1:{server.server_port}/api/chat"],
+                    cwd=ROOT, capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 0, msg=result.stderr[-2000:])
+                self.assertIn("CUT OFF at the token ceiling", result.stdout)
+                self.assertIn("asking again with num_predict=", result.stdout)
+                data = json.loads(output_path.read_text(encoding="utf-8"))
+                self.assertEqual(json.loads(data["response"]), {"narration": "COMPLETE STORY"})
+                self.assertEqual(data["done_reason"], "stop")
+                self.assertFalse(data["truncated"])
+                self.assertGreaterEqual(data["token_ceiling_retry"], 4096)
+
+        budgets = [item["options"]["num_predict"] for item in handler.requests]
+        self.assertEqual(len(budgets), 2)
+        self.assertEqual(budgets[0], 1600)
+        self.assertGreater(budgets[1], budgets[0])
+
+
+if __name__ == "__main__":
+    unittest.main()

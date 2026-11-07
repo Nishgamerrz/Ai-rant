@@ -109,10 +109,14 @@ class StudioExperienceTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
         # The creative temperature is 10x the original presets (clamped to the
         # highest value the models can still use coherently).
-        self.assertIn("options:{temperature:2.0, top_p:0.99, num_predict:1600}", workflow)
+        # Narration and repair budgets scale with the story length so a thinking
+        # model cannot spend the whole ceiling reasoning and cut the answer off;
+        # the map plan and the summary keep their own generous budgets.
+        self.assertIn("options:{temperature:2.0, top_p:0.99, num_predict:$tokens}}' > narration_request.json", workflow)
+        self.assertIn("options:{temperature:2.0, top_p:0.99, num_predict:$tokens}, messages:", workflow)
         self.assertIn("options:{temperature:2.0, top_p:0.99, num_predict:12000}", workflow)
-        self.assertIn("options:{temperature:2.0, top_p:0.99, num_predict:2000}", workflow)
-        self.assertIn("options:{temperature:2.0, top_p:0.99, num_predict:800}", workflow)
+        self.assertIn("options:{temperature:2.0, top_p:0.99, num_predict:1600}}' > creation_summary_request.json", workflow)
+        self.assertIn("NARRATION_TOKENS=$((1600 + DURATION_SECONDS * 10))", workflow)
         for legacy in ("temperature:0.9,", "temperature:1.5,", "temperature:0.45,", "temperature:0.75,", "temperature:0.6,"):
             self.assertNotIn(legacy, workflow)
 

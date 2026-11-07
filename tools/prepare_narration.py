@@ -136,8 +136,10 @@ def main():
 
     # Word limits scale with the requested length. The old hard 100-word cap
     # silently rejected every 90-180 second short, so long videos could never
-    # pass this gate.
-    minimum = max(1, int(duration * 1.5))
+    # pass this gate. The floor matches validate_short.py exactly: rejecting a
+    # narration the final quality gate would accept only costs another long,
+    # thinking-heavy generation round.
+    minimum = max(1, int(duration * 1.4))
     maximum = max(24, int(duration * 5 / 3))
     try:
         payload = json.loads(response_path.read_text(encoding="utf-8"))
