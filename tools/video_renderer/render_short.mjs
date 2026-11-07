@@ -429,7 +429,7 @@ function buildHtml(data) {
     }
     pivot.position.set(point[0],point[1],point[2]);
     // Pass the whole rig object: the face needs the meshes and skeleton, the body
-    // needs the joints. Handing over only `.bones` is what crashed measureHeadRegion.
+    // needs the joints. Handing over only its bones is what crashed measureHeadRegion.
     scene.add(pivot);registerActor(pivot,point,index,place,username,avatarRig,animationClips,avatarScale,profile.front_direction);
   }
   const avatarPromise=Promise.all(DATA.profiles.map(loadAvatar));
