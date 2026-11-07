@@ -98,7 +98,7 @@ def main():
     parser.add_argument("--summary", type=Path, required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--voice", required=True)
-    parser.add_argument("--rate", default="-8%")
+    parser.add_argument("--rate", default="+4%")
     parser.add_argument("--duration", type=duration_arg, required=True)
     args = parser.parse_args()
     output_dir = args.directory

@@ -15,6 +15,10 @@ import json
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from console_style import paint  # noqa: E402
+
 MAX_RESULTS = 4
 MAX_STORED = 24
 
@@ -56,17 +60,18 @@ def main() -> None:
     seen = {item.get("url") for item in existing}
     added = 0
     for query in queries:
-        print(f"[web search] {query}")
+        print(paint(f"[web search] {query}", "tool"), flush=True)
         for result in search(query):
             if result["url"] in seen:
                 continue
             seen.add(result["url"])
             existing.append(result)
             added += 1
-            print(f"  - {result['title']} — {result['url']}")
+            print(paint(f"  - {result['title']} — {result['url']}", "plan"), flush=True)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(existing[-MAX_STORED:], ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"[web search] added {added} new result(s); {len(existing[-MAX_STORED:])} total available to the AI.")
+    print(paint(f"[web search] added {added} new result(s); "
+                f"{len(existing[-MAX_STORED:])} total available to the AI.", "tool"), flush=True)
 
 
 if __name__ == "__main__":

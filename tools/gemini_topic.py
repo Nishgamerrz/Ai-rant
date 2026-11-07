@@ -195,18 +195,22 @@ def main() -> int:
                                         "reason": "no theme typed"})
 
     if not api_key:
-        print("[gemini topic] GEMINI_API_KEY is not configured; using the prompt exactly "
-              "as typed. Add the secret to fix spelling automatically.")
+        print(paint("[gemini topic] GEMINI_API_KEY is not configured; using the prompt "
+                    "exactly as typed. Add the secret to fix spelling automatically.",
+                    "warning"), flush=True)
     for label, entry, raw in (("story prompt", story, story_raw),
                               ("world theme", theme, theme_raw)):
         if entry["skipped"]:
             continue
         if entry["ok"]:
-            print(f"[gemini topic] cleaned the {label} with {args.model}:")
-            print(f"[gemini topic]   as typed : {' '.join(raw.split())}")
-            print(f"[gemini topic]   cleaned  : {entry['text']}")
+            print(paint(f"[gemini topic] cleaned the {label} with {args.model}:", "tool"),
+                  flush=True)
+            print(paint(f"[gemini topic]   as typed : {' '.join(raw.split())}", "thought"),
+                  flush=True)
+            print(paint(f"[gemini topic]   cleaned  : {entry['text']}", "answer"), flush=True)
         else:
-            print(f"[gemini topic] kept the {label} as typed ({entry['reason']}).")
+            print(paint(f"[gemini topic] kept the {label} as typed ({entry['reason']}).",
+                        "notice"), flush=True)
 
     values = {"story_topic": story["text"], "world_theme": theme["text"]}
     _write_outputs(args.github_output, values)

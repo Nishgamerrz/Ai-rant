@@ -71,15 +71,16 @@ jobs:
     env:
       # Every AI step writes as it produces text: no Python buffering in the
       # console, one character per write, a 2 ms typing pace (capped per call so a
-      # long plan can never be delayed by more than two minutes), and a "still
-      # working" line when the model goes quiet for 15 s.
+      # long plan can never be delayed by more than two minutes), and at most three
+      # quiet "still working" notes when the model goes silent for a minute.
       PYTHONUNBUFFERED: '1'
-      # ANSI colour in the log: grey reasoning, bright cyan answers, amber waits,
-      # green successes, red failures, violet tool/Gemini lines.
+      # ANSI colour in the log, in muted tones that stay readable for the twenty
+      # minutes a local model can run: dusty reasoning inside a frame, sage answers,
+      # tan waits, moss successes, brick failures, violet tool/Gemini lines.
       AI_COLOR: '1'
       AI_TYPE_DELAY: '0.002'
       AI_TYPE_BUDGET: '120'
-      AI_HEARTBEAT: '15'
+      AI_HEARTBEAT: '60'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -1070,7 +1071,7 @@ jobs:
           PY
           mkdir -p dist/Generation_Prompts
           cp narration_prompt.txt map_prompt.txt creation_summary_prompt.txt dist/Generation_Prompts/
-          PACKAGE_RATE="${NARRATOR_RATE:--8%}"
+          PACKAGE_RATE="${NARRATOR_RATE:-+4%}"
           echo "Report speech-rate metadata: $PACKAGE_RATE"
           python tools/package_studio_deliverables.py \
             --directory dist \

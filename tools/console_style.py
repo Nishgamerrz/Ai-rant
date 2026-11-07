@@ -23,18 +23,22 @@ RESET = "\033[0m"
 BOLD = "\033[1m"
 DIM = "\033[2m"
 
-# One hue per kind of line, chosen to stay readable on the dark log background.
+# One hue per kind of line. GitHub prints the log on near-black, so these are
+# deliberately mid-dark, desaturated tones: the old palette used a bright grey for
+# thinking and a neon cyan for the answer, which was tiring to look at for the
+# twenty minutes a local model can run. Nothing here is brighter than the code.
 CODES = {
-    "thinking": "\033[38;5;246m",   # grey: the model working it out
-    "answer": "\033[38;5;51m",      # bright cyan: the real answer
-    "label": "\033[38;5;39m",       # blue: who is speaking
-    "notice": "\033[38;5;214m",     # amber: waiting, retrying, switching model
-    "success": "\033[38;5;42m",     # green: finished, accepted
-    "warning": "\033[38;5;208m",    # orange: recovered from something
-    "error": "\033[38;5;203m",      # red: failed, dropped
-    "tool": "\033[38;5;141m",       # violet: tools, gemini, sub-agent
-    "plan": "\033[38;5;117m",       # pale blue: plan/world details
-    "thought": "\033[38;5;180m",    # muted gold: heartbeat while thinking
+    "thinking": "\033[38;5;109m",   # dusty blue-grey: the model working it out
+    "answer": "\033[38;5;108m",     # sage green: the real answer
+    "label": "\033[38;5;74m",       # steel blue: who is speaking
+    "notice": "\033[38;5;180m",     # tan: waiting, retrying, switching model
+    "success": "\033[38;5;71m",     # moss green: finished, accepted
+    "warning": "\033[38;5;173m",    # clay: recovered from something
+    "error": "\033[38;5;167m",      # brick: failed, dropped
+    "tool": "\033[38;5;140m",       # muted violet: tools, gemini, sub-agent
+    "plan": "\033[38;5;145m",       # pale slate: plan/world details
+    "thought": "\033[38;5;240m",    # dark grey: the rare quiet waiting note
+    "frame": "\033[38;5;238m",      # near-invisible grey: the thinking box edge
 }
 
 
