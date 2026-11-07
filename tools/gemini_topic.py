@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -54,7 +55,13 @@ Rewrite the story prompt below so it reads correctly and makes a better prompt f
 a short vertical Roblox-style story video.
 - Fix every spelling, grammar and punctuation mistake.
 - Keep the user's story, setting, characters and intent exactly as they are: same
-  people, same situation, same outcome. Do not replace their idea with your own.
+  people, same situation, same mechanic, same outcome. Do not replace their idea
+  with your own, and do not turn a "what if" premise into a scene that merely
+  happens to be at midnight.
+- If the text opens with a premise ("In a world where ...", "What if ..."), keep
+  that opening word for word. It is the idea of the story, not scene-setting.
+- The rule that grants the wish, the power or the twist must survive unchanged:
+  who gets it, when, and why the characters behave as they do.
 - You may add one or two concrete, ordinary details that make the scene easier to
   film (a place, an object, a time of day), but never a new plot or a moral.
 - One or two sentences, present tense, plain English, under 60 words.
@@ -95,6 +102,31 @@ def build_prompt(text: str, kind: str = "story") -> str:
     return "\n\n".join([rules, TOPIC_NOTE, f"{label} to clean up:\n{text.strip()}"])
 
 
+# A story prompt is a premise, not a scene: "In a world where ..." or "What if ..."
+# is what the later prompts build the story from. Gemini likes to rewrite it as a
+# paragraph of scene-setting, which quietly replaces the idea with a moment.
+PREMISE_OPENERS = ("in a world where", "in a world", "what if", "imagine a world")
+
+
+def premise_of(text: str) -> str | None:
+    """The family of premise an opener belongs to ("in a world where" and
+    "in a world" count as the same idea, so a small rewording is still allowed)."""
+    lowered = " ".join((text or "").split()).casefold()
+    for opener in PREMISE_OPENERS:
+        if lowered.startswith(opener):
+            return "in a world" if opener.startswith("in a world") else opener
+    return None
+
+
+def _tidy_punctuation(text: str) -> str:
+    """Close the gaps a model leaves around punctuation and finish the sentence."""
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    if text and text[-1] not in ".!?":
+        text += "."
+    return text
+
+
 def _strip_wrapping(text: str) -> str:
     """Take the fenced/quoted/labelled reply down to bare prompt text."""
     lines = [line.rstrip() for line in text.replace("\r\n", "\n").split("\n")]
@@ -109,7 +141,7 @@ def _strip_wrapping(text: str) -> str:
         closing = {'"': '"', "'": "'", "\u201c": "\u201d", "\u2018": "\u2019"}[quote]
         if len(text) >= 2 and text.startswith(quote) and text.endswith(closing):
             text = text[1:-1].strip()
-    text = " ".join(text.split())
+    text = _tidy_punctuation(" ".join(text.split()))
     return text
 
 
@@ -128,8 +160,13 @@ def sanitize(reply: str, raw: str) -> tuple[str | None, str]:
         return None, "the reply was not a plausible rewrite of the input"
     if len(text.split()) > max(12, len(raw.split()) * 3 + 10):
         return None, "the reply grew far beyond the input"
-    if text.casefold() == raw.strip().casefold():
+    bare, raw_bare = text.rstrip(".!? ").casefold(), raw.strip().rstrip(".!? ").casefold()
+    if bare and bare == raw_bare:
         return None, "the reply was identical to the input"
+    raw_premise = premise_of(raw)
+    if raw_premise and premise_of(text) != raw_premise:
+        return None, (f"the reply dropped the {raw_premise!r} premise and became a "
+                      "scene instead of a what-if")
     return text, "ok"
 
 
