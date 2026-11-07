@@ -36,12 +36,41 @@ class OpeningLineTests(unittest.TestCase):
     def test_the_default_topic_is_one_in_a_world_where_line(self):
         self.assertIn('default: \'In a world where gravity switches off for exactly ten minutes',
                       WORKFLOW)
-        self.assertIn('best when it starts "In a world where ..."', WORKFLOW)
+        self.assertIn('"In a world where ..." works best', WORKFLOW)
 
-    def test_the_sub_agent_is_asked_to_check_the_line(self):
-        self.assertIn("whether that opening line lands and whether any name reads like a username",
-                      WORKFLOW)
+    def test_the_sub_agent_is_offered_for_the_hard_parts(self):
+        self.assertIn("handwriting a tricky sentence", WORKFLOW)
+        self.assertIn("checking whether a name sounds like a real person", WORKFLOW)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StoryTopicIdeasTests(unittest.TestCase):
+    """A list of ready-to-paste premised topics, so a run never starts blank."""
+
+    def setUp(self):
+        self.topics = (ROOT / "STORY_TOPICS.md").read_text(encoding="utf-8")
+        self.lines = [line for line in self.topics.splitlines()
+                      if line.strip() and line[0].isdigit()]
+
+    def test_the_list_exists_and_is_long_enough_to_pick_from(self):
+        self.assertGreaterEqual(len(self.lines), 20)
+
+    def test_every_topic_is_one_screen_short_line(self):
+        for line in self.lines:
+            text = line.split(". ", 1)[1]
+            self.assertLessEqual(len(text.split()), 40, line)
+            self.assertNotIn("\n", text)
+
+    def test_most_topics_start_with_a_world_rule(self):
+        world = [line for line in self.lines if "In a world where" in line]
+        self.assertGreaterEqual(len(world), len(self.lines) * 0.6)
+
+    def test_the_form_points_at_the_list(self):
+        self.assertIn("24 ideas in STORY_TOPICS.md", WORKFLOW)
+
+    def test_the_list_explains_what_makes_a_topic_work(self):
+        self.assertIn("One everyday problem", self.topics)
+        self.assertIn("A specific ending moment", self.topics)
