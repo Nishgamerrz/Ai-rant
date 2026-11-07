@@ -10,7 +10,8 @@
     "test:module-resolution": "node module_resolution_smoke_test.mjs",
     "test:camera": "node scene_camera_smoke_test.mjs",
     "test:face": "node face_rig_smoke_test.mjs",
-    "test:avatar-glb": "node avatar_glb_smoke_test.mjs"
+    "test:avatar-glb": "node avatar_glb_smoke_test.mjs",
+    "test:caption-overlay": "node caption_smoke_test.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "0.21.0",

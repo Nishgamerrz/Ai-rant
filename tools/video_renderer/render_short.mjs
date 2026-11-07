@@ -55,7 +55,18 @@ function buildHtml(data) {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><style>
   *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#87b9e8;font-family:Arial,Helvetica,sans-serif}
   #frame{position:relative;width:${WIDTH}px;height:${HEIGHT}px}canvas{display:block;width:${WIDTH}px;height:${HEIGHT}px}
+  /* On-screen captions, Roblox-shorts style: heavy white text with a black
+     outline, centred and sitting a little above the middle of the vertical
+     frame. It is drawn inside #frame, so it is captured with the WebGL canvas. */
+  #caption{position:absolute;left:50%;top:38%;transform:translate(-50%,-50%) scale(1);
+    width:84%;text-align:center;font-family:Arial Black,Arial,Helvetica,sans-serif;font-weight:900;
+    font-size:${Math.round(WIDTH * 0.062)}px;line-height:1.14;letter-spacing:.5px;
+    text-transform:uppercase;color:#fff;-webkit-text-stroke:${Math.round(WIDTH * 0.008)}px #000;
+    paint-order:stroke fill;text-shadow:0 ${Math.round(WIDTH * 0.004)}px ${Math.round(WIDTH * 0.014)}px rgba(0,0,0,.55);
+    opacity:0;pointer-events:none;word-wrap:break-word;overflow-wrap:break-word}
+  #caption.on{opacity:1}
   </style></head><body><div id="frame">
+  <div id="caption"></div>
   <script id="render-data" type="application/json">${encoded}</script><script type="importmap">{"imports":{"three":"/modules/three/build/three.module.js"}}</script><script type="module">
   import * as THREE from '/modules/three/build/three.module.js';
   import RAPIER from '/modules/@dimforge/rapier3d-compat/dist/rapier.mjs';
@@ -501,8 +512,30 @@ function buildHtml(data) {
       captions:captions.length};
     renderer.compile(scene,camera);return true;
   });
+  // Captions follow the narration's own SRT cues: the line on screen is the line
+  // being spoken. A cue pops in slightly small and settles within a tenth of a
+  // second, the way story shorts animate their text.
+  const captionEl=document.getElementById('caption');
+  let captionCue=null,captionText='';
+  function captionAt(t){
+    let active=null;
+    for(const cue of captions){if(t>=cue.start&&t<=cue.end){active=cue;break;}}
+    if(active!==captionCue){
+      captionCue=active;
+      const text=active?String(active.text||'').replace(/\s+/g,' ').trim():'';
+      if(text!==captionText){
+        captionText=text;
+        captionEl.textContent=text;
+        captionEl.classList.toggle('on',Boolean(text));
+      }
+    }
+    if(!captionCue)return;
+    const age=Math.max(0,t-captionCue.start);
+    const pop=age>=.12?1:.92+.08*(age/.12);
+    captionEl.style.transform='translate(-50%,-50%) scale('+pop.toFixed(3)+')';
+  }
   window.renderAt=async(t)=>{
-    for(const actor of actors)animateActor(actor,t);cameraAt(t);
+    for(const actor of actors)animateActor(actor,t);cameraAt(t);captionAt(t);
     physicsWorld.step();physicsWorld.step();
     for(const item of dynamicPropInstances){
       const p=item.body.translation(),r=item.body.rotation(),size=item.part.size;

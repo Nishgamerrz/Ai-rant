@@ -257,7 +257,13 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertNotIn("strengthSprite", renderer)
         self.assertIn("focus_username", renderer)
         self.assertNotIn("nameSprite", renderer)
-        self.assertNotIn("#caption", renderer)
+        # The spoken narration IS drawn on screen now (bold, outlined, a little
+        # above the middle), but nothing else is: no username labels, no title,
+        # no caption for a character's handle.
+        self.assertIn('<div id="caption"></div>', renderer)
+        self.assertIn("captionAt(t)", renderer)
+        self.assertNotIn("usernameLabel", renderer)
+        self.assertNotIn("titleSprite", renderer)
         self.assertIn("Automatic avatar limb rigs", renderer)
         self.assertIn("Native Roblox walk clips retargeted", renderer)
         self.assertIn("Native Roblox ${missing.join('/')}", renderer)
