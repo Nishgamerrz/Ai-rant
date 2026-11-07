@@ -50,6 +50,17 @@ def build_schema(usernames=()) -> dict:
             "color": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 255},
                       "minItems": 3, "maxItems": 3},
             "physics": {"type": "string", "enum": ["static", "dynamic"]},
+            # What this anchor actually IS. The build step expands one house/tree/
+            # bench/stall/lamp/plant anchor into a whole furnished group of Parts
+            # (walls, gable roof, glass, furniture, potted plants, leaves), so a
+            # building is never just a plain block.
+            "model": {"type": "string", "enum": [
+                "building", "house", "shop", "tower", "school", "cafe", "station",
+                "temple", "market", "hall", "library", "museum", "bakery",
+                "restaurant", "clinic", "workshop", "cottage", "castle",
+                "tree", "plant", "bench", "lamp", "stall", "fence", "rock",
+                "statue", "vehicle",
+            ]},
         },
         "required": ["name", "shape", "material", "position", "size", "color"],
     }

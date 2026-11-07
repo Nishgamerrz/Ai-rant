@@ -30,6 +30,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from console_style import paint  # noqa: E402
+
 from gemini_subagent import (  # noqa: E402
     API_KEY_ENV,
     DEFAULT_MODEL,

@@ -61,9 +61,23 @@ character_placements, camera_shots, face_expressions, search_queries.
 - props is the map itself: 16-28 anchors (never fewer than 8, no upper cap). Aim
   for 3-6 named building cores, 3 distinct landmarks tied to the story, and
   supporting scenery spread over the map. Not one central pile.
-- Every prop is {"name","shape","material","position","size","color","physics"}.
+- Every prop is {"name","shape","material","position","size","color","physics",
+  "model"}.
     name      unique across the map, letters/digits/space/_/-, 40 chars max, and
               the actual object type ("Market Hall", not "Prop 7").
+    model     what the anchor IS, so the build can expand it into a furnished
+              group instead of one block: building, house, shop, tower, school,
+              cafe, station, temple, market, hall, library, museum, bakery,
+              restaurant, clinic, workshop, cottage, castle, tree, plant, bench,
+              lamp, stall, fence, rock, statue or vehicle. A model building is
+              turned into walls, a stepped gable roof, glass windows and glass
+              inside, a counter, tables, shelves, a rug and ceiling light, potted
+              plants, plants on the window sill and vines with leaves on the
+              facade. A tree becomes a trunk, branches, leaf clusters and fallen
+              leaves; a plant a pot, soil and leaves; a bench a seat, back and
+              legs; a stall a counter, awning, poles and produce. Always set it.
+              Building anchors should be 18-40 studs wide, 10-22 tall, 16-34 deep
+              so the interior has room for furniture; a tree 6-14 wide, 6-18 tall.
     shape     exactly one of: Block, Ball, Cylinder.
     material  exactly one of: Plastic, SmoothPlastic, Concrete, Grass, Slate,
               Wood, Metal, Neon, Glass, Brick, Asphalt.

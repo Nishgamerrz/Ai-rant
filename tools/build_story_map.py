@@ -15,6 +15,48 @@ from durations import check_duration, duration_arg  # noqa: E402
 MATERIALS = {"Plastic", "SmoothPlastic", "Concrete", "Grass", "Slate", "Wood", "Metal", "Neon", "Glass", "Brick", "Asphalt"}
 SHAPES = {"Block", "Ball", "Cylinder"}
 
+# The AI may declare what each anchor IS with "model". A building anchor is then
+# expanded into a full furnished building (walls, gable roof, glass, furniture,
+# plants, leaves) instead of staying one plain block, and a tree/bench/lamp/stall
+# anchor becomes a real group of Parts.
+BUILDING_MODELS = {
+    "building", "house", "home", "shop", "store", "tower", "school", "cafe",
+    "station", "temple", "market", "hall", "library", "museum", "lab",
+    "laboratory", "bakery", "restaurant", "hotel", "clinic", "hospital",
+    "workshop", "warehouse", "cottage", "palace", "castle",
+}
+GROUP_MODELS = {"tree", "plant", "bench", "lamp", "stall", "fence", "rock", "statue", "vehicle"}
+ALL_MODELS = BUILDING_MODELS | GROUP_MODELS
+MODEL_ALIASES = {
+    "tree": "tree", "street tree": "tree", "oak": "tree", "pine": "tree", "palm": "tree",
+    "bush": "plant", "shrub": "plant", "flower": "plant", "flowers": "plant", "garden": "plant",
+    "planter": "plant", "hedge": "plant", "pot plant": "plant", "vine": "plant",
+    "house": "house", "home": "house", "cottage": "house", "building": "building",
+    "shop": "shop", "store": "shop", "kiosk": "stall", "market stall": "stall",
+    "stall": "stall", "food stall": "stall", "counter": "stall",
+    "bench": "bench", "seat": "bench", "street bench": "bench",
+    "lamp": "lamp", "street lamp": "lamp", "lamppost": "lamp", "lantern": "lamp",
+    "fence": "fence", "railing": "fence", "gate": "fence",
+    "rock": "rock", "boulder": "rock", "stone": "rock",
+    "statue": "statue", "monument": "statue", "fountain": "statue",
+    "car": "vehicle", "bus": "vehicle", "cart": "vehicle", "truck": "vehicle",
+}
+
+
+def normalize_model(value) -> str:
+    """Map any wording a model invents onto one of the build recipes."""
+    if not isinstance(value, str):
+        return ""
+    key = " ".join(value.strip().casefold().replace("_", " ").replace("-", " ").split())
+    if key in ALL_MODELS:
+        return key
+    if key in MODEL_ALIASES:
+        return MODEL_ALIASES[key]
+    head = key.split(" ")[0]
+    if head in ALL_MODELS:
+        return head
+    return MODEL_ALIASES.get(head, "")
+
 SHAPE_ALIASES = {
     "block": "Block", "part": "Block", "box": "Block", "cube": "Block", "rectangle": "Block",
     "ball": "Ball", "sphere": "Ball", "round": "Ball",
@@ -499,9 +541,15 @@ def expand_plan(plan, target_props=3000):
     for prop in source_props:
         words = set(re.findall(r"[a-z]+", prop.get("name", "").casefold()))
         size = prop.get("size", [0, 0, 0])
-        is_building = (bool(words & building_words) and not bool(words & component_words)
-                       and size[0] >= 10 and size[1] >= 6 and size[2] >= 8
-                       and prop.get("shape") == "Block")
+        model = normalize_model(prop.get("model"))
+        named_building = (bool(words & building_words) and not bool(words & component_words)
+                          and size[0] >= 10 and size[1] >= 6 and size[2] >= 8
+                          and prop.get("shape") == "Block")
+        # A declared building model always becomes a real building, even when the
+        # AI drew its anchor small or named it "Story Place".
+        declared_building = (model in BUILDING_MODELS and prop.get("shape") in {"Block", "Cylinder"}
+                             and min(size[0], size[2]) >= 6 and size[1] >= 4)
+        is_building = named_building or declared_building
         (building_cores if is_building else keep_props).append(prop)
 
     expanded = list(keep_props)
@@ -578,6 +626,213 @@ def expand_plan(plan, target_props=3000):
 
     def tint(color, factor):
         return [max(0, min(255, round(channel * factor))) for channel in color]
+
+    leaf_greens = ([64, 138, 74], [88, 166, 91], [46, 112, 62], [120, 186, 96])
+    pot_terracotta = [176, 104, 76]
+    # ------------------------------------------------------------ group models
+    # One anchor in the AI plan becomes a whole furnished group here, so a "tree"
+    # is a trunk plus a leafy canopy, a "bench" has a back and legs, a "stall" has
+    # an awning and goods, and a "plant" is a pot with leaves that spill over.
+    group_offsets = [(-11, -9), (11, -9), (-11, 9), (11, 9), (0, -13), (0, 13)]
+    groups_made = 0
+
+    def leaves(name, x, y, z, scale, color_seed=0, count=4, place=None):
+        """Leaf clusters that give a canopy its shape instead of one ball."""
+        put_leaf = place or add
+        for index in range(count):
+            reach = scale * (0.55 if index else 0.0)
+            leaf = leaf_greens[(color_seed + index) % len(leaf_greens)]
+            put_leaf(f"{name} Leaf Cluster {index + 1}", "Ball", "Grass",
+                [x + reach * 0.9 * (1 if index % 2 else -1),
+                 y + scale * (0.18 if index else 0.34),
+                 z + reach * 0.9 * (1 if index % 3 else -1)],
+                [scale * 1.05, scale * 0.85, scale * 1.05], leaf)
+
+    def build_group(prop):
+        """Expand one tree/plant/bench/lamp/stall/fence/rock/statue anchor."""
+        nonlocal groups_made
+
+        def put(name, shape, material, position, size, color, physics="static"):
+            # Group detail must never grow into the cast lane, or it hides the
+            # faces the camera closes in on.
+            if abs(position[0]) < 20 and 4 <= position[2] <= 54:
+                return False
+            return add(name, shape, material, position, size, color, physics)
+
+        name = prop["name"]
+        x, y, z = prop["position"]
+        sx, sy, sz = prop["size"]
+        color = list(prop.get("color") or [120, 145, 180])
+        model = normalize_model(prop.get("model"))
+        footprint = max(sx, sz)
+        if not model:
+            # No declaration: fall back to a sensible model from the name so a
+            # "Palm" or "Lantern" still becomes a group rather than a lone block.
+            model = normalize_model(name)
+            if model not in GROUP_MODELS:
+                return False
+        if model == "tree":
+            trunk_h = max(4.0, sy * 0.62)
+            put(f"{name} Trunk", "Cylinder", "Wood", [x, trunk_h / 2 + y, z],
+                [max(1.0, footprint * 0.16), trunk_h, max(1.0, footprint * 0.16)], [104, 72, 47])
+            for branch in range(2):
+                put(f"{name} Branch {branch + 1}", "Cylinder", "Wood",
+                    [x + (1.1 if branch else -1.1), y + trunk_h * 0.82,
+                     z + (0.9 if branch else -0.9)],
+                    [0.7, trunk_h * 0.42, 0.7], [112, 78, 51])
+            leaves(f"{name} Canopy", x, y + trunk_h, z, max(3.0, footprint * 0.62),
+                   groups_made, 5, put)
+            for spot in range(3):
+                put(f"{name} Fallen Leaf {spot + 1}", "Block", "Grass",
+                    [x + (spot - 1) * 1.6, y + 0.12, z + (spot - 1) * 1.3],
+                    [1.1, 0.14, 0.8], leaf_greens[spot % len(leaf_greens)])
+        elif model == "plant":
+            put(f"{name} Planter", "Cylinder", "Concrete", [x, y + 0.75, z],
+                [max(1.4, footprint * 0.5), 1.5, max(1.4, footprint * 0.5)], pot_terracotta)
+            put(f"{name} Soil", "Cylinder", "Slate", [x, y + 1.5, z],
+                [max(1.1, footprint * 0.4), 0.3, max(1.1, footprint * 0.4)], [82, 66, 54])
+            leaves(f"{name} Leaves", x, y + 1.7, z, max(1.4, footprint * 0.55),
+                   groups_made, 3, put)
+            for stem in range(2):
+                put(f"{name} Stem {stem + 1}", "Block", "Grass",
+                    [x + (0.5 if stem else -0.5), y + 2.4, z],
+                    [0.2, 1.8, 0.2], leaf_greens[(groups_made + stem) % len(leaf_greens)])
+        elif model == "bench":
+            put(f"{name} Seat", "Block", "Wood", [x, y + 1.1, z],
+                [max(3.0, sx), 0.35, max(1.4, sz)], [148, 102, 64])
+            put(f"{name} Backrest", "Block", "Wood", [x, y + 1.9, z - sz * 0.42],
+                [max(3.0, sx), 1.2, 0.3], [124, 84, 52])
+            for leg in (-1, 1):
+                put(f"{name} Leg {leg + 2}", "Block", "Metal", [x + leg * sx * 0.38, y + 0.55, z],
+                    [0.28, 1.1, 1.1], [72, 83, 97])
+        elif model == "lamp":
+            post_h = max(5.0, sy)
+            put(f"{name} Post", "Cylinder", "Metal", [x, y + post_h / 2, z],
+                [0.42, post_h, 0.42], [74, 86, 103])
+            put(f"{name} Lantern", "Ball", "Neon", [x, y + post_h + 0.6, z],
+                [1.1, 1.1, 1.1], [255, 226, 150])
+            put(f"{name} Base", "Cylinder", "Concrete", [x, y + 0.2, z],
+                [1.2, 0.4, 1.2], [120, 130, 140])
+        elif model == "stall":
+            put(f"{name} Counter", "Block", "Wood", [x, y + 1.0, z],
+                [max(4.0, sx), 1.6, max(2.4, sz)], [142, 96, 58])
+            put(f"{name} Awning", "Block", "SmoothPlastic", [x, y + 3.2, z],
+                [max(4.6, sx * 1.1), 0.3, max(2.8, sz * 1.1)], [222, 96, 96])
+            for pole in (-1, 1):
+                put(f"{name} Pole {pole + 2}", "Cylinder", "Metal",
+                    [x + pole * sx * 0.45, y + 1.7, z + sz * 0.42], [0.22, 3.4, 0.22], [96, 104, 116])
+            for crate in range(2):
+                put(f"{name} Produce Crate {crate + 1}", "Block", "Wood",
+                    [x + (crate - 0.5) * sx * 0.35, y + 2.0, z - sz * 0.15],
+                    [1.2, 0.6, 1.2], [166, 128, 84])
+                put(f"{name} Produce {crate + 1}", "Ball", "SmoothPlastic",
+                    [x + (crate - 0.5) * sx * 0.35, y + 2.5, z - sz * 0.15],
+                    [1.0, 0.9, 1.0], [[226, 120, 84], [140, 190, 96]][crate % 2])
+        elif model == "fence":
+            span = max(4.0, sx)
+            for post_index in range(4):
+                px = x - span / 2 + span * post_index / 3
+                put(f"{name} Post {post_index + 1}", "Block", "Wood", [px, y + 1.1, z],
+                    [0.28, 2.2, 0.28], [116, 84, 54])
+            for rail in (0.8, 1.7):
+                put(f"{name} Rail {int(rail * 10)}", "Block", "Wood", [x, y + rail, z],
+                    [span, 0.22, 0.22], [132, 96, 60])
+        elif model == "rock":
+            put(f"{name} Base", "Ball", "Slate", [x, y + sy * 0.3, z],
+                [max(2.0, sx), max(1.2, sy * 0.6), max(2.0, sz)], tint(color, 0.82))
+            for bump in range(3):
+                put(f"{name} Stone {bump + 1}", "Ball", "Slate",
+                    [x + (bump - 1) * 1.5, y + sy * 0.55, z + (1 if bump % 2 else -1) * 1.1],
+                    [max(1.2, sx * 0.45), max(1.0, sy * 0.4), max(1.2, sz * 0.45)],
+                    tint(color, 0.9 + bump * 0.05))
+        elif model == "statue":
+            put(f"{name} Plinth", "Block", "Concrete", [x, y + 0.8, z],
+                [max(2.6, sx * 0.8), 1.6, max(2.6, sz * 0.8)], [150, 156, 164])
+            put(f"{name} Figure", "Block", "SmoothPlastic", [x, y + 3.0, z],
+                [max(1.2, sx * 0.35), 3.0, max(1.2, sz * 0.35)], color)
+            put(f"{name} Head", "Ball", "SmoothPlastic", [x, y + 4.9, z],
+                [1.1, 1.1, 1.1], tint(color, 1.08))
+        elif model == "vehicle":
+            put(f"{name} Body", "Block", "SmoothPlastic", [x, y + 1.2, z],
+                [max(3.2, sx), 1.6, max(2.0, sz)], color)
+            put(f"{name} Cabin", "Block", "Glass", [x, y + 2.3, z - sz * 0.05],
+                [max(2.2, sx * 0.6), 1.2, max(1.6, sz * 0.8)], [150, 210, 235])
+            for wheel in (-1, 1):
+                for end in (-1, 1):
+                    put(f"{name} Wheel {wheel + 2}{end + 2}", "Cylinder", "Slate",
+                        [x + end * sx * 0.34, y + 0.5, z + wheel * sz * 0.52],
+                        [0.9, 0.5, 0.9], [56, 62, 70])
+        else:
+            return False
+        groups_made += 1
+        return True
+
+    def furnish_interior(name, x, y, z, sx, sy, sz, bottom, floor_y, ceiling_y, front, back, left, right, thickness, wall, wood, roof, accent):
+        """Glass, plants and leaves so a finished building is not an empty box."""
+        # A glass display case and an interior glass partition: the AI plan asks
+        # for shops and houses with glass inside, so the build actually has it.
+        add(f"{name} Glass Display Case", "Block", "Glass",
+            [x - sx * 0.22, bottom + 1.5, z + sz * 0.2],
+            [max(1.6, sx * 0.18), 2.4, max(1.0, sz * 0.12)], [150, 214, 238])
+        add(f"{name} Glass Interior Partition", "Block", "Glass",
+            [x + sx * 0.18, floor_y + max(1.4, sy * 0.34), z - sz * 0.18],
+            [max(1.8, sx * 0.2), max(2.0, sy * 0.5), 0.14], [142, 206, 232])
+        add(f"{name} Glass Pane Above Door", "Block", "Glass",
+            [x, floor_y + max(1.2, sy * 0.3), front + thickness / 2],
+            [max(1.2, sx * 0.12), max(0.8, sy * 0.12), 0.12], [146, 210, 236])
+        # Potted plants on the floor and along the sill.
+        for index, (px, pz) in enumerate(((x - sx * 0.32, z + sz * 0.28),
+                                          (x + sx * 0.32, z + sz * 0.28))):
+            add(f"{name} Interior Plant Pot {index + 1}", "Cylinder", "Concrete",
+                [px, bottom + 0.7, pz], [1.1, 1.4, 1.1], [176, 104, 76])
+            leaves(f"{name} Interior Plant {index + 1}", px, bottom + 1.4, pz,
+                   max(1.1, min(2.2, sx * 0.1)), index + 1, 3)
+        # Climbing leaves over the facade, hanging from the roof edge.
+        for vine in range(3):
+            vx = left + (right - left) * (vine + 1) / 4
+            add(f"{name} Facade Vine {vine + 1}", "Block", "Grass",
+                [vx, floor_y + max(1.2, sy * 0.28), front + thickness],
+                [0.22, max(2.0, sy * 0.5), 0.22], leaf_greens[vine % len(leaf_greens)])
+            add(f"{name} Facade Leaf {vine + 1}", "Ball", "Grass",
+                [vx, floor_y + max(1.0, sy * 0.2), front + thickness],
+                [0.9, 0.7, 0.5], leaf_greens[(vine + 2) % len(leaf_greens)])
+        # A stepped gable roof: blocks that taper upward read as a real roof.
+        steps = 4
+        for step in range(steps):
+            share = (steps - step) / steps
+            add(f"{name} Gable Roof {step + 1}", "Block", "SmoothPlastic",
+                [x, ceiling_y + 0.45 + step * max(0.5, sy * 0.055), z],
+                [sx * 1.04 * share, max(0.4, sy * 0.05), sz * 1.04 * share],
+                tint(roof, 0.96 + step * 0.03))
+        add(f"{name} Roof Ridge Cap", "Block", "SmoothPlastic",
+            [x, ceiling_y + 0.5 + steps * max(0.5, sy * 0.055), z],
+            [max(1.4, sx * 0.12), max(0.5, sy * 0.06), max(1.0, sz * 0.1)], tint(roof, 1.1))
+        add(f"{name} Chimney", "Block", "Brick",
+            [x + sx * 0.3, ceiling_y + max(1.4, sy * 0.22), z - sz * 0.3],
+            [max(1.2, sx * 0.1), max(2.4, sy * 0.34), max(1.2, sz * 0.1)], tint(wall, 0.9))
+        add(f"{name} Window Box", "Block", "Wood",
+            [x - sx * 0.26, bottom + max(1.4, sy * 0.24), front + thickness * 1.6],
+            [max(1.4, sx * 0.16), 0.4, 0.6], wood)
+        leaves(f"{name} Window Box Flowers", x - sx * 0.26,
+               bottom + max(1.6, sy * 0.26), front + thickness * 1.6,
+               max(0.8, min(1.4, sx * 0.07)), groups_made, 3)
+        add(f"{name} Doorstep Plant", "Cylinder", "Concrete",
+            [x + sx * 0.22, bottom + 0.6, front + 1.2], [1.0, 1.2, 1.0], [176, 104, 76])
+        leaves(f"{name} Doorstep Leaves", x + sx * 0.22, bottom + 1.2, front + 1.2,
+               max(0.9, min(1.6, sx * 0.08)), 2, 3)
+
+    left_to_place = [prop for prop in keep_props
+                     if normalize_model(prop.get("model")) in GROUP_MODELS
+                     or (not normalize_model(prop.get("model")) and
+                         normalize_model(prop.get("name")) in GROUP_MODELS)]
+    for prop in left_to_place:
+        made_before = groups_made
+        if build_group(prop):
+            # The anchor itself is replaced by its group, not kept as a plain block.
+            keep_props = [item for item in keep_props if item is not prop]
+            expanded = [item for item in expanded if item is not prop]
+            used_names.discard(str(prop.get("name", "")).casefold())
+        groups_made = made_before
 
     for building in building_cores:
         name = building["name"]
@@ -664,6 +919,10 @@ def expand_plan(plan, target_props=3000):
             [max(2, sx * 0.35), 0.8, 0.5], accent_color(plan, color))
         add(f"{name} Roof Trim Front", "Block", "SmoothPlastic", [x, top + 0.3, z + sz * 0.49],
             [sx, 0.45, 0.55], roof)
+        # Glass inside, potted plants, facade vines and a real gable roof.
+        furnish_interior(name, x, y, z, sx, sy, sz, bottom, floor_y, ceiling_y,
+                         front, back, left, right, thickness, wall, wood, roof,
+                         accent_color(plan, color))
 
     # Build a walkable, furnished central plaza instead of leaving the cast on an empty patch.
     paving_material = "Slate" if family in {"castle", "space", "snow"} else "Concrete"
@@ -686,7 +945,9 @@ def expand_plan(plan, target_props=3000):
     # Benches, planted beds and lamp posts dress the plaza perimeter without blocking the cast lane.
     for side, sign in (("West", -1), ("East", 1)):
         for z in (14, 38):
-            x = sign * 16
+            # Just outside the cast lane: a bench back at x=16 stood between the
+            # camera and the faces the close-ups are framed on.
+            x = sign * 22
             if not plaza_clear(x, z, 3.0, 2.2):
                 continue
             add(f"{side} Plaza Bench Seat", "Block", "Wood", [x, 0.72, z], [5.5, 0.45, 1.5], [142, 91, 56])
@@ -694,7 +955,7 @@ def expand_plan(plan, target_props=3000):
             for leg_x in (x - 2.15, x + 2.15):
                 add(f"{side} Plaza Bench Leg", "Block", "Metal", [leg_x, 0.35, z], [0.28, 0.75, 1.2], [72, 83, 97])
         for z in (6, 50):
-            x = sign * 18
+            x = sign * 24
             if plaza_clear(x, z, 1.8, 1.8):
                 add(f"{side} Plaza Lamp Post", "Cylinder", "Metal", [x, 3.4, z], [0.48, 6.8, 0.48], [74, 86, 103])
                 add(f"{side} Plaza Lantern", "Ball", "Neon", [x, 6.9, z], [1.1, 1.1, 1.1], accent)
@@ -849,8 +1110,14 @@ def validate(plan, duration=90, usernames=(), min_props=16, visual_request=""):
 
     # Everything snaps to a 0.5-stud grid: coplanar faces then line up exactly
     # instead of flickering/z-fighting, which is what "not aligned" looked like.
-    def align(value):
-        return round(max(0.5, round(float(value) / 0.5) * 0.5), 2)
+    # Positions must keep their sign - clamping them at +0.5 moved every prop with
+    # a negative X or Z onto the origin, so whole worlds collapsed into one pile of
+    # blocks around the cast. Only a size has a 0.5 minimum.
+    def align(value, minimum=None):
+        snapped = round(float(value) / 0.5) * 0.5
+        if minimum is not None:
+            snapped = max(minimum, snapped)
+        return round(snapped, 2)
 
     clean_props = []
     unique_prop_names = set()
@@ -884,14 +1151,20 @@ def validate(plan, duration=90, usernames=(), min_props=16, visual_request=""):
         if name_key in unique_prop_names:
             raise ValueError(f"map prop names must be unique: {prop_name!r}")
         unique_prop_names.add(name_key)
-        clean_props.append({
+        clean_prop = {
             "name": prop_name, "shape": shape, "material": material,
             "position": [align(value) for value in pos],
-            "size": [align(value) for value in size],
+            "size": [align(value, 0.5) for value in size],
             "color": visible_prop_color(prop.get("color"), [120, 145, 180]),
             "physics": ("dynamic" if prop.get("physics") == "dynamic" and shape in {"Block", "Ball"}
                         and max(float(v) for v in size) <= 12 else "static"),
-        })
+        }
+        # Keep the declared model so the expansion step can build a whole house,
+        # tree, bench or stall from one anchor instead of a bare block.
+        model = normalize_model(prop.get("model", prop.get("kind")))
+        if model:
+            clean_prop["model"] = model
+        clean_props.append(clean_prop)
     return {
         "name": name, "theme": theme,
         "ground_color": color(plan.get("ground_color"), [88, 166, 91]),
