@@ -67,7 +67,7 @@ function buildHtml(data) {
   import { PLYLoader } from '/modules/three/examples/jsm/loaders/PLYLoader.js';
   import { STLLoader } from '/modules/three/examples/jsm/loaders/STLLoader.js';
   import { TDSLoader } from '/modules/three/examples/jsm/loaders/TDSLoader.js';
-  import { animateAvatarRig, applyRobloxAnimationRig, buildAvatarRig, measureHeadRegion } from '/avatar_rig.mjs';
+  import { animateAvatarRig, applyRobloxAnimationRig, buildAvatarRig, measureFaceAnchor } from '/avatar_rig.mjs';
   import { chooseFaceCamera, chooseSafeCamera } from '/scene_camera.mjs';
   import { applyFaceHeadMotion, blinkSchedule, createFaceRig, defaultFaceTimeline, faceStateAt,
     normalizeExpressionTimeline, parseSrt, speechPulses, syntheticPulses } from '/face_rig.mjs';
@@ -309,22 +309,14 @@ function buildHtml(data) {
     mouthPulses: faceSpeechPulses.length,
   };
   function attachAnimatedFace(head,rig,index,frontDirection,mode){
-    if(!head||mode==='off')return null;
-    const region=measureHeadRegion(THREE,rig);
-    const width=Math.max(.42,Math.min(1.5,region.size[0]*.86));
-    const height=Math.max(.3,Math.min(1.1,region.size[1]*.68));
-    const frontSign=Number(frontDirection?.[2]??1)>=0?1:-1;
-    // The rig is measured at rest, so the head joint's world position is its
-    // rig-space origin and the face anchor is a plain offset from it. Doing this
-    // without worldToLocal keeps the face glued on even if matrices are stale.
-    const headOrigin=head.getWorldPosition(new THREE.Vector3());
-    const anchor=new THREE.Vector3(
-      region.center[0]-headOrigin.x,
-      region.center[1]-headOrigin.y,
-      (frontSign>=0?region.maxZ+.012:region.minZ-.012)-headOrigin.z);
-    const face=createFaceRig(THREE,{headBone:head,width,height,seed:index*23+7});
-    face.mesh.position.copy(anchor);
-    if(frontSign<0)face.mesh.rotation.y=Math.PI;
+    if(!head||!rig||mode==='off')return null;
+    // A face is decoration: if measuring the head fails, the avatar still renders.
+    let layout;
+    try{layout=measureFaceAnchor(THREE,rig,head,Number(frontDirection?.[2]??1));}
+    catch(error){console.warn('Head measurement failed; rendering this avatar without a face:',error.message);return null;}
+    const face=createFaceRig(THREE,{headBone:head,width:layout.width,height:layout.height,seed:index*23+7});
+    face.mesh.position.copy(layout.anchor);
+    if(Number(frontDirection?.[2]??1)<0)face.mesh.rotation.y=Math.PI;
     head.add(face.mesh);
     return face;
   }
@@ -342,12 +334,15 @@ function buildHtml(data) {
     if(actor.rig)applyFaceHeadMotion(THREE,actor.rig,state);
     actor.faceState=state;
   }
-  function registerActor(root,point,index,placement,username,rig=null,animationClips=null,animationScale=1,frontDirection=[0,0,1]){
+  function registerActor(root,point,index,placement,username,avatarRig=null,animationClips=null,animationScale=1,frontDirection=[0,0,1]){
     const lead=placement?.role==='lead'||index===0;
-    addRequestedAvatarEffects(root,rig,placement?.visual_effects,frontDirection);
-    const face=rig?.Head?attachAnimatedFace(rig.Head,rig,index,frontDirection,DATA.faceAnimation):null;
+    // avatarRig is the object buildAvatarRig() returns: the joint map (bones)
+    // plus the meshes/skeleton used to measure the head. The body needs joints.
+    const bones=avatarRig?.bones&&avatarRig.bones.Head?avatarRig.bones:(avatarRig?.Head?avatarRig:null);
+    addRequestedAvatarEffects(root,bones,placement?.visual_effects,frontDirection);
+    const face=bones?.Head?attachAnimatedFace(bones.Head,avatarRig,index,frontDirection,DATA.faceAnimation):null;
     actors.push({root,username:String(username||''),baseX:Number(point[0]),baseY:Number(point[1]),baseZ:Number(point[2]),
-      phase:index*1.73,lead,stride:lead?2.1:1.15,rig,animationClips,animationScale,face,
+      phase:index*1.73,lead,stride:lead?2.1:1.15,rig:bones,animationClips,animationScale,face,
       blinks:blinkSchedule(index*31+5,DATA.duration+4,lead?1.15:.9)});
   }
   async function loadAvatar(profile,index){
@@ -422,7 +417,9 @@ function buildHtml(data) {
       }
     }
     pivot.position.set(point[0],point[1],point[2]);
-    scene.add(pivot);registerActor(pivot,point,index,place,username,avatarRig?.bones||null,animationClips,avatarScale,profile.front_direction);
+    // Pass the whole rig object: the face needs the meshes and skeleton, the body
+    // needs the joints. Handing over only `.bones` is what crashed measureHeadRegion.
+    scene.add(pivot);registerActor(pivot,point,index,place,username,avatarRig,animationClips,avatarScale,profile.front_direction);
   }
   const avatarPromise=Promise.all(DATA.profiles.map(loadAvatar));
   const shots=DATA.plan.camera_shots?.length?DATA.plan.camera_shots:[{time:0,position:[0,38,76],target:[0,3,24],transition:'smooth'},{time:DATA.duration,position:[-14,15,18],target:[0,3,24],transition:'smooth'}];
