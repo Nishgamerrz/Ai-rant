@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from durations import DURATIONS  # noqa: E402
+from durations import check_duration, duration_arg  # noqa: E402
 
 MATERIALS = {"Plastic", "SmoothPlastic", "Concrete", "Grass", "Slate", "Wood", "Metal", "Neon", "Glass", "Brick", "Asphalt"}
 SHAPES = {"Block", "Ball", "Cylinder"}
@@ -920,7 +920,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
     parser.add_argument("destination", type=Path)
-    parser.add_argument("duration", type=float, choices=DURATIONS)
+    parser.add_argument("duration", type=duration_arg,
+                        help="exact length: 144, 2:24, 2m24s")
     parser.add_argument("--json-only", action="store_true")
     parser.add_argument("--strict", action="store_true", help="require a valid AI-authored landmark blueprint")
     parser.add_argument("--fallback", action="store_true", help="build a theme/story-based map without the local AI service")
@@ -935,8 +936,7 @@ def main():
     usernames = json.loads(args.usernames.read_text(encoding="utf-8")) if args.usernames else []
     if not isinstance(usernames, list) or any(not isinstance(name, str) for name in usernames):
         raise SystemExit("usernames file must be a JSON array of strings")
-    if duration not in DURATIONS:
-        raise SystemExit(f"duration must be one of {', '.join(str(choice) for choice in DURATIONS)} seconds")
+    duration = check_duration(duration)
     if not 1200 <= args.target_props <= 8000:
         raise SystemExit("target-props must be between 1200 and 8000 furnished Parts")
     if args.fallback:

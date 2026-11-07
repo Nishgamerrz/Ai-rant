@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract a compact, bounded 30–180 second narration from Ollama output."""
+"""Extract a compact, bounded narration for any chosen length (15-300 s)."""
 from __future__ import annotations
 
 import json
@@ -7,6 +7,9 @@ import os
 import re
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from durations import parse_duration  # noqa: E402
 
 TEXT_KEYS = ("narration", "voiceover", "voiceover_script", "spoken_script", "script", "story", "narrative", "short_story", "text", "content")
 
@@ -125,7 +128,7 @@ def main():
             "[--truncate TOPIC]"
         )
     response_path, output_path = map(Path, sys.argv[1:3])
-    duration = int(sys.argv[3])
+    duration = parse_duration(sys.argv[3])
     truncate = len(sys.argv) == 6 and sys.argv[4] == "--truncate"
     topic = sys.argv[5] if truncate else "a small act of honesty"
     if len(sys.argv) == 6 and not truncate:

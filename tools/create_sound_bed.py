@@ -8,13 +8,13 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from durations import check_duration  # noqa: E402
+from durations import parse_duration  # noqa: E402
 
 
 def resolve_duration(raw):
-    """Accept every length the GUI offers, up to the 180 s long-form maximum."""
+    """Accept whatever length the user typed: 144, 2:24, or 2m24s."""
     try:
-        return check_duration(float(raw))
+        return float(parse_duration(raw))
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 

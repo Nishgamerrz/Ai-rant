@@ -14,18 +14,10 @@ on:
         default: ''
         type: string
       duration_seconds:
-        description: 'Length'
+        description: 'Length — exact (2:24, 144, 1m47s) or a window the AI ends inside (2-3m)'
         required: true
-        default: '60'
-        type: choice
-        options:
-          - '30'
-          - '45'
-          - '60'
-          - '90'
-          - '120'
-          - '150'
-          - '180'
+        default: '2:24'
+        type: string
       map_detail:
         description: 'World size'
         required: true
@@ -77,6 +69,42 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Let the AI pick the exact ending
+        env:
+          REQUESTED_LENGTH: ${{ inputs.duration_seconds }}
+          STORY_TOPIC: ${{ inputs.story_topic }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+
+          sys.path.insert(0, 'tools')
+          from durations import choose_length, describe, format_duration, parse_spec
+
+          raw = os.environ.get('REQUESTED_LENGTH', '')
+          seed = '|'.join([
+              os.environ.get('GITHUB_RUN_ID', ''),
+              os.environ.get('GITHUB_RUN_ATTEMPT', ''),
+              os.environ.get('STORY_TOPIC', ''),
+          ])
+          try:
+              low, high = parse_spec(raw)
+              seconds = choose_length(raw, seed=seed)
+          except ValueError as exc:
+              raise SystemExit(f"Length {raw!r} is not usable: {exc}. {describe()}")
+          label = format_duration(seconds)
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as handle:
+              handle.write(f"DURATION_SECONDS={seconds}\n")
+              handle.write(f"DURATION_LABEL={label}\n")
+              handle.write(f"DURATION_WINDOW={format_duration(low)}-{format_duration(high)}\n")
+          if low == high:
+              print(f"Exact length requested: {label} ({seconds} s).")
+          else:
+              print(f"You asked for {format_duration(low)}-{format_duration(high)}; "
+                    f"the AI ends this one at {label} ({seconds} s) - never a round minute, never past the ceiling.")
+          print(f"Every stage and every AI prompt now uses exactly {seconds} seconds.")
+          PY
+
       - name: Require a username for the avatar cast
         env:
           ROBLOX_USERNAMES: ${{ inputs.character_usernames }}
@@ -93,7 +121,6 @@ jobs:
         env:
           STORY_TOPIC: ${{ inputs.story_topic }}
           WORLD_THEME: ${{ inputs.world_theme }}
-          DURATION_SECONDS: ${{ inputs.duration_seconds }}
           MODEL_QUALITY: ${{ inputs.model_quality }}
           CAST_NAMES: ${{ env.CAST_NAMES }}
           VOICE_STYLE: ${{ inputs.voice_style }}
@@ -115,7 +142,7 @@ jobs:
                   '> This is a concise execution plan, not private chain-of-thought. Live step logs below show completed actions.\n\n'
                   f'- **Story prompt:** {topic}\n'
                   f'- **Theme:** {theme}\n'
-                  f'- **Duration / preset / voice:** {clean(os.environ["DURATION_SECONDS"])}s / {clean(os.environ["MODEL_QUALITY"])} / {clean(os.environ["VOICE_STYLE"])}\n'
+                  f'- **Length / preset / voice:** {clean(os.environ.get("DURATION_LABEL", "?"))} ({clean(os.environ["DURATION_SECONDS"])} s, window {clean(os.environ.get("DURATION_WINDOW", ""))}) / {clean(os.environ["MODEL_QUALITY"])} / {clean(os.environ["VOICE_STYLE"])}\n'
                   f'- **Avatar cast:** {clean(os.environ.get("CAST_NAMES", ""))}\n'
                   '- **Tools:** selected Ollama model, Roblox public avatar APIs, optional web research, edge-tts, Three.js + Rapier, Chromium, FFmpeg, Python validation, ReportLab, ZIP.\n'
                   '- **Pipeline:** story and furnished world/camera plan → narration audio → overlay-free MP4 + Studio project → quality checks and package.\n'
@@ -334,14 +361,14 @@ jobs:
       - name: Write a believable real-life story
         env:
           STORY_TOPIC: ${{ inputs.story_topic }}
-          DURATION_SECONDS: ${{ inputs.duration_seconds }}
         run: |
-          # Narration length scales with the chosen short length (30s to 180s).
+          # Narration length scales with the exact length picked for this run.
           MIN_WORDS=$((DURATION_SECONDS * 3 / 2))
           TARGET_WORDS=$((DURATION_SECONDS * 8 / 5))
           MAX_WORDS=$((DURATION_SECONDS * 5 / 3))
           cat > narration_prompt.txt <<PROMPT
-          Write ONE short, vivid, believable real-life mini-story in natural English for a ${DURATION_SECONDS}-second vertical short.
+          Write ONE short, vivid, believable real-life mini-story in natural English for a video that runs exactly ${DURATION_SECONDS} seconds (${DURATION_LABEL}).
+          The ending is a specific moment, not a round number: land the last sentence so it finishes at ${DURATION_LABEL} and nowhere else. Never pad toward a round minute and never write past it.
           Topic: "${STORY_TOPIC}". Aim for ${TARGET_WORDS} words, strictly between ${MIN_WORDS} and ${MAX_WORDS} words.
           HARD LIMIT: never write more than ${MAX_WORDS} words. This is a brief short, not a long story. Do not pad it.
           You have full creative authority over this video: you may invent characters, details, events, emotions and timings, and you may change the story however you think makes the best short. Think through a clean hook, one everyday problem, the cast's choice, and a satisfying ending before writing.
@@ -401,7 +428,6 @@ jobs:
           STORY_TOPIC: ${{ inputs.story_topic }}
           MAP_DETAIL: ${{ inputs.map_detail }}
           WORLD_THEME: ${{ inputs.world_theme }}
-          DURATION_SECONDS: ${{ inputs.duration_seconds }}
         run: |
           NARRATION=$(cat dist/narration.txt)
           case "${MAP_DETAIL:-dense}" in
@@ -435,8 +461,8 @@ jobs:
           Treat props as blueprint anchors: 3–6 building cores, large distinctive story landmarks, and supporting scene anchors. Give each building its own recognizable footprint; the deterministic build step will model open facades, visible windows, furnishing, and structural details. Add enough diverse anchor locations to fill the map, not one central pile. Keep story-specific landmarks prominent and every named username camera-visible.
           Use the user theme prompt as the source of truth for every design choice. Derive the theme from the story only when the user left the theme blank. Make the theme unmistakable and specific; do not fall back to the same generic city/neon plaza. The finished environment is expanded by code to ${TARGET_PROPS}+ Parts; this compact AI blueprint should prioritize coherence, varied locations, and meaningful design over repeating primitive objects.
           Include one character_placements entry for every supplied username using exact spelling, roles lead/supporting, positions X=-8..8, Y=0..3, Z=12..38. Do not add username labels, screen text, floating numbers, scars, tattoos, badges, or other visual effects unless the user's story/topic explicitly asks for them. When requested, keep the effect attached to the specified avatar body part/location. Keep a clear 30-by-40-stud area around this cast so characters and camera remain unobstructed.
-          Use ${SHOT_COUNT:-8} to ${SHOT_MAX:-16} camera_shots with increasing times from 0 through ${DURATION_SECONDS}; show the complete environment, all supplied characters, landmarks, and the ending beat. Coordinates are Roblox X,Y,Z. Each shot must set focus_username to an exact supplied username (or world for a single establishing view); every deliberate snap cut must move both the camera and focus to its named character. Begin wide, use smooth moves and deliberate snap cuts, finish on the lead.
-          ANIMATED FACES (required): every character gets a Roblox story-short face rendered from your timeline — white eyes with dark pupils, thick expressive eyebrows and a clean line mouth — so choose the feeling that fits each beat. Return a face_expressions timeline of 6–16 beats across the whole ${DURATION_SECONDS} seconds. Each beat is {"time": seconds, "expression": one of neutral|happy|sad|surprised|worried|angry|excited|thinking, "intensity": 0..1, "username": exact supplied username}. Time every switch to the exact second the narration changes feeling, so the face changes on the beat, never at random.
+          Use ${SHOT_COUNT:-8} to ${SHOT_MAX:-16} camera_shots with increasing times from 0 through exactly ${DURATION_SECONDS} (${DURATION_LABEL}); the final shot time is exactly ${DURATION_SECONDS}, and intermediate times must be precise moments (e.g. 37.4, 71.2, 118.6), never rounded to tens; show the complete environment, all supplied characters, landmarks, and the ending beat. Coordinates are Roblox X,Y,Z. Each shot must set focus_username to an exact supplied username (or world for a single establishing view); every deliberate snap cut must move both the camera and focus to its named character. Begin wide, use smooth moves and deliberate snap cuts, finish on the lead.
+          ANIMATED FACES (required): every character gets a Roblox story-short face rendered from your timeline — white eyes with dark pupils, thick expressive eyebrows and a clean line mouth — so choose the feeling that fits each beat. The whole video is exactly ${DURATION_SECONDS} seconds (${DURATION_LABEL}) and must end there, not on a round minute. Return a face_expressions timeline of 6–16 beats across the whole ${DURATION_SECONDS} seconds, with precise non-round timestamps tied to the narration beats. Each beat is {"time": seconds, "expression": one of neutral|happy|sad|surprised|worried|angry|excited|thinking, "intensity": 0..1, "username": exact supplied username}. Time every switch to the exact second the narration changes feeling, so the face changes on the beat, never at random.
           FACE CAMERAS (required): mark at least 3 shots with "framing":"face" (the close-up that Roblox story shorts cut to) and set "face_distance" between 2.0 and 3.4 studs. A face shot must focus a named character whose expression changes at that moment. All other shots use "framing":"auto" or "wide". Fill position/target normally; the renderer pulls the face camera in to the head safely.
           The world platform spans X/Z=-320..320. Props must be individually modeled physical Roblox Parts (not images or flat drawings): allowed shapes Block/Ball/Cylinder; allowed materials Plastic, SmoothPlastic, Concrete, Grass, Slate, Wood, Metal, Neon, Glass, Brick, Asphalt. Each prop has a unique short name, position X/Z=-250..250 and Y=0..250 (Y is height above the ground), size dimensions 0.5..64, RGB color integers 0..255, and physics='static' or 'dynamic'. Keep buildings, terrain, and furniture static; mark small story-critical loose objects, balls, or tossable items dynamic so they react to gravity and collisions. Keep all props within the platform and appropriate for all ages.
           PROMPT
@@ -536,7 +562,6 @@ jobs:
         env:
           STORY_TOPIC: ${{ inputs.story_topic }}
           MAP_DETAIL: ${{ inputs.map_detail }}
-          DURATION_SECONDS: ${{ inputs.duration_seconds }}
         run: |
           case "${MAP_DETAIL:-dense}" in
             standard) TARGET_PROPS=1260 ;;
@@ -579,7 +604,6 @@ jobs:
 
       - name: Synthesize the selected narrator voice and readable captions
         env:
-          DURATION_SECONDS: ${{ inputs.duration_seconds }}
           VOICE_STYLE: ${{ inputs.voice_style }}
         run: |
           case "$VOICE_STYLE" in
@@ -611,8 +635,6 @@ jobs:
 
       - name: Package the runnable Roblox Studio experience
         id: studio-experience
-        env:
-          DURATION_SECONDS: ${{ inputs.duration_seconds }}
         run: |
           python tools/build_studio_experience.py \
             --map dist/Roblox_Story_Map.json \
@@ -665,8 +687,6 @@ jobs:
           fi
 
       - name: Render the complete vertical MP4 without Roblox Studio or Blender
-        env:
-          DURATION_SECONDS: ${{ inputs.duration_seconds }}
         run: |
           node tools/video_renderer/render_short.mjs \
             --map dist/Roblox_Story_Map.json \
@@ -707,7 +727,6 @@ jobs:
 
       - name: Write AI-generated creation summary and bundle the final deliverables
         env:
-          DURATION_SECONDS: ${{ inputs.duration_seconds }}
           VOICE_STYLE: ${{ inputs.voice_style }}
         run: |
           python - <<'PY'

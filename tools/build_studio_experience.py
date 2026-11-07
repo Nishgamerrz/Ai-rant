@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from durations import DURATIONS, check_duration  # noqa: E402
+from durations import check_duration, duration_arg, format_duration  # noqa: E402
 
 
 def read_json(path: Path, default):
@@ -685,7 +685,7 @@ def build(args):
             "# Roblox Studio Story Experience\n\n"
             f"**World:** {plan.get('name', 'AI Story World')}  \n"
             f"**Theme:** {plan.get('theme', '')}  \n"
-            f"**Duration:** {duration:g} seconds  \n"
+            f"**Duration:** {format_duration(duration)} ({duration:g} seconds)  \n"
             f"**Furnished world Parts:** {len(plan.get('props', []))}  \n"
             f"**Cast:** {cast_label}\n\n"
             "## Watch the short\n\n"
@@ -707,8 +707,9 @@ def main():
     parser.add_argument("--map", type=Path, required=True)
     parser.add_argument("--cast", type=Path, required=True)
     parser.add_argument("--avatar-profiles", type=Path, help="resolved avatar mesh and RBXM animation manifest JSON")
-    parser.add_argument("--duration", type=int, choices=DURATIONS, required=True,
-                        help="short length in seconds; long-form 90-180 s is supported")
+    parser.add_argument(
+        "--duration", type=duration_arg, required=True,
+        help="exact short length: 144, 2:24, 2m24s -- any moment up to 5:00")
     parser.add_argument("--narration", type=Path)
     parser.add_argument("--srt", type=Path)
     parser.add_argument("--audio-asset-id", default="")

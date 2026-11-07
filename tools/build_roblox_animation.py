@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from durations import MIN_DURATION, MAX_DURATION  # noqa: E402
+from durations import MAX_DURATION, MIN_DURATION, duration_arg  # noqa: E402
 
 POSE_TREE = {
     "HumanoidRootPart": {
@@ -195,7 +195,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
     parser.add_argument("destination", type=Path)
-    parser.add_argument("duration", type=float)
+    parser.add_argument("duration", type=duration_arg,
+                        help="exact length: 144, 2:24, 2m24s")
     parser.add_argument("--json-only", action="store_true")
     parser.add_argument("--usernames", type=Path, help="JSON file containing allowed cast usernames")
     args = parser.parse_args()
