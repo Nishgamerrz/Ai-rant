@@ -23,22 +23,25 @@ RESET = "\033[0m"
 BOLD = "\033[1m"
 DIM = "\033[2m"
 
-# One hue per kind of line. GitHub prints the log on near-black, so these are
-# deliberately mid-dark, desaturated tones: the old palette used a bright grey for
-# thinking and a neon cyan for the answer, which was tiring to look at for the
-# twenty minutes a local model can run. Nothing here is brighter than the code.
+# One hue per kind of line, in the basic 16 ANSI colours (30-37 / 90-97).
+#
+# The palette used to be 256-colour ("\033[38;5;109m"). GitHub's log viewer does
+# not render those: it drops the sequence and prints the text in the default
+# colour, so on a phone every line of the run looked the same white and the
+# colours never appeared at all. The 16 basic codes are rendered everywhere, so
+# every kind of line is distinguishable in the browser and in a terminal.
 CODES = {
-    "thinking": "\033[38;5;109m",   # dusty blue-grey: the model working it out
-    "answer": "\033[38;5;108m",     # sage green: the real answer
-    "label": "\033[38;5;74m",       # steel blue: who is speaking
-    "notice": "\033[38;5;180m",     # tan: waiting, retrying, switching model
-    "success": "\033[38;5;71m",     # moss green: finished, accepted
-    "warning": "\033[38;5;173m",    # clay: recovered from something
-    "error": "\033[38;5;167m",      # brick: failed, dropped
-    "tool": "\033[38;5;140m",       # muted violet: tools, gemini, sub-agent
-    "plan": "\033[38;5;145m",       # pale slate: plan/world details
-    "thought": "\033[38;5;240m",    # dark grey: the rare quiet waiting note
-    "frame": "\033[38;5;238m",      # near-invisible grey: the thinking box edge
+    "thinking": "\033[37m",   # near-white: the model working it out
+    "answer": "\033[36m",     # cyan: the real answer
+    "label": "\033[94m",      # bright blue: who is speaking
+    "notice": "\033[33m",     # yellow: waiting, retrying, switching model
+    "success": "\033[32m",    # green: finished, accepted
+    "warning": "\033[93m",    # bright yellow: recovered from something
+    "error": "\033[91m",      # bright red: failed, dropped
+    "tool": "\033[35m",       # magenta: tools, gemini, sub-agent
+    "plan": "\033[34m",       # blue: plan/world details
+    "thought": "\033[90m",    # grey: the rare quiet waiting note
+    "frame": "\033[90m",      # grey: the thinking box edge
 }
 
 
