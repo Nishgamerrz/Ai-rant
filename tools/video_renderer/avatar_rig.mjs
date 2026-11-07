@@ -169,38 +169,120 @@ export function buildAvatarRig(THREE, model) {
  * face exactly on the front of the head instead of floating or sinking into it.
  */
 export function measureHeadRegion(THREE, rig) {
-  const headIndex = rig.skeleton.bones.findIndex((bone) => bone.name === 'Head');
-  const fallbackHeight = Number(rig.height) || 6.2;
+  // This used to read `rig.skeleton.bones` unconditionally. The renderer passed
+  // the bone map ({Head, Chest, ...}) instead of the whole rig object in some
+  // paths, so a finished render died at "Cannot read properties of undefined
+  // (reading 'bones')". Accept both shapes, and never throw: a face is cosmetic,
+  // the short is not.
+  const skeleton = rig?.skeleton || null;
+  const boneList = Array.isArray(skeleton?.bones) ? skeleton.bones : [];
+  const meshes = Array.isArray(rig?.meshes) ? rig.meshes : [];
+  const boneMap = rig?.bones && rig.bones.Head ? rig.bones : (rig?.Head?.isBone ? rig : null);
+  const fallbackHeight = Number(rig?.height) || 6.2;
   const empty = {
     center: [0, fallbackHeight * 0.9, 0], size: [fallbackHeight * 0.16, fallbackHeight * 0.16, fallbackHeight * 0.16],
     maxZ: fallbackHeight * 0.08, minZ: -fallbackHeight * 0.08,
   };
-  if (headIndex < 0) return empty;
+  let headBone = boneList.find((bone) => bone?.name === 'Head') || null;
+  if (!headBone && boneMap?.Head) headBone = boneMap.Head;
+  if (!headBone) return empty;
+  // Only a real Object3D can report a world position; anything else gets the
+  // plain fallback box instead of a throw in the middle of a render.
+  const headOrigin = () => {
+    try {
+      if (typeof headBone.getWorldPosition === 'function') {
+        return headBone.getWorldPosition(new THREE.Vector3());
+      }
+    } catch { /* fall through to the box fallback */ }
+    return null;
+  };
+
   const min = new THREE.Vector3(Infinity, Infinity, Infinity);
   const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
   let counted = 0;
   const point = new THREE.Vector3();
-  for (const mesh of rig.meshes || []) {
-    const geometry = mesh.geometry;
-    const position = geometry.getAttribute('position');
+  const headIndex = boneList.indexOf(headBone);
+
+  for (const mesh of meshes) {
+    const geometry = mesh?.geometry;
+    const position = geometry?.getAttribute?.('position');
+    if (!position) continue;
     const skinIndex = geometry.getAttribute('skinIndex');
-    if (!position || !skinIndex) continue;
     const step = Math.max(1, Math.floor(position.count / 6000));
-    for (let vertex = 0; vertex < position.count; vertex += step) {
-      const belongs = skinIndex.getX(vertex) === headIndex || skinIndex.getY(vertex) === headIndex;
-      if (!belongs) continue;
-      point.set(position.getX(vertex), position.getY(vertex), position.getZ(vertex));
-      min.min(point);
-      max.max(point);
-      counted += 1;
+    if (skinIndex && headIndex >= 0) {
+      for (let vertex = 0; vertex < position.count; vertex += step) {
+        const belongs = skinIndex.getX(vertex) === headIndex || skinIndex.getY(vertex) === headIndex;
+        if (!belongs) continue;
+        point.set(position.getX(vertex), position.getY(vertex), position.getZ(vertex));
+        min.min(point);
+        max.max(point);
+        counted += 1;
+      }
     }
   }
-  if (!counted || !Number.isFinite(min.x)) return empty;
+  if (!counted || !Number.isFinite(min.x)) {
+    // No skin data (a plain mesh, or a bone map handed in on its own): measure
+    // the geometry around the head joint instead, so the face still lands on the
+    // head instead of floating at the top of the bounding box.
+    const headAt = headOrigin();
+    if (!headAt) return empty;
+    const radius = Math.max(0.28, fallbackHeight * 0.1);
+    for (const mesh of meshes) {
+      const geometry = mesh?.geometry;
+      const position = geometry?.getAttribute?.('position');
+      if (!position) continue;
+      const step = Math.max(1, Math.floor(position.count / 6000));
+      for (let vertex = 0; vertex < position.count; vertex += step) {
+        point.set(position.getX(vertex), position.getY(vertex), position.getZ(vertex));
+        if (point.distanceTo(headAt) > radius) continue;
+        min.min(point);
+        max.max(point);
+        counted += 1;
+      }
+    }
+  }
+  if (!counted || !Number.isFinite(min.x)) {
+    const headAt = headOrigin();
+    if (!headAt) return empty;
+    const size = fallbackHeight * 0.16;
+    return {
+      center: [headAt.x, headAt.y, headAt.z],
+      size: [size, size, size],
+      maxZ: headAt.z + size / 2,
+      minZ: headAt.z - size / 2,
+    };
+  }
   return {
     center: [(min.x + max.x) / 2, (min.y + max.y) / 2, (min.z + max.z) / 2],
     size: [max.x - min.x, max.y - min.y, max.z - min.z],
     maxZ: max.z,
     minZ: min.z,
+  };
+}
+
+/**
+ * Where the face plane goes, in head-bone local space.
+ *
+ * The head region is measured in rig space (the avatar's own coordinates, before
+ * the actor is placed on the map), so the head joint is converted back into that
+ * space first. Using the raw world position put the face out by the actor's whole
+ * map offset once the pivot sat at, say, z = 24.
+ */
+export function measureFaceAnchor(THREE, rig, head, frontSign = 1) {
+  const region = measureHeadRegion(THREE, rig);
+  const headWorld = head.getWorldPosition(new THREE.Vector3());
+  const canConvert = typeof rig?.root?.worldToLocal === 'function';
+  const headOrigin = canConvert ? rig.root.worldToLocal(headWorld.clone()) : headWorld;
+  const sign = Number(frontSign) >= 0 ? 1 : -1;
+  return {
+    region,
+    width: Math.max(0.42, Math.min(1.5, region.size[0] * 0.86)),
+    height: Math.max(0.3, Math.min(1.1, region.size[1] * 0.68)),
+    anchor: new THREE.Vector3(
+      region.center[0] - headOrigin.x,
+      region.center[1] - headOrigin.y,
+      (sign >= 0 ? region.maxZ + 0.012 : region.minZ - 0.012) - headOrigin.z,
+    ),
   };
 }
 
