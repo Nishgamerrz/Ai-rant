@@ -60,6 +60,48 @@ on:
         required: false
         default: ''
         type: string
+  # The same job can also be started by another workflow. GitHub's dispatch
+  # button occasionally refuses to fire ("Workflow could not be run"), so
+  # .github/workflows/start.yml offers a second, tiny button that calls this one.
+  # workflow_call has no "choice" input type, so every value is a string here.
+  workflow_call:
+    inputs:
+      story_topic:
+        description: 'Story topic — one line, "In a world where ..." works best'
+        required: true
+        default: 'In a world where the last person to fall asleep each night gets one wish, two brothers keep each other awake on purpose'
+        type: string
+      character_usernames:
+        description: 'Usernames, COMMA separated (e.g. Lead, Friend). First = lead.'
+        required: false
+        default: ''
+        type: string
+      duration_seconds:
+        description: 'Length in seconds (30-180)'
+        required: true
+        default: '120'
+        type: string
+      map_detail:
+        description: 'World size: standard, dense or ultra'
+        required: true
+        default: 'dense'
+        type: string
+      model_quality:
+        description: 'AI model: fast, medium, hard, smart_11b or animation_best'
+        required: true
+        default: 'medium'
+        type: string
+      voice_style:
+        description: 'Voice: male, female or thin_male'
+        required: true
+        default: 'male'
+        type: string
+      world_theme:
+        description: 'Theme (optional)'
+        required: false
+        default: ''
+        type: string
+    # The Gemini and other keys are passed straight through by the caller.
 
 permissions:
   contents: read
