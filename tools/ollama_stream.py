@@ -18,11 +18,6 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_URL = "http://127.0.0.1:11434/api/chat"
-PREVIEW = 90
-
-
-def clean(text: str) -> str:
-    return " ".join(str(text).split())[-PREVIEW:]
 
 
 class ThinkingUnsupported(Exception):
@@ -40,9 +35,14 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool) -> 
     content: list[str] = []
     thinking: list[str] = []
     started = time.time()
-    last_report = 0.0
     tokens = 0
     done_reason = ""
+    # Live console: every streamed piece is printed verbatim the moment it
+    # arrives, so the log fills in letter by letter. The old code reprinted a
+    # truncated "thinking... 2,117 chars, 333s - ...tail" line every two seconds,
+    # which looked like the text was being replaced instead of streamed.
+    thinking_open = False
+    answer_open = False
     try:
         handle = urllib.request.urlopen(http, timeout=timeout)
     except urllib.error.HTTPError as exc:
@@ -68,32 +68,32 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool) -> 
             piece_content = message.get("content") or ""
             if piece_thinking:
                 thinking.append(piece_thinking)
+                if not quiet:
+                    if not thinking_open:
+                        print(f"[{label}] thinking \u25b8 ", end="", flush=True)
+                        thinking_open = True
+                    print(piece_thinking, end="", flush=True)
             if piece_content:
                 content.append(piece_content)
+                if not quiet:
+                    if not answer_open:
+                        if thinking_open:
+                            print(flush=True)
+                        print(f"[{label}] answer \u25b8 ", end="", flush=True)
+                        answer_open = True
+                    print(piece_content, end="", flush=True)
             if event.get("done"):
                 tokens = int(event.get("eval_count") or 0)
                 done_reason = str(event.get("done_reason") or "")
-            now = time.time()
-            if not quiet and now - last_report > 2.0:
-                last_report = now
-                elapsed = now - started
-                if piece_thinking and not content:
-                    print(f"[{label}] thinking… {sum(len(p) for p in thinking):,} chars, {elapsed:.0f}s "
-                          f"· …{clean(''.join(thinking))}", flush=True)
-                elif content:
-                    print(f"[{label}] writing… {sum(len(p) for p in content):,} chars, {elapsed:.0f}s "
-                          f"· …{clean(''.join(content))}", flush=True)
-                else:
-                    print(f"[{label}] waiting for the model… {elapsed:.0f}s", flush=True)
     answer = "".join(content)
     reasoning = "".join(thinking)
     elapsed = time.time() - started
     if not quiet:
-        print(f"[{label}] ✓ finished in {elapsed:.0f}s: {len(answer):,} answer chars, "
+        if answer_open or thinking_open:
+            print(flush=True)
+        print(f"[{label}] \u2713 finished in {elapsed:.0f}s: {len(answer):,} answer chars, "
               f"{len(reasoning):,} reasoning chars, {tokens} tokens"
               f"{', CUT OFF at the token ceiling' if done_reason == 'length' else ''}.", flush=True)
-        if reasoning:
-            print(f"[{label}] reasoning preview: …{clean(reasoning)}", flush=True)
     return {
         "message": {"role": "assistant", "content": answer, "thinking": reasoning},
         "response": answer,

@@ -118,5 +118,67 @@ class TruncatedResponseTests(unittest.TestCase):
         self.assertGreater(budgets[1], budgets[0])
 
 
+class _PieceByPiece(BaseHTTPRequestHandler):
+    """Streams many tiny pieces so the console can be checked for real streaming."""
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.end_headers()
+        events = [
+            {"message": {"thinking": "Th"}, "done": False},
+            {"message": {"thinking": "inking about the beats."}, "done": False},
+            {"message": {"content": '{"narration":'}, "done": False},
+            {"message": {"content": '"Maya found it."}'}, "done": False},
+            {"done": True, "done_reason": "stop", "eval_count": 42},
+        ]
+        for event in events:
+            self.wfile.write((json.dumps(event) + "\n").encode())
+
+
+class LiveStreamingTests(unittest.TestCase):
+    def test_every_piece_is_printed_as_it_arrives(self):
+        import tempfile
+
+        server = HTTPServer(("127.0.0.1", 0), _PieceByPiece)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            request_path = Path(tmp) / "request.json"
+            output_path = Path(tmp) / "response.json"
+            request_path.write_text(json.dumps({
+                "model": "qwen3:8b",
+                "messages": [{"role": "user", "content": "hi"}],
+                "think": True,
+                "stream": False,
+                "options": {"num_predict": 4000},
+            }), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, "tools/ollama_stream.py",
+                 "--request", str(request_path), "--output", str(output_path),
+                 "--label", "world plan", "--timeout", "30",
+                 "--url", f"http://127.0.0.1:{server.server_port}/api/chat"],
+                cwd=ROOT, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr[-2000:])
+            stdout = result.stdout
+
+        # The reasoning and the answer arrive verbatim, in order, joined together.
+        self.assertIn("[world plan] thinking \u25b8 Thinking about the beats.", stdout)
+        self.assertIn('[world plan] answer \u25b8 {"narration":"Maya found it."}', stdout)
+        # No "reappearing" summary lines that reprint a truncated tail.
+        self.assertNotIn("thinking\u2026", stdout)
+        self.assertNotIn("writing\u2026", stdout)
+        self.assertNotIn("reasoning preview", stdout)
+        self.assertNotIn("\u2026", stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
