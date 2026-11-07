@@ -178,7 +178,7 @@ class StudioExperienceTests(unittest.TestCase):
     def test_workflow_form_is_compact_and_lists_comma_separated_usernames(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
         self.assertIn("Usernames, COMMA separated", workflow)
-        for short in ("description: 'Story topic'", "description: 'Length — pick it; the AI picks the exact seconds", "description: 'World size'",
+        for short in ('description: \'Story topic — one line; best when it starts "In a world where ..."\'', "description: 'Length — pick it; the AI picks the exact seconds", "description: 'World size'",
                       "description: 'AI model'", "description: 'Voice'"):
             self.assertIn(short, workflow)
         self.assertNotIn("Real-life story topic for a fully furnished Roblox-themed short video", workflow)
