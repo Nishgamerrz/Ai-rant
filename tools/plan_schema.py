@@ -18,10 +18,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from build_story_map import MATERIALS, SHAPES  # noqa: E402
+from effects_catalog import FAMILIES as EFFECT_FAMILIES  # noqa: E402
 
 EXPRESSIONS = ("neutral", "happy", "sad", "surprised", "worried", "angry", "excited", "thinking")
 MATERIAL_LIST = sorted(MATERIALS)
-SHAPE_LIST = ["Block", "Ball", "Cylinder"]
+SHAPE_LIST = sorted(SHAPES)
 assert set(SHAPE_LIST) == set(SHAPES)
 
 
@@ -50,6 +51,36 @@ def build_schema(usernames=()) -> dict:
             "color": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 255},
                       "minItems": 3, "maxItems": 3},
             "physics": {"type": "string", "enum": ["static", "dynamic"]},
+            # A light makes the Part a lamp: brightness and range are the dials the
+            # AI may raise or lower, and the colour is free.
+            "light": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["Point", "Spot", "Surface"]},
+                    "color": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 255},
+                              "minItems": 3, "maxItems": 3},
+                    "brightness": {"type": "number", "minimum": 0, "maximum": 5},
+                    "range": {"type": "number", "minimum": 0, "maximum": 60},
+                    "angle": {"type": "number", "minimum": 0, "maximum": 180},
+                },
+            },
+            # A particle effect. "name" may be any of the 520 presets ("gold
+            # sparkles"), and the numeric dials override the preset.
+            "effect": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "family": {"type": "string", "enum": sorted(EFFECT_FAMILIES)},
+                    "color": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 255},
+                              "minItems": 3, "maxItems": 3},
+                    "rate": {"type": "number", "minimum": 0.05, "maximum": 1},
+                    "size": {"type": "number", "minimum": 0.05, "maximum": 6},
+                    "speed": {"type": "number", "minimum": 0, "maximum": 12},
+                    "life": {"type": "number", "minimum": 0.1, "maximum": 12},
+                    "gravity": {"type": "number", "minimum": -10, "maximum": 6},
+                    "spread": {"type": "number", "minimum": 0, "maximum": 1},
+                },
+            },
             # What this anchor actually IS. The build step expands one house/tree/
             # bench/stall/lamp/plant anchor into a whole furnished group of Parts
             # (walls, gable roof, glass, furniture, potted plants, leaves), so a
@@ -100,7 +131,8 @@ def build_schema(usernames=()) -> dict:
         "type": "object",
         "properties": {
             "id": {"type": "string"},
-            "kind": {"type": "string", "enum": ["edit", "answer", "verify", "code", "name"]},
+            "kind": {"type": "string",
+                      "enum": ["edit", "answer", "verify", "code", "name", "write"]},
             "instruction": {"type": "string"},
             "input": {"type": "string"},
             # Which file rules Gemini should be given with the task, and the file

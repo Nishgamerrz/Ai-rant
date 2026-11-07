@@ -75,9 +75,22 @@ class NarratorVoiceTests(unittest.TestCase):
         self.assertIn("was unavailable; trying the next one", WORKFLOW)
         self.assertIn('test -n "$VOICE"', WORKFLOW)
 
-    def test_a_too_quick_read_is_reported_rather_than_hidden(self):
-        self.assertIn("seconds < target * 0.72", WORKFLOW)
+    def test_a_short_read_is_filled_before_it_is_reported(self):
+        # Run #82: 262 words became 106 s of a 164 s video, so 58 seconds of the
+        # finished short were silent. The script is now sized at the measured
+        # 2.45 words per second, the voice is retried at a slower rate when it
+        # still runs short, and only then is anything reported.
+        self.assertIn("DURATION_SECONDS * 245 / 100", WORKFLOW)
+        self.assertIn("FILL_RATE", WORKFLOW)
+        self.assertIn("Filled the length", WORKFLOW)
+        self.assertIn("seconds < target * 0.9", WORKFLOW)
         self.assertIn("the narration ends", WORKFLOW)
+
+    def test_the_warning_names_the_rate_it_actually_used(self):
+        # The old message printed an empty "()" because GITHUB_ENV set in the same
+        # step is not visible to that step's environment.
+        self.assertIn('os.environ.get("NARRATOR_RATE") or os.environ.get("RATE")', WORKFLOW)
+        self.assertNotIn('os.environ.get("NARRATOR_RATE", "")', WORKFLOW)
 
     def test_every_voice_choice_still_exists(self):
         for style in ("male)", "female)", "thin_male)"):

@@ -398,11 +398,45 @@ def cframe_element(name, position, yaw=0):
             + "</CoordinateFrame>")
 
 
+# A part with a light glows in Studio exactly as it does in the MP4: same colour,
+# same brightness, same range, same cone angle.
+FACE_TOKENS = {"Front": 5, "Back": 2, "Top": 1, "Bottom": 4, "Left": 3, "Right": 0}
+
+
+def light_children(part) -> str:
+    light = part.get("light")
+    if not isinstance(light, dict):
+        return ""
+    kind = light.get("kind", "Point")
+    if light.get("brightness", 0) <= 0:
+        return ""
+    properties = [
+        "<bool name=\"Enabled\">true</bool>",
+        f'<float name="Brightness">{float(light.get("brightness", 1.6)):.4g}</float>',
+        color3_element("Color", light.get("color", [255, 226, 156])),
+        f'<float name="Range">{float(light.get("range", 22)):.4g}</float>',
+        "<bool name=\"Shadows\">true</bool>",
+    ]
+    class_name = "PointLight"
+    if kind == "Spot":
+        class_name = "SpotLight"
+        properties.append(f'<float name="Angle">{float(light.get("angle", 90)):.4g}</float>')
+        properties.append(f'<token name="Face">{FACE_TOKENS["Front"]}</token>')
+    elif kind == "Surface":
+        class_name = "SurfaceLight"
+        properties.append(f'<token name="Face">{FACE_TOKENS["Front"]}</token>')
+    return item(class_name, "light_" + str(part.get("name", "part")).replace(" ", "_"), properties)
+
+
 def part_instance(part, referent):
     materials = {"Plastic": 256, "SmoothPlastic": 272, "Neon": 288, "Grass": 1280,
                  "Wood": 512, "Metal": 1088, "Concrete": 816, "Brick": 848,
                  "Glass": 1568, "Asphalt": 1376, "Slate": 800}
-    shapes = {"Ball": 0, "Block": 1, "Cylinder": 2}
+    # Roblox PartType tokens. The hand-built silhouettes borrow the nearest real
+    # part so the Studio project always opens; the MP4 renderer draws them exactly.
+    shapes = {"Ball": 0, "Block": 1, "Cylinder": 2, "Wedge": 3, "CornerWedge": 4,
+              "Cone": 2, "Pyramid": 4, "Prism": 3, "Torus": 2, "Ring": 2,
+              "Hemisphere": 0, "Truss": 1}
     props = [
         f'<bool name="Anchored">{str(part.get("anchored", True)).lower()}</bool>',
         f'<bool name="CanCollide">{str(part.get("collidable", True)).lower()}</bool>',
@@ -416,7 +450,7 @@ def part_instance(part, referent):
         f'<token name="shape">{shapes.get(part.get("shape"), 1)}</token>',
         vector3_element("size", part["size"]),
     ]
-    return item("Part", referent, props)
+    return item("Part", referent, props, light_children(part))
 
 def client_lua(config_json: str) -> str:
     cfg = long_bracket(config_json)
