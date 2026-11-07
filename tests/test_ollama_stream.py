@@ -375,45 +375,34 @@ class TypedConsoleTests(unittest.TestCase):
         self.assertEqual(text.count("still loading the model"), HEARTBEAT_NOTES)
         self.assertIn("(quiet note 3/3)", text)
 
-    def test_the_waiting_note_is_the_darkest_line_on_screen(self):
+    def test_the_waiting_note_is_the_grey_line(self):
         sys.path.insert(0, str(ROOT / "tools"))
         from console_style import CODES
 
-        def level(code):
-            return int(code.split(";")[-1].rstrip("m"))
+        # 90 is "bright black": the grey the log viewer draws dimmest. The quiet
+        # note and the box edge use it, so neither competes with the model's words.
+        self.assertEqual(CODES["thought"], "\033[90m")
+        self.assertEqual(CODES["frame"], "\033[90m")
 
-        # 232-255 is the grey ramp, where the numbers run dark to light: 240 is a
-        # dim grey, 255 near white. The quiet note must sit low on that ramp, and
-        # the frame lower still, so neither can glare next to the model's words.
-        for kind in ("thought", "frame"):
-            self.assertTrue(232 <= level(CODES[kind]) <= 244, kind)
-        self.assertLess(level(CODES["frame"]), level(CODES["thought"]))
-
-        def brightness(code):
-            value = level(code) - 16
-            if not 0 <= value < 216:
-                return None
-            r, rest = divmod(value, 36)
-            g, b = divmod(rest, 6)
-            return (r + g + b) / 3
-
-        for kind in ("thinking", "answer", "label", "notice", "success", "warning",
-                     "error", "tool", "plan"):
-            value = brightness(CODES[kind])
-            self.assertIsNotNone(value, f"{kind} should be a hue, not a grey")
-            self.assertLessEqual(value, 3.0, f"{kind} is too bright for a long run")
-
-    def test_the_palette_stays_muted(self):
+    def test_every_colour_is_a_basic_ansi_code_the_log_viewer_can_draw(self):
         sys.path.insert(0, str(ROOT / "tools"))
+        import re
+
         from console_style import CODES
 
-        # Nothing may sit in the neon band (bright cyan/green/magenta 33-201 on
-        # the 256-colour wheel); those were the values that hurt to look at.
+        # GitHub's log viewer renders the 16 basic colours and drops 256-colour
+        # codes; with "38;5;109" the whole run showed up white. Every code must be
+        # a plain 30-37 or 90-97 foreground.
         for kind, code in CODES.items():
-            level = int(code.split(";")[-1].rstrip("m"))
-            self.assertTrue(0 <= level <= 255, kind)
-            self.assertFalse(45 <= level <= 51, f"{kind} is neon cyan ({level})")
-            self.assertFalse(190 <= level <= 201, f"{kind} is neon magenta ({level})")
+            self.assertRegex(code, r"^\033\[(3[0-7]|9[0-7])m$", kind)
+
+    def test_the_kinds_are_told_apart(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from console_style import CODES
+
+        for a, b in (("thinking", "answer"), ("answer", "error"), ("success", "warning"),
+                     ("label", "plan"), ("tool", "notice"), ("thinking", "thought")):
+            self.assertNotEqual(CODES[a], CODES[b], f"{a} and {b} look identical")
 
 
 class ThinkingBoxTests(unittest.TestCase):
@@ -476,6 +465,49 @@ class ThinkingBoxTests(unittest.TestCase):
         starts = [line for line in text.splitlines() if "quiet note" in line]
         self.assertEqual(len(starts), 1)
         self.assertIn("\u2502 [story] quiet note", starts[0])
+
+    def test_a_long_paragraph_is_broken_into_many_lines(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from ollama_stream import BOX_LEFT, TypedConsole
+
+        recorder = _Recorder()
+        console = TypedConsole(0, 0, out=recorder)
+        console.use("thinking")
+        console.open_box("thinking")
+        # One long run of text with no newlines of its own, the way a model streams.
+        console.write("word " * 120)
+        console.close_box()
+        text = "".join(recorder.writes)
+        body = [line for line in text.splitlines() if "word" in line]
+        self.assertGreater(len(body), 5, "a long thought must not stay one line")
+        for line in body:
+            self.assertTrue(line.startswith(BOX_LEFT), line[:40])
+            self.assertLessEqual(len(line), 74, line)
+
+    def test_the_wrap_never_splits_a_word(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from ollama_stream import TypedConsole
+
+        recorder = _Recorder()
+        console = TypedConsole(0, 0, out=recorder)
+        console.use("thinking")
+        console.open_box("thinking")
+        console.write("antidisestablishmentarianism " * 30)
+        console.close_box()
+        text = "".join(recorder.writes)
+        for line in text.splitlines():
+            if "antidis" in line:
+                self.assertIn("antidisestablishmentarianism", line)
+
+    def test_plain_text_outside_the_box_is_not_rewrapped(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from ollama_stream import TypedConsole
+
+        recorder = _Recorder()
+        console = TypedConsole(0, 0, out=recorder)
+        console.use("answer")
+        console.write("a" * 200)
+        self.assertEqual("".join(recorder.writes).count("\n"), 0)
 
     def test_the_stream_opens_the_frame_for_reasoning_only(self):
         helper = (ROOT / "tools" / "ollama_stream.py").read_text(encoding="utf-8")
@@ -575,7 +607,8 @@ class ColourTests(unittest.TestCase):
 
         letters = [chunk for chunk in recorder.writes if chunk and chunk != "\x1b[0m"]
         self.assertEqual(strip("".join(letters)), "abcde")
-        self.assertIn("\x1b[38;5;", "".join(recorder.writes))
+        self.assertIn("\x1b[36m", "".join(recorder.writes))
+        self.assertNotIn("38;5;", "".join(recorder.writes))
 
     def test_the_job_turns_colour_on(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")

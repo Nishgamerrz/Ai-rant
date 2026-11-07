@@ -41,10 +41,14 @@ def looks_stuck(text: str) -> bool:
 CONSOLE_LOCK = threading.Lock()
 
 # The reasoning is printed inside a light frame so it is obviously one block of
-# machine thought rather than part of the answer. Only a left rule and two caps
-# are drawn: the log wraps text at a width this process cannot know, so a closed
-# right edge would break apart on long lines.
-BOX_WIDTH = 72
+# machine thought rather than part of the answer.
+#
+# The model streams one long paragraph per thought with no line breaks of its
+# own, and the log viewer only wraps visually - so a whole paragraph arrived as
+# a single log line with the rule at the start and nowhere else. The console now
+# breaks the text itself at a modest width, so every visible line begins with the
+# rule and the block reads as many lines instead of one endless one.
+BOX_WIDTH = 66
 BOX_LEFT = "\u2502 "
 BOX_TOP = "\u250c\u2500 "
 BOX_BOTTOM = "\u2514"
@@ -81,6 +85,7 @@ class TypedConsole:
         self._open = ""
         self._box = ""
         self._line_start = True
+        self._col = 0
 
     @property
     def pacing(self) -> bool:
@@ -109,11 +114,30 @@ class TypedConsole:
         with CONSOLE_LOCK:
             self._switch()
             for character in text:
-                if self._box and self._line_start and character != "\n":
-                    self.out.write(BOX_LEFT)
-                self.out.write(character)
+                if self._box:
+                    if character == "\n":
+                        self.out.write("\n")
+                        self._line_start = True
+                        self._col = 0
+                        continue
+                    if self._line_start:
+                        self.out.write(BOX_LEFT)
+                        self._line_start = False
+                        self._col = len(BOX_LEFT)
+                    # Wrap on the first space after the width is reached. Breaking
+                    # mid-word would look like a typo, so a line may run one word
+                    # over instead.
+                    if self._col >= self._width() and character in " \t":
+                        self.out.write("\n")
+                        self._line_start = True
+                        self._col = 0
+                        continue
+                    self.out.write(character)
+                    self._col += 1
+                else:
+                    self.out.write(character)
+                    self._line_start = character == "\n"
                 self.out.flush()
-                self._line_start = character == "\n"
                 if self.pacing:
                     time.sleep(self.delay)
                     self.spent += self.delay
@@ -129,11 +153,15 @@ class TypedConsole:
             self.out.write(text + "\n")
             self.out.flush()
             self._line_start = True
+            self._col = 0
 
     def newline(self) -> None:
         self.line("")
 
     # -- the framed reasoning pane ---------------------------------------
+    def _width(self) -> int:
+        return BOX_WIDTH
+
     def _frame(self, text: str) -> None:
         """Write one border line in the near-invisible frame colour."""
         self.out.write(RESET + paint(text, "frame", stream=self.out) + "\n")
@@ -176,6 +204,7 @@ class TypedConsole:
             self.out.flush()
             self._open = ""
             self._line_start = True
+            self._col = 0
 
 
 class Heartbeat(threading.Thread):

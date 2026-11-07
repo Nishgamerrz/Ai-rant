@@ -36,7 +36,7 @@ class SayHelperTests(unittest.TestCase):
     def test_it_prints_the_text_with_a_colour_when_the_console_has_colour(self):
         out = say("warning", "Blueprint rejected; correcting.", colour=True)
         self.assertIn("Blueprint rejected; correcting.", out)
-        self.assertTrue(out.startswith("\x1b[38;5;"), out[:20])
+        self.assertTrue(out.startswith("\x1b[93m"), out[:20])   # basic ANSI, not 256-colour
         self.assertTrue(out.endswith("\x1b[0m\n"), repr(out[-12:]))
 
     def test_it_stays_plain_when_colour_is_off(self):
