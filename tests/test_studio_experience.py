@@ -146,7 +146,8 @@ class StudioExperienceTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
         # Every streaming call must be able to retry on a model we know loads.
         self.assertEqual(workflow.count("--fallback-model"), 6)
-        self.assertIn('echo "AI_FALLBACK_MODEL=qwen3:8b" >> "$GITHUB_ENV"', workflow)
+        self.assertIn("FALLBACK_MODEL=qwen3:4b", workflow)
+        self.assertIn("FALLBACK_MODEL=qwen3:8b", workflow)
         # llama3.2-vision is the mllama architecture, which current Ollama cannot
         # even load (HTTP 500), so it must never be selected again.
         self.assertNotIn("SELECTED_MODEL=llama3.2-vision", workflow)

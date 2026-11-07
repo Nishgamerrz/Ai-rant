@@ -308,6 +308,53 @@ def decode_response(path):
     return plan
 
 
+THEME_CUE_PLACEHOLDERS = {"", "auto", "auto from story", "auto from the story", "ai decides"}
+
+
+def derive_theme(theme_cue="", story="", topic="", plan=None):
+    """A specific theme sentence for a plan whose own theme came back empty.
+
+    The blueprint is one JSON document produced over many minutes. A model can
+    drop a single required field - usually "theme" - and rejecting the whole
+    document over that sentence threw away a forty-minute plan and started the
+    expensive request again. The story already says what the world looks like,
+    so use it.
+    """
+    cue = str(theme_cue or "").strip()
+    if cue and cue.casefold() not in THEME_CUE_PLACEHOLDERS:
+        return re.sub(r"[\r\n]+", " ", cue)[:160]
+    for text in (story, topic):
+        clean = " ".join(str(text or "").split())
+        if len(clean) > 12:
+            first = re.split(r"(?<=[.!?])\s", clean)[0]
+            return (first or clean)[:160].rstrip(" .,") + "."
+    name = ""
+    if isinstance(plan, dict):
+        name = str(plan.get("name") or "").strip()
+    return f"The world of {name}." if name else "A story-shaped Roblox world built from the narration."
+
+
+def repair_blueprint(plan, theme_cue="", story="", topic=""):
+    """Fill the small required fields a model forgets; return (plan, fixes).
+
+    Only genuinely unusable documents are rejected: anything that is not an
+    object, or that has no props at all. Everything else is repaired, and every
+    repair is reported so the log says what happened.
+    """
+    fixes = []
+    if not isinstance(plan, dict):
+        return plan, fixes
+    if not isinstance(plan.get("theme"), str) or not plan["theme"].strip():
+        plan["theme"] = derive_theme(theme_cue, story, topic, plan)
+        fixes.append(f'added the missing "theme": {plan["theme"]}')
+    if not isinstance(plan.get("name"), str) or not plan["name"].strip():
+        plan["name"] = "Story World"
+        fixes.append('added the missing "name": Story World')
+    if not isinstance(plan.get("props"), list) or not plan["props"]:
+        return plan, fixes
+    return plan, fixes
+
+
 def default_character_placements(usernames):
     positions = [[0, 0, 24], [-3, 0, 24], [3, 0, 24], [-6, 0, 29], [6, 0, 29], [0, 0, 34]]
     return [
@@ -1275,8 +1322,12 @@ def main():
     else:
         try:
             raw_plan = decode_response(source)
-            if args.strict and (not isinstance(raw_plan, dict) or not isinstance(raw_plan.get("theme"), str) or not raw_plan["theme"].strip()):
-                raise ValueError("AI map must include a non-empty prompt-specific theme description")
+            if args.strict:
+                if not isinstance(raw_plan, dict) or not isinstance(raw_plan.get("props"), list) or not raw_plan["props"]:
+                    raise ValueError("the AI blueprint contained no props")
+                raw_plan, fixes = repair_blueprint(raw_plan, args.theme, args.story, args.story_topic)
+                for note in fixes:
+                    print(f"Repaired the AI blueprint instead of rejecting it: {note}.", file=sys.stderr)
             source_label = "AI landmark blueprint"
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             if args.strict:

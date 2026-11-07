@@ -413,8 +413,8 @@ class SubAgentIsOptionalTests(unittest.TestCase):
         self.workflow = WORKFLOW.read_text(encoding="utf-8")
 
     def test_the_narration_prompt_is_an_offer_not_an_order(self):
-        self.assertIn("YOU HAVE A GEMINI SUB-AGENT, AND YOU USE IT WHEN YOU NEED IT", self.workflow)
-        self.assertIn("there is no quota and no rule that you must ask", self.workflow.lower())
+        self.assertIn("YOU HAVE A GEMINI SUB-AGENT AND YOU CAN USE IT ONE OR TWO TIMES", self.workflow)
+        self.assertIn("There is no quota and no rule that you must ask", self.workflow)
         self.assertIn('if you can write the story yourself, just write it and return '
                       '"subagent_tasks":[]', self.workflow)
 

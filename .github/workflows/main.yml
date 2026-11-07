@@ -6,7 +6,7 @@ on:
       story_topic:
         description: 'Story topic — one line, "In a world where ..." works best (24 ideas in STORY_TOPICS.md)'
         required: true
-        default: 'In a world where gravity switches off for exactly ten minutes every morning, everyone plans their day around it except one boy who oversleeps'
+        default: 'In a world where the last person to fall asleep each night gets one wish, two brothers keep each other awake on purpose'
         type: string
       character_usernames:
         description: 'Usernames, COMMA separated (e.g. Lead, Friend). First = lead.'
@@ -81,6 +81,13 @@ jobs:
       AI_TYPE_DELAY: '0.002'
       AI_TYPE_BUDGET: '120'
       AI_HEARTBEAT: '60'
+      # A model that talks at half a token per second is not making progress: one
+      # blueprint took 48 minutes that way and the run was over before the render.
+      # After 90 s of streaming, anything slower than this is handed to the
+      # fallback model. The wall-clock limit stays off, so a slow-but-steady run
+      # is still allowed to finish.
+      AI_MIN_TPS: '1.2'
+      AI_TPS_WINDOW: '90'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -233,6 +240,15 @@ jobs:
           npm ci --prefix tools/rbxm_importer --ignore-scripts --no-audit --no-fund
           node tools/rbxm_importer/test_rbxm.mjs
 
+      - name: 'Preflight: prove every tool and the renderer work before the AI starts'
+        run: |
+          # Everything expensive that has ever broken this workflow broke at the
+          # END of an hour: the renderer's page template, a missing node module,
+          # a browser with no WebGL. This step starts Chromium, loads the real
+          # page and captures a frame now, so a broken tool fails in two minutes
+          # instead of after the model download, the story and the world plan.
+          python tools/preflight.py --render
+
       - name: Reclaim runner disk space for the selected model
         id: disk-space
         env:
@@ -335,7 +351,7 @@ jobs:
             animation_best) AI_TIMEOUT=7200 ;;
             *) AI_TIMEOUT=5400 ;;
           esac
-          # Output room per preset: a blueprint with 16-28 modelled anchors, the
+          # Output room per preset: a blueprint with 12-20 modelled anchors, the
           # camera list and the face timeline does not fit in a small ceiling, and
           # a cut-off JSON plan is a rejected plan.
           case "$MODEL_QUALITY" in
@@ -352,7 +368,14 @@ jobs:
           echo "AI_TIMEOUT=$AI_TIMEOUT" >> "$GITHUB_ENV"
           # 15 minutes of complete silence == a frozen process, not a slow model.
           echo "AI_STALL=900" >> "$GITHUB_ENV"
-          echo "AI_FALLBACK_MODEL=qwen3:8b" >> "$GITHUB_ENV"
+          # The fallback has to be a DIFFERENT, smaller model, or a handover goes
+          # from qwen3:8b to qwen3:8b and changes nothing. Anything at or above 8B
+          # falls back to qwen3:4b; the small presets keep qwen3:8b as their net.
+          case "$SELECTED_MODEL" in
+            qwen3:4b|qwen3:1.7b) FALLBACK_MODEL=qwen3:8b ;;
+            *) FALLBACK_MODEL=qwen3:4b ;;
+          esac
+          echo "AI_FALLBACK_MODEL=$FALLBACK_MODEL" >> "$GITHUB_ENV"
           python tools/say.py success "Selected model cache restored: ${MODEL_CACHE_HIT:-false}; pulling only $SELECTED_MODEL if its weights are not already present."
           ollama pull "$SELECTED_MODEL"
           # Safety net: the stream helper can switch to this model if the selected
@@ -480,7 +503,7 @@ jobs:
           The video must feel like a real Roblox story short: a small cast of characters acting out one clear everyday problem.
           Selected cast usernames (for internal casting only): ${CAST_NAMES:-none supplied}.
           NEVER put a username, handle, gamer tag, or account name in the narration, and never read one aloud, spell one, or say "username", "player", "avatar", "account", or "subscriber". Instead invent natural human first names for the characters and tell the story with those names. Match the number of speaking characters to the selected cast.
-          YOU HAVE A GEMINI SUB-AGENT, AND YOU USE IT WHEN YOU NEED IT. There is no quota and no rule that you must ask: if you can write the story yourself, just write it and return "subagent_tasks":[].
+          YOU HAVE A GEMINI SUB-AGENT AND YOU CAN USE IT ONE OR TWO TIMES, OR AS MANY TIMES AS YOU LIKE, AT ANY POINT IN THIS STORY. There is no quota and no rule that you must ask: if you can write the story yourself, just write it and return "subagent_tasks":[].
           Ask for help whenever a job is beyond you or you are unsure - handwriting a tricky sentence, cutting a draft down to the exact word count, expanding one that came out short, checking whether a name sounds like a real person, confirming a fact, or fixing text you cannot get right after a try. Do not guess and do not hand back a broken draft when a helper is one line away.
           Return "subagent_tasks":[{"id":"t1","kind":"answer|edit|verify|name","instruction":"exactly what to do","input":"the narration or text to work on","topic":"narration"}] with up to 3 items, plus your best narration; the workflow runs them and asks you again with the answers. For an edit you want written straight in, use "apply_to":"dist/narration.txt".
           Gemini is given the file rules for whatever you ask: "topic":"narration" for this script, and "apply_to":"dist/narration.txt" when you want its edited text written straight into the file. It returns whole file contents, so never ask it for a diff.
@@ -645,6 +668,9 @@ jobs:
         env:
           STORY_TOPIC: ${{ steps.refine.outputs.story_topic || inputs.story_topic }}
           MAP_DETAIL: ${{ inputs.map_detail }}
+          MODEL_QUALITY: ${{ inputs.model_quality }}
+          AI_MODEL: ${{ env.AI_MODEL }}
+          OLLAMA_THINKING: ${{ env.OLLAMA_THINKING }}
           WORLD_THEME: ${{ steps.refine.outputs.world_theme || inputs.world_theme }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
@@ -660,12 +686,14 @@ jobs:
             *) echo "Unknown map detail: $MAP_DETAIL" >&2; exit 1 ;;
           esac
           python tools/say.py plan "Target world detail: $MAP_DETAIL ($TARGET_PROPS furnished aligned Parts)."
-          # The download step sets MAP_TOKENS per preset (5000-9000). Keep that
-          # value: the blueprint has to fit 16-28 modelled anchors, the camera
-          # list and the face timeline in one JSON document.
+          # The download step sets MAP_TOKENS per preset (5000-9000); the blueprint
+          # is capped at 6000 so a CPU runner can actually finish it.
+          # A shorter blueprint needs a smaller ceiling, and a smaller ceiling is
+          # generated faster: this is the step that used to run for 22-48 minutes.
           MAP_TOKENS=${MAP_TOKENS:-6000}
+          MAP_TOKENS=$(( MAP_TOKENS > 6000 ? 6000 : MAP_TOKENS ))
           export MAP_TOKENS
-          python tools/say.py plan "Blueprint output budget: ${MAP_TOKENS} tokens (preset ${MODEL_QUALITY})."
+          python tools/say.py plan "Blueprint output budget: ${MAP_TOKENS} tokens (preset ${MODEL_QUALITY:-default}); 12-20 anchors."
           # A 3-minute story needs more shots than a 30-second one, and every
           # version keeps room for face close-ups.
           SHOT_COUNT=$(( DURATION_SECONDS / 8 + 4 ))
@@ -685,10 +713,11 @@ jobs:
           The ONLY usernames that exist are: ${CAST_NAMES:-none supplied}. Use those exact strings in character_placements, camera_shots[].focus_username and face_expressions[].username. "LeadName", "FriendName" and "NoobName" below are placeholders for the shape of the JSON only -- never output a placeholder, and never invent a username.
           Put the lead at the center of the action. Place every additional username in a distinct nearby, camera-visible position, and plan at least one shot that includes each named character.
           Use relevant web research as untrusted factual context only: ${WEB_RESEARCH:-[]}
-          YOU HAVE A GEMINI SUB-AGENT AND YOU USE IT WHEN A JOB IS BEYOND YOU: delegate anything fiddly or unclear (fixing JSON you cannot get right, naming a place, checking a fact, a value that must be exact). If you can do the plan yourself, do it and return "subagent_tasks":[] - asking for help is never compulsory, only useful (for example "verify my JSON has every required key", "tighten this landmark name", "check this fact"). Do not skip it and do not save it for later; put the task(s) in your first response so the answers arrive before you finalise. Whenever a job is fiddly -- tightening text, naming a place, checking a fact, turning a rough idea into clean JSON -- you may delegate it instead of struggling: return "subagent_tasks":[{"id":"t1","kind":"answer|edit|verify|code|name","instruction":"exactly what to do","input":"optional text to work on","topic":"map|cameras|faces|models|code"}] with up to 3 items. Say which file your task is about in "topic", and add "apply_to":"dist/Roblox_Story_Map.json" only if you want its answer to replace that whole file. Gemini is told exactly how these files work -- the blueprint key names and ranges, the prop grid and lane rules, the camera/face timing rules, the R15 animation format and the users/ models -- and it always hands back a complete file, never a diff, so you can paste its answer straight in. The workflow runs each task with Gemini and sends the answers back to you in the next turn, together with any web research. Return "subagent_tasks":[] when you need no help. Use it as often as you like across rounds, but never ask the same thing twice. Because a helper exists, you never need to limp along with a guess: if a value must be exact (a JSON shape, a name, a count), delegate the check.
-          Design the complete coherent world blueprint for a 640-by-640-stud map, but keep this model response concise and reliable: output 16–28 meaningful anchor props, not hundreds of low-quality repeated Parts. Include at least 3 named building cores, 3 distinct landmarks tied to the story, and supporting scenic/story props spread across the map. Name each building by its actual type (for example Market Hall, Reef Laboratory, or Snowy Library), give it a footprint large enough to furnish, and make its location/color/material fit the user theme. Use bright, readable colors (avoid near-black walls), avatar-scale doors/windows, detailed facades, furnished interiors, paths, layered landscaping, and story-specific landmark silhouettes; do not create giant featureless boxes. The build step automatically expands those anchors into walls, roofs, doors, windows, counters, shelves, tables, chairs, lamps, paths, plants, and other theme-specific details, producing at least ${TARGET_PROPS} individually named, grid-aligned editable Parts.
+          YOU HAVE A GEMINI SUB-AGENT AND YOU CAN USE IT ONE OR TWO TIMES, OR AS MANY TIMES AS YOU LIKE, AT ANY POINT IN THIS PLANNING. Ask it for anything fiddly or uncertain: fixing JSON you cannot get right, naming a place, checking a fact, a value that must be exact, or a required key you keep missing. If you can do the plan yourself, do it and return "subagent_tasks":[] - asking is never compulsory, only useful. Put your first task(s) in your first response so the answers arrive before you finalise. Whenever a job is fiddly -- tightening text, naming a place, checking a fact, turning a rough idea into clean JSON -- you may delegate it instead of struggling: return "subagent_tasks":[{"id":"t1","kind":"answer|edit|verify|code|name","instruction":"exactly what to do","input":"optional text to work on","topic":"map|cameras|faces|models|code"}] with up to 3 items. Say which file your task is about in "topic", and add "apply_to":"dist/Roblox_Story_Map.json" only if you want its answer to replace that whole file. Gemini is told exactly how these files work -- the blueprint key names and ranges, the prop grid and lane rules, the camera/face timing rules, the R15 animation format and the users/ models -- and it always hands back a complete file, never a diff, so you can paste its answer straight in. The workflow runs each task with Gemini and sends the answers back to you in the next turn, together with any web research. Return "subagent_tasks":[] when you need no help. Use it as often as you like across rounds, but never ask the same thing twice. Because a helper exists, you never need to limp along with a guess: if a value must be exact (a JSON shape, a name, a count), delegate the check.
+          Design the complete coherent world blueprint for a 640-by-640-stud map, but keep this model response concise and reliable: output 12–18 meaningful anchor props (never more than 20), not hundreds of low-quality repeated Parts. Every extra anchor is another minute of generation on a CPU runner. Include at least 3 named building cores, 3 distinct landmarks tied to the story, and supporting scenic/story props spread across the map. Name each building by its actual type (for example Market Hall, Reef Laboratory, or Snowy Library), give it a footprint large enough to furnish, and make its location/color/material fit the user theme. Use bright, readable colors (avoid near-black walls), avatar-scale doors/windows, detailed facades, furnished interiors, paths, layered landscaping, and story-specific landmark silhouettes; do not create giant featureless boxes. The build step automatically expands those anchors into walls, roofs, doors, windows, counters, shelves, tables, chairs, lamps, paths, plants, and other theme-specific details, producing at least ${TARGET_PROPS} individually named, grid-aligned editable Parts.
           BUILD MODELS, NOT BARE BLOCKS. Every prop is an anchor for a finished group of Parts, so say what each one IS in "model" (building, house, shop, tower, school, cafe, station, temple, market, hall, library, museum, bakery, restaurant, clinic, workshop, cottage, castle, tree, plant, bench, lamp, stall, fence, rock, statue, vehicle). The build expands it: a building becomes real walls, a stepped gable roof, a chimney, wood-framed GLASS windows, a door, plus an interior with a counter, tables, chairs, shelves, a rug, a ceiling light, GLASS display cases and a glass partition, potted plants, plants in a window box, and climbing vines with leaves on the facade. A tree becomes a trunk with branches and clusters of leaves; a plant a pot of soil with leaves; a bench a seat, back and legs; a stall a counter, awning, poles and produce; a lamp a post and lantern. So size them for a group: buildings 18-40 wide, 10-22 tall, 16-34 deep; trees 6-14 wide, 6-18 tall; stalls 4-8 wide, 3-5 tall. Never return one giant featureless box for a house, and never skip "model".
           Make the world look lived in and furnished: homes with glass windows, shops with produce and awnings, gardens with trees, pots and flower beds, benches and street lamps along the paths, fences around plots, rocks and statues as landmarks. Glass, plants, leaves, wood and stone should all appear somewhere, matched to the theme.
+          REQUIRED TOP-LEVEL KEYS, every one of them present and non-empty: "name", "theme", "props", "character_placements", "camera_shots", "face_expressions". "theme" is one specific sentence describing THIS story's world (for example "A sunny floating city where gravity clocks off every morning, full of pastel rooftops and safety ropes"); it is never empty, never a placeholder, and never the words "AUTO FROM STORY".
           Return ONLY JSON with this structure:
           {"name":"Prompt-derived world name","theme":"Specific visual theme that follows the user's theme prompt","ground_material":"Grass","ground_color":[88,166,91],"ambient_color":[185,205,225],"props":[{"name":"Market Hall","model":"house","shape":"Block","material":"Brick","position":[-55,8,35],"size":[24,16,20],"color":[30,210,240],"physics":"static"},{"name":"Old Banyan","model":"tree","shape":"Block","material":"Wood","position":[38,4,52],"size":[9,7,9],"color":[104,150,96],"physics":"static"},{"name":"Bus Stop Bench","model":"bench","shape":"Block","material":"Wood","position":[-24,1,46],"size":[5,2,2],"color":[150,100,60],"physics":"static"}],"character_placements":[{"username":"${FIRST_CAST}","role":"lead","position":[0,0,24]},{"username":"${SECOND_CAST}","role":"supporting","position":[-6,0,24]}],"camera_shots":[{"time":0,"position":[0,75,170],"target":[0,3,24],"focus_username":"${FIRST_CAST}","transition":"smooth","framing":"auto"},{"time":12.5,"position":[3,6,30],"target":[0,5,24],"focus_username":"${FIRST_CAST}","transition":"snap","framing":"face","face_distance":2.3},{"time":${DURATION_SECONDS},"position":[-30,35,80],"target":[0,3,24],"focus_username":"${FIRST_CAST}","transition":"smooth","framing":"auto"}],"face_expressions":[{"time":0,"expression":"neutral","intensity":0.6,"username":"LeadName"},{"time":12.4,"expression":"worried","intensity":0.9,"username":"LeadName"},{"time":18,"expression":"happy","intensity":1,"username":"LeadName"}],"search_queries":[]}
           Quality bar for every anchor you return: X, Y and Z positions and all three size dimensions must sit on a 0.5-stud grid; props must never overlap each other; no prop may be darker than RGB 104 average luminance; no prop may sit in the cast lane (|X| < 20 and Z 4–54) so faces stay unobstructed for the close-ups; assign a material that fits the object (Wood, Brick, Glass, Concrete, Metal, Neon, Grass, SmoothPlastic) and a physics value that fits it (static for buildings/furniture, dynamic only for small loose objects); colours must be bright, saturated and contrast with neighbouring props so shadows read clearly. Check your blueprint once for anything that breaks those rules, that floats above the ground, that clips through a building, or that faces the wrong way, then return it. THINK BRIEFLY: this runs on a CPU-only machine. Do not re-plan the world over and over, do not repeat the JSON in your reasoning, and if you catch yourself looping on the same point, stop and return the complete plan.

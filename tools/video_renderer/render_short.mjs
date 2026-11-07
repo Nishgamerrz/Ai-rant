@@ -22,10 +22,12 @@ function argumentsFromProcess(argv) {
     args[key] = argv[i + 1];
     i += 1;
   }
-  for (const key of ['map', 'characters', 'profiles', 'duration', 'output']) {
+  args.preflight = argv.includes('--preflight');
+  const required = args.preflight ? ['map'] : ['map', 'characters', 'profiles', 'duration', 'output'];
+  for (const key of required) {
     if (!args[key]) throw new Error(`Missing --${key.replaceAll('_', '-')}`);
   }
-  args.duration = Number(args.duration);
+  args.duration = Number(args.duration || 2);
   // Any length is allowed: the workflow lets the user pick an exact moment such
   // as 2:24, or a window the AI ends inside. Keep these bounds in sync with
   // tools/durations.py (MIN_DURATION / MAX_DURATION); tests/test_durations.py
@@ -601,9 +603,39 @@ async function writeFrame(stream, png) {
   if (!stream.write(png)) await once(stream, 'drain');
 }
 
+// Prove the whole render path works - the page template, Chromium, WebGL, Three.js,
+// Rapier, the physics step and the screenshot - before the workflow spends an hour
+// planning a world. Every historical failure of this renderer (a stray backtick in
+// the template, a missing module, a GPU-less browser) shows up here in seconds.
+async function preflight(plan) {
+  const data = { plan, profiles: [], duration: 2, captions: '', faceAnimation: 'off' };
+  const server = createStaticServer(checkedHtml(data), resolve(ASSET_ROOT, 'dist/avatar-assets'));
+  await new Promise((ok, fail) => { server.once('error', fail); server.listen(0, '127.0.0.1', ok); });
+  const address = server.address();
+  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--enable-webgl', '--ignore-gpu-blocklist', '--use-gl=angle', '--use-angle=swiftshader'] });
+  try {
+    const page = await browser.newPage({ viewport: { width: WIDTH, height: HEIGHT }, deviceScaleFactor: 1 });
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+    await page.goto(`http://127.0.0.1:${address.port}/`, { waitUntil: 'networkidle', timeout: 120000 });
+    await page.waitForFunction(() => Boolean(window.sceneReady), null, { timeout: 120000 });
+    await page.evaluate(() => window.renderAt(0.1));
+    const shot = await page.screenshot({ type: 'jpeg', quality: 80, timeout: 30000 });
+    if (errors.length) throw new Error('the page loaded with errors: ' + errors.slice(0, 3).join(' | '));
+    if (shot.length < 4096) throw new Error(`the rendered frame is only ${shot.length} bytes; the scene is blank`);
+    const props = await page.evaluate(() => (window.physicsSummary || {}).staticProps || 0);
+    console.log(`Render preflight passed: page built, WebGL scene ready, ${props} collider(s), frame captured (${shot.length.toLocaleString()} bytes).`);
+  } finally {
+    await browser.close();
+    await new Promise(resolve => server.close(resolve));
+  }
+}
+
 async function main() {
   const args=argumentsFromProcess(process.argv.slice(2));
   const plan=JSON.parse(readFileSync(args.map,'utf8'));
+  if(args.preflight){ await preflight(plan); return; }
   const usernames=JSON.parse(readFileSync(args.characters,'utf8'));
   const profiles=JSON.parse(readFileSync(args.profiles,'utf8'));
   if(!Array.isArray(usernames)||usernames.length===0) throw new Error('Provide at least one actual Roblox username for the lead avatar.');
