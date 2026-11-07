@@ -8,6 +8,9 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from durations import MIN_DURATION, MAX_DURATION  # noqa: E402
+
 POSE_TREE = {
     "HumanoidRootPart": {
         "LowerTorso": {
@@ -202,8 +205,8 @@ def main():
     if not isinstance(usernames, list) or any(not isinstance(name, str) for name in usernames):
         raise SystemExit("usernames file must be a JSON array of strings")
     try:
-        if not 30 <= duration <= 60:
-            raise ValueError("duration must be 30 to 60 seconds")
+        if not MIN_DURATION <= duration <= MAX_DURATION:
+            raise ValueError(f"duration must be {MIN_DURATION} to {MAX_DURATION} seconds")
         data = json.loads(source.read_text(encoding="utf-8"))
         animation = normalize(data, duration, usernames)
     except (OSError, json.JSONDecodeError, ValueError) as exc:

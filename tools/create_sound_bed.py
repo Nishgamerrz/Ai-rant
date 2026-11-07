@@ -7,14 +7,23 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from durations import check_duration  # noqa: E402
+
+
+def resolve_duration(raw):
+    """Accept every length the GUI offers, up to the 180 s long-form maximum."""
+    try:
+        return check_duration(float(raw))
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
 
 def main():
     if len(sys.argv) != 4:
         raise SystemExit("usage: create_sound_bed.py MAP.json DURATION_SECONDS OUTPUT.wav")
     plan_path, output_path = Path(sys.argv[1]), Path(sys.argv[3])
-    duration = float(sys.argv[2])
-    if not 30 <= duration <= 60:
-        raise SystemExit("duration must be between 30 and 60 seconds")
+    duration = resolve_duration(sys.argv[2])
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
 
     inputs = ["-f", "lavfi", "-i", f"anoisesrc=color=pink:sample_rate=48000:duration={duration:g}"]

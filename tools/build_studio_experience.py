@@ -6,7 +6,11 @@ import argparse
 import html
 import json
 import re
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from durations import DURATIONS, check_duration  # noqa: E402
 
 
 def read_json(path: Path, default):
@@ -636,6 +640,10 @@ def make_place(server_script: str, local_script: str, plan, cast) -> str:
             + "\n".join(services) + "\n</roblox>\n")
 
 def build(args):
+    # Validate the length first: the caption fallback, the Studio runtime timer
+    # and the README all derive from it, so a 90-180 s long-form short must pass
+    # this gate instead of dying later.
+    duration = check_duration(args.duration)
     plan = read_json(args.map, {})
     if not isinstance(plan, dict) or not isinstance(plan.get("props"), list):
         raise ValueError("map plan must be validated JSON with a props array")
@@ -659,9 +667,9 @@ def build(args):
     narration = args.narration.read_text(encoding="utf-8") if args.narration and args.narration.exists() else ""
     captions = parse_srt(args.srt)
     if not captions:
-        captions = fallback_captions(narration, args.duration)
+        captions = fallback_captions(narration, duration)
     avatar_profiles = read_json(args.avatar_profiles, []) if args.avatar_profiles else []
-    config = make_config(plan, cast, args.duration, narration, captions, args.audio_asset_id.strip(), avatar_profiles)
+    config = make_config(plan, cast, duration, narration, captions, args.audio_asset_id.strip(), avatar_profiles)
     config_json = json.dumps(config, ensure_ascii=False, separators=(",", ":"))
     server = server_lua(config_json)
     client = client_lua(config_json)
@@ -677,7 +685,7 @@ def build(args):
             "# Roblox Studio Story Experience\n\n"
             f"**World:** {plan.get('name', 'AI Story World')}  \n"
             f"**Theme:** {plan.get('theme', '')}  \n"
-            f"**Duration:** {args.duration} seconds  \n"
+            f"**Duration:** {duration:g} seconds  \n"
             f"**Furnished world Parts:** {len(plan.get('props', []))}  \n"
             f"**Cast:** {cast_label}\n\n"
             "## Watch the short\n\n"
@@ -699,7 +707,8 @@ def main():
     parser.add_argument("--map", type=Path, required=True)
     parser.add_argument("--cast", type=Path, required=True)
     parser.add_argument("--avatar-profiles", type=Path, help="resolved avatar mesh and RBXM animation manifest JSON")
-    parser.add_argument("--duration", type=int, choices=(30, 45, 60), required=True)
+    parser.add_argument("--duration", type=int, choices=DURATIONS, required=True,
+                        help="short length in seconds; long-form 90-180 s is supported")
     parser.add_argument("--narration", type=Path)
     parser.add_argument("--srt", type=Path)
     parser.add_argument("--audio-asset-id", default="")
