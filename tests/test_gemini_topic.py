@@ -25,8 +25,10 @@ from gemini_topic import (  # noqa: E402
     META_PHRASES,
     TOPIC_NOTE,
     build_prompt,
+    premises,
     refine,
     sanitize,
+    starts_with_premise,
 )
 
 WORKFLOW = ROOT / ".github" / "workflows" / "main.yml"
@@ -280,9 +282,12 @@ class PremiseKeptTests(unittest.TestCase):
              "knowing the last one to fall asleep gets one wish .")
 
     def test_the_instructions_ask_for_the_premise_to_be_kept(self):
-        prompt = build_prompt(self.RAW, "story")
-        self.assertIn('"In a world where ..."', prompt)
-        self.assertIn("keep\n  that opening word for word", prompt)
+        prompt = " ".join(build_prompt(self.RAW, "story").split())
+        for opener in ('"In a world where ..."', '"In this world where ..."',
+                       '"What if ..."', '"Imagine a world where ..."', '"Suppose'):
+            self.assertIn(opener, prompt)
+        self.assertIn("must stay", prompt)
+        self.assertIn("never delete, shorten or paraphrase it", prompt)
         self.assertIn("must survive unchanged", prompt)
 
     def test_a_rewrite_that_becomes_a_scene_is_rejected(self):
@@ -311,6 +316,73 @@ class PremiseKeptTests(unittest.TestCase):
         self.assertTrue(text.endswith("."))
 
     def test_a_prompt_without_a_premise_is_not_forced_into_one(self):
+        text, reason = sanitize("A student finds a lost wallet on the way to school.",
+                                "a stdent finds a lost wallett on the way to shcool")
+        self.assertEqual(reason, "ok")
+
+
+class EveryPremiseShapeTests(unittest.TestCase):
+    """Gemini drops "what if" and "in this world" as readily as "in a world where".
+
+    Each shape is checked on its own: the premise clause is the story, so a
+    rewrite that deletes it - or that opens with a time or a place instead - is
+    discarded and the user's own wording is used.
+    """
+
+    CASES = {
+        "in a world where": (
+            "In a world where the last person to fall asleep gets one wish, two brothers stay awake",
+            "At midnight, two brothers try to stay awake.",
+        ),
+        "in this world": (
+            "In this world where every lie turns into a coin, a boy cannot stop lying",
+            "A boy in a small town cannot stop lying.",
+        ),
+        "what if": (
+            "What if your shadow knew every secret you kept",
+            "One night, a boy notices his shadow watching him.",
+        ),
+        "imagine": (
+            "Imagine a world where it rains only on birthdays",
+            "Rain falls on a birthday party.",
+        ),
+        "suppose": (
+            "Suppose every door you open takes you back one year",
+            "A girl opens a door and finds yesterday.",
+        ),
+    }
+
+    def test_each_shape_is_detected(self):
+        for name, (raw, _) in self.CASES.items():
+            self.assertTrue(premises(raw), name + " was not seen as a premise")
+            self.assertTrue(starts_with_premise(raw), name + " does not start with its premise")
+
+    def test_deleting_the_premise_is_refused(self):
+        for name, (raw, scene) in self.CASES.items():
+            text, reason = sanitize(scene, raw)
+            self.assertIsNone(text, name + ": a scene rewrite was accepted")
+            self.assertIn("premise", reason)
+
+    def test_moving_the_premise_out_of_the_opening_is_refused(self):
+        raw = self.CASES["in this world"][0]
+        text, reason = sanitize(
+            "A boy cannot stop lying in this world where every lie turns into a coin.", raw)
+        self.assertIsNone(text)
+        self.assertIn("scene-setting", reason)
+
+    def test_keeping_the_premise_is_never_punished(self):
+        for name, (raw, _) in self.CASES.items():
+            text, reason = sanitize(raw.rstrip(".") + ".", raw)
+            self.assertIn(reason, {"ok", "the reply was identical to the input"}, name)
+
+    def test_a_rewrite_that_keeps_the_opener_and_adds_detail_passes(self):
+        raw = "What if your shadow knew every secret you kept"
+        text, reason = sanitize(
+            "What if your shadow in the school hallway knew every secret you kept?", raw)
+        self.assertEqual(reason, "ok")
+        self.assertTrue(text.startswith("What if"))
+
+    def test_a_prompt_with_no_premise_still_gets_cleaned(self):
         text, reason = sanitize("A student finds a lost wallet on the way to school.",
                                 "a stdent finds a lost wallett on the way to shcool")
         self.assertEqual(reason, "ok")
