@@ -277,16 +277,23 @@ jobs:
             *) echo "Unknown model quality: $MODEL_QUALITY" >&2; exit 1 ;;
           esac
           # A larger model on a CPU runner needs a much longer per-request budget.
+          # There is NO wall-clock limit on a call any more: the hard and smart
+          # presets are slow on a CPU runner and are allowed to take the time they
+          # need. What is still guarded is genuine silence -- if the model emits
+          # nothing at all for AI_STALL seconds the process is frozen, and only
+          # then is the call handed to the faster fallback.
           case "$MODEL_QUALITY" in
-            fast|medium) AI_TIMEOUT=700 ;;
-            hard) AI_TIMEOUT=1200 ;;
-            smart_11b) AI_TIMEOUT=2600 ;;
-            animation_best) AI_TIMEOUT=1800 ;;
-            *) AI_TIMEOUT=900 ;;
+            fast|medium) AI_TIMEOUT=3600 ;;
+            hard) AI_TIMEOUT=5400 ;;
+            smart_11b) AI_TIMEOUT=9000 ;;
+            animation_best) AI_TIMEOUT=7200 ;;
+            *) AI_TIMEOUT=5400 ;;
           esac
           echo "AI_MODEL=$SELECTED_MODEL" >> "$GITHUB_ENV"
           echo "OLLAMA_THINKING=$MODEL_THINKING" >> "$GITHUB_ENV"
           echo "AI_TIMEOUT=$AI_TIMEOUT" >> "$GITHUB_ENV"
+          # 15 minutes of complete silence == a frozen process, not a slow model.
+          echo "AI_STALL=900" >> "$GITHUB_ENV"
           echo "AI_FALLBACK_MODEL=qwen3:8b" >> "$GITHUB_ENV"
           echo "Selected model cache restored: ${MODEL_CACHE_HIT:-false}; pulling only $SELECTED_MODEL if its weights are not already present."
           ollama pull "$SELECTED_MODEL"
@@ -305,7 +312,7 @@ jobs:
             echo "- Used for story and map/camera planning; thinking mode: $MODEL_THINKING (on for every preset)."
             echo "- Presets: fast qwen3:1.7b, medium qwen3:4b, hard qwen3:8b, smart_11b qwen3:14b (14.8B), animation_best deepseek-r1:8b."
             echo "- smart_11b runs qwen3:14b: the same Qwen3 family that already passes every JSON-schema, narration and world-plan gate here, just larger, so it plans the most reliable furnished world, aligned Part placement, cameras and face timing."
-            echo "- Per-request budget for this preset: ${AI_TIMEOUT}s. If a model cannot load or answer, the step retries with qwen3:8b so the run still finishes."
+            echo "- No time limit on a model call: hard and smart presets may take as long as they need. Only ${AI_STALL}s of complete silence (a frozen process) hands the call to qwen3:8b."
             echo "- Speed: flash attention + q8 KV cache, 60-minute model keep-alive, one loaded model, and compact per-step token budgets, so a slow CPU preset no longer spends hours on repeated generations. The live console prints tokens/second for every AI call."
             echo "- llama3.2-vision was dropped: current Ollama cannot load its mllama architecture (HTTP 500) and it has no thinking channel."
             echo "- animation_best is the ~5.2 GB, 128K-context, text-only DeepSeek-R1 reasoning model for world/shot planning; it is not a mesh editor. Avatar mesh loading and native Roblox animation retargeting remain unchanged."
@@ -394,8 +401,10 @@ jobs:
           # thousands of tokens before it writes a word, so a flat 1600 was cutting
           # the story off mid-sentence on long runs. ollama_stream.py also retries
           # with a bigger ceiling if the model still stops at done_reason: length.
-          NARRATION_TOKENS=$((600 + DURATION_SECONDS * 5))
-          REPAIR_TOKENS=$((800 + DURATION_SECONDS * 5))
+          # Generous enough that a thinking model does not spend the whole budget
+          # before writing a word, which is what made smart_11b look "stuck".
+          NARRATION_TOKENS=$((1200 + DURATION_SECONDS * 8))
+          REPAIR_TOKENS=$((1400 + DURATION_SECONDS * 8))
           echo "Token budget for this ${DURATION_SECONDS}s story: ${NARRATION_TOKENS} (repair ${REPAIR_TOKENS})."
           echo "Speed settings: flash attention, q8 KV cache, 60-minute keep-alive, one loaded model."
           cat > narration_prompt.txt <<PROMPT
@@ -404,7 +413,7 @@ jobs:
           Topic: "${STORY_TOPIC}". Aim for ${TARGET_WORDS} words, strictly between ${MIN_WORDS} and ${MAX_WORDS} words.
           HARD LIMIT: never write more than ${MAX_WORDS} words. This is a brief short, not a long story. Do not pad it.
           You have full creative authority over this video: you may invent characters, details, events, emotions and timings, and you may change the story however you think makes the best short.
-          THINK BRIEFLY: settle the hook, one everyday problem, the cast's choice, and the ending in a few short lines, then write the final story once. If you notice you are repeating the same idea or re-drafting the same paragraph, say so in a few words and move on; do not audit every word while thinking, and the answer itself must be complete and must not run out of room.
+          THINK BRIEFLY: settle the hook, one everyday problem, the cast's choice, and the ending in a few SHORT lines (at most 6 sentences of planning), then write the final story once and stop. If you notice you are repeating the same idea or re-drafting the same paragraph, say so in a few words and move on; do not audit every word while thinking, and the answer itself must be complete and must not run out of room.
           The video must feel like a real Roblox story short: a small cast of characters acting out one clear everyday problem.
           Selected cast usernames (for internal casting only): ${CAST_NAMES:-none supplied}.
           NEVER put a username, handle, gamer tag, or account name in the narration, and never read one aloud, spell one, or say "username", "player", "avatar", "account", or "subscriber". Instead invent natural human first names for the characters and tell the story with those names. Match the number of speaking characters to the selected cast.
@@ -419,6 +428,7 @@ jobs:
           python tools/ollama_stream.py --request narration_request.json \
             --output narration_response.json --label "story narration" \
             --timeout "${AI_TIMEOUT:-900}" \
+            --stall-seconds "${AI_STALL:-900}" \
             --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}"
           for attempt in 1 2 3; do
             if python tools/prepare_narration.py narration_response.json dist/narration.txt "$DURATION_SECONDS"; then
@@ -452,6 +462,7 @@ jobs:
             python tools/ollama_stream.py --request narration_repair_request.json \
               --output narration_response.json --label "narration repair ${attempt}" \
               --timeout "${AI_TIMEOUT:-900}" \
+              --stall-seconds "${AI_STALL:-900}" \
               --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}"
           done
           test -s dist/narration.txt
@@ -463,6 +474,9 @@ jobs:
           WORLD_THEME: ${{ inputs.world_theme }}
         run: |
           NARRATION=$(cat dist/narration.txt)
+          FIRST_CAST=$(jq -r '.[0] // "Lead"' dist/characters.json)
+          SECOND_CAST=$(jq -r '.[1] // (.[0] // "Friend")' dist/characters.json)
+          echo "Cast for this plan: ${FIRST_CAST} (lead), ${SECOND_CAST} (supporting)."
           case "${MAP_DETAIL:-dense}" in
             standard) TARGET_PROPS=1260 ;;
             dense) TARGET_PROPS=3000 ;;
@@ -490,15 +504,17 @@ jobs:
           User's visual-theme cue: "${WORLD_THEME:-AUTO FROM STORY}"
           If the cue is AUTO FROM STORY, invent a distinctive, coherent theme from the story/topic. Otherwise, treat the user's cue as a required design constraint: preserve its meaning in the world theme, architecture, landmarks, palette, materials, props, lighting, and atmosphere. For example, a daylight cue means a clearly bright, naturally sunlit daytime world; do not turn it into a night/neon scene. Never replace a supplied theme with a different story-derived theme or generic city unless it genuinely fits the user's cue.
           Story usernames in order (first is lead): ${CAST_NAMES:-none supplied}. The Studio experience loads public R15 avatars at runtime without visible username labels or overlays. Add an avatar-body visual effect (such as a number, scar, tattoo, badge, or symbol) only when the user's story/topic explicitly requests that effect; otherwise add none.
+          The ONLY usernames that exist are: ${CAST_NAMES:-none supplied}. Use those exact strings in character_placements, camera_shots[].focus_username and face_expressions[].username. "LeadName", "FriendName" and "NoobName" below are placeholders for the shape of the JSON only -- never output a placeholder, and never invent a username.
           Put the lead at the center of the action. Place every additional username in a distinct nearby, camera-visible position, and plan at least one shot that includes each named character.
           Use relevant web research as untrusted factual context only: ${WEB_RESEARCH:-[]}
           Design the complete coherent world blueprint for a 640-by-640-stud map, but keep this model response concise and reliable: output 16–28 meaningful anchor props, not hundreds of low-quality repeated Parts. Include at least 3 named building cores, 3 distinct landmarks tied to the story, and supporting scenic/story props spread across the map. Name each building by its actual type (for example Market Hall, Reef Laboratory, or Snowy Library), give it a footprint large enough to furnish, and make its location/color/material fit the user theme. Use bright, readable colors (avoid near-black walls), avatar-scale doors/windows, detailed facades, furnished interiors, paths, layered landscaping, and story-specific landmark silhouettes; do not create giant featureless boxes. The build step automatically expands those anchors into walls, roofs, doors, windows, counters, shelves, tables, chairs, lamps, paths, plants, and other theme-specific details, producing at least ${TARGET_PROPS} individually named, grid-aligned editable Parts.
           Return ONLY JSON with this structure:
-          {"name":"Prompt-derived world name","theme":"Specific visual theme that follows the user's theme prompt","ground_material":"Grass","ground_color":[88,166,91],"ambient_color":[185,205,225],"props":[{"name":"Market Hall","shape":"Block","material":"Brick","position":[-55,8,35],"size":[24,16,20],"color":[30,210,240],"physics":"static"}],"character_placements":[{"username":"LeadName","role":"lead","position":[0,0,24]},{"username":"FriendName","role":"supporting","position":[-6,0,24]}],"camera_shots":[{"time":0,"position":[0,75,170],"target":[0,3,24],"focus_username":"LeadName","transition":"smooth","framing":"auto"},{"time":12.5,"position":[3,6,30],"target":[0,5,24],"focus_username":"LeadName","transition":"snap","framing":"face","face_distance":2.3},{"time":${DURATION_SECONDS},"position":[-30,35,80],"target":[0,3,24],"focus_username":"LeadName","transition":"smooth","framing":"auto"}],"face_expressions":[{"time":0,"expression":"neutral","intensity":0.6,"username":"LeadName"},{"time":12.4,"expression":"worried","intensity":0.9,"username":"LeadName"},{"time":18,"expression":"happy","intensity":1,"username":"LeadName"}],"search_queries":[]}
+          {"name":"Prompt-derived world name","theme":"Specific visual theme that follows the user's theme prompt","ground_material":"Grass","ground_color":[88,166,91],"ambient_color":[185,205,225],"props":[{"name":"Market Hall","shape":"Block","material":"Brick","position":[-55,8,35],"size":[24,16,20],"color":[30,210,240],"physics":"static"}],"character_placements":[{"username":"${FIRST_CAST}","role":"lead","position":[0,0,24]},{"username":"${SECOND_CAST}","role":"supporting","position":[-6,0,24]}],"camera_shots":[{"time":0,"position":[0,75,170],"target":[0,3,24],"focus_username":"${FIRST_CAST}","transition":"smooth","framing":"auto"},{"time":12.5,"position":[3,6,30],"target":[0,5,24],"focus_username":"${FIRST_CAST}","transition":"snap","framing":"face","face_distance":2.3},{"time":${DURATION_SECONDS},"position":[-30,35,80],"target":[0,3,24],"focus_username":"${FIRST_CAST}","transition":"smooth","framing":"auto"}],"face_expressions":[{"time":0,"expression":"neutral","intensity":0.6,"username":"LeadName"},{"time":12.4,"expression":"worried","intensity":0.9,"username":"LeadName"},{"time":18,"expression":"happy","intensity":1,"username":"LeadName"}],"search_queries":[]}
           Quality bar for every anchor you return: X, Y and Z positions and all three size dimensions must sit on a 0.5-stud grid; props must never overlap each other; no prop may be darker than RGB 104 average luminance; no prop may sit in the cast lane (|X| < 20 and Z 4–54) so faces stay unobstructed for the close-ups; assign a material that fits the object (Wood, Brick, Glass, Concrete, Metal, Neon, Grass, SmoothPlastic) and a physics value that fits it (static for buildings/furniture, dynamic only for small loose objects); colours must be bright, saturated and contrast with neighbouring props so shadows read clearly. Check your blueprint once for anything that breaks those rules, that floats above the ground, that clips through a building, or that faces the wrong way, then return it. THINK BRIEFLY: this runs on a CPU-only machine. Do not re-plan the world over and over, do not repeat the JSON in your reasoning, and if you catch yourself looping on the same point, stop and return the complete plan.
           Treat props as blueprint anchors: 3–6 building cores, large distinctive story landmarks, and supporting scene anchors. Give each building its own recognizable footprint; the deterministic build step will model open facades, visible windows, furnishing, and structural details. Add enough diverse anchor locations to fill the map, not one central pile. Keep story-specific landmarks prominent and every named username camera-visible.
           Use the user theme prompt as the source of truth for every design choice. Derive the theme from the story only when the user left the theme blank. Make the theme unmistakable and specific; do not fall back to the same generic city/neon plaza. The finished environment is expanded by code to ${TARGET_PROPS}+ Parts; this compact AI blueprint should prioritize coherence, varied locations, and meaningful design over repeating primitive objects.
-          Include one character_placements entry for every supplied username using exact spelling, roles lead/supporting, positions X=-8..8, Y=0..3, Z=12..38. Do not add username labels, screen text, floating numbers, scars, tattoos, badges, or other visual effects unless the user's story/topic explicitly asks for them. When requested, keep the effect attached to the specified avatar body part/location. Keep a clear 30-by-40-stud area around this cast so characters and camera remain unobstructed.
+          Include one character_placements entry for every supplied username using exact spelling (the example's LeadName/FriendName are placeholders: copy the real usernames above, never the placeholders), roles lead/supporting, positions X=-8..8, Y=0..3, Z=12..38.
+          USE THE EXACT KEYS: shape (never type/dimensions), material spelled exactly as listed, ground_material, ground_color, ambient_color, props, character_placements, camera_shots, face_expressions, search_queries. A schema is enforced, so any other key name is rejected. Do not add username labels, screen text, floating numbers, scars, tattoos, badges, or other visual effects unless the user's story/topic explicitly asks for them. When requested, keep the effect attached to the specified avatar body part/location. Keep a clear 30-by-40-stud area around this cast so characters and camera remain unobstructed.
           Use ${SHOT_COUNT:-8} to ${SHOT_MAX:-16} camera_shots with increasing times from 0 through exactly ${DURATION_SECONDS} (${DURATION_LABEL}); the final shot time is exactly ${DURATION_SECONDS}, and intermediate times must be precise moments (e.g. 37.4, 71.2, 118.6), never rounded to tens; show the complete environment, all supplied characters, landmarks, and the ending beat. Coordinates are Roblox X,Y,Z. Each shot must set focus_username to an exact supplied username (or world for a single establishing view); every deliberate snap cut must move both the camera and focus to its named character. Begin wide, use smooth moves and deliberate snap cuts, finish on the lead.
           ANIMATED FACES (required): every character gets a Roblox story-short face rendered from your timeline — white eyes with dark pupils, thick expressive eyebrows and a clean line mouth — so choose the feeling that fits each beat. The whole video is exactly ${DURATION_SECONDS} seconds (${DURATION_LABEL}) and must end there, not on a round minute. Return a face_expressions timeline of 6–16 beats across the whole ${DURATION_SECONDS} seconds, with precise non-round timestamps tied to the narration beats. Each beat is {"time": seconds, "expression": one of neutral|happy|sad|surprised|worried|angry|excited|thinking, "intensity": 0..1, "username": exact supplied username}. Time every switch to the exact second the narration changes feeling, so the face changes on the beat, never at random.
           FACE CAMERAS (required): mark at least 3 shots with "framing":"face" (the close-up that Roblox story shorts cut to) and set "face_distance" between 2.0 and 3.4 studs. A face shot must focus a named character whose expression changes at that moment. All other shots use "framing":"auto" or "wide". Fill position/target normally; the renderer pulls the face camera in to the head safely.
@@ -506,8 +522,12 @@ jobs:
           PROMPT
           # Ask the selected model for a compact, story-specific anchor blueprint; Python expands it into a furnished map.
           # This avoids forcing small local models to emit hundreds of repetitive JSON objects and caps stalled requests.
-          jq -n --arg model "$AI_MODEL" --argjson think "$OLLAMA_THINKING" --rawfile prompt map_prompt.txt --argjson tokens "$MAP_TOKENS" \
-            '{model:$model, messages:[{role:"user",content:$prompt}], format:"json", think:$think, stream:false, keep_alive:"60m", options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:$tokens}}' > map_request.json
+          # A schema, not just "json": it fixes the key names ("shape", not "type"),
+          # the material/shape spelling, the exact cast usernames, and the minimum
+          # counts, so a long blueprint is not thrown away for inventing its own keys.
+          python tools/plan_schema.py --usernames dist/characters.json --output map_schema.json
+          jq -n --arg model "$AI_MODEL" --argjson think "$OLLAMA_THINKING" --rawfile prompt map_prompt.txt --argjson tokens "$MAP_TOKENS" --slurpfile schema map_schema.json \
+            '{model:$model, messages:[{role:"user",content:$prompt}], format:$schema[0], think:$think, stream:false, keep_alive:"60m", options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:$tokens}}' > map_request.json
           MAP_READY=0
           for attempt in 1 2; do
             echo "AI world blueprint attempt ${attempt}/2 using ${AI_MODEL}; requires 8 valid landmarks, then expands to at least ${TARGET_PROPS} furnished Parts."
@@ -515,6 +535,7 @@ jobs:
             python tools/ollama_stream.py --request map_request.json \
               --output map_response.json --label "world + camera + face plan ${attempt}" \
               --timeout "${AI_TIMEOUT:-900}" \
+              --stall-seconds "${AI_STALL:-900}" \
               --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}" || curl_status=$?
             if [ "$curl_status" -ne 0 ]; then
               echo "Map request failed with curl exit ${curl_status}."
@@ -551,11 +572,12 @@ jobs:
               python tools/ai_web_search.py dist/web_research.json "${QUERY_LIST[@]}"
               WEB_RESEARCH=$(jq -c . dist/web_research.json)
               printf '\nExtra web research the AI requested and the workflow fetched live:\n%s\nUse it if helpful and return the complete JSON again, with "search_queries":[] when you need nothing else.\n' "$WEB_RESEARCH" >> map_prompt.txt
-              jq -n --arg model "$AI_MODEL" --argjson think "$OLLAMA_THINKING" --rawfile prompt map_prompt.txt --argjson tokens "$MAP_TOKENS" \
-                '{model:$model, messages:[{role:"user",content:$prompt}], format:"json", think:$think, stream:false, keep_alive:"60m", options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:$tokens}}' > map_request.json
+              jq -n --arg model "$AI_MODEL" --argjson think "$OLLAMA_THINKING" --rawfile prompt map_prompt.txt --argjson tokens "$MAP_TOKENS" --slurpfile schema map_schema.json \
+                '{model:$model, messages:[{role:"user",content:$prompt}], format:$schema[0], think:$think, stream:false, keep_alive:"60m", options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:$tokens}}' > map_request.json
               python tools/ollama_stream.py --request map_request.json --output map_response.json \
                 --label "world plan + AI search round ${search_round}" \
                 --timeout "${AI_TIMEOUT:-900}" \
+                --stall-seconds "${AI_STALL:-900}" \
                 --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}" || break
             done
             validation_status=0
@@ -587,8 +609,8 @@ jobs:
             cat >> map_prompt.txt <<RETRY
           CORRECTION: re-read the whole blueprint, then regenerate it and fix this validation error: ${VALIDATION_ERROR}. Return 16–28 unique, valid anchors including 3 building cores, 3 story landmarks, theme-specific scenic props, complete camera/cast data, a face_expressions timeline of at least 6 AI-timed beats, and at least 3 shots with "framing":"face". Do not enumerate hundreds of small parts; the build step expands anchors into ${TARGET_PROPS}+ furnished Parts. Preserve the user's exact theme and story. Return only JSON.
           RETRY
-            jq -n --arg model "$AI_MODEL" --argjson think "$OLLAMA_THINKING" --rawfile prompt map_prompt.txt --argjson tokens "$MAP_TOKENS" \
-              '{model:$model, messages:[{role:"user",content:$prompt}], format:"json", think:$think, stream:false, keep_alive:"60m", options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:$tokens}}' > map_request.json
+            jq -n --arg model "$AI_MODEL" --argjson think "$OLLAMA_THINKING" --rawfile prompt map_prompt.txt --argjson tokens "$MAP_TOKENS" --slurpfile schema map_schema.json \
+              '{model:$model, messages:[{role:"user",content:$prompt}], format:$schema[0], think:$think, stream:false, keep_alive:"60m", options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:$tokens}}' > map_request.json
           done
           if [ "$MAP_READY" -eq 0 ]; then
             echo "AI map planning did not complete; creating a detailed procedural world from the user's theme and story instead."
@@ -811,7 +833,7 @@ jobs:
             '{model:$model, messages:[{role:"user",content:$prompt}], format:{type:"object",properties:{summary:{type:"string"}},required:["summary"],additionalProperties:false}, think:$think, stream:false, keep_alive:"60m", options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:900}}' > creation_summary_request.json
           python tools/ollama_stream.py --request creation_summary_request.json \
             --output creation_summary_response.json --label "creation summary" \
-            --timeout 500 \
+            --timeout 3600 --stall-seconds "${AI_STALL:-900}" \
             --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}"
           python - <<'PY'
           from pathlib import Path

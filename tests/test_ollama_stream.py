@@ -30,8 +30,8 @@ class TokenBudgetTests(unittest.TestCase):
 
     def test_workflow_scales_the_budget_with_the_story_length(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
-        self.assertIn("NARRATION_TOKENS=$((600 + DURATION_SECONDS * 5))", workflow)
-        self.assertIn("REPAIR_TOKENS=$((800 + DURATION_SECONDS * 5))", workflow)
+        self.assertIn("NARRATION_TOKENS=$((1200 + DURATION_SECONDS * 8))", workflow)
+        self.assertIn("REPAIR_TOKENS=$((1400 + DURATION_SECONDS * 8))", workflow)
         self.assertIn("num_predict:$tokens}}' > narration_request.json", workflow)
         self.assertIn("num_predict:$tokens}, messages:", workflow)
         # Every request keeps the model loaded, which removes minute-long reloads.
@@ -203,14 +203,22 @@ class RuntimeSpeedTests(unittest.TestCase):
         self.assertIn("num_ctx:8192", self.workflow)
 
     def test_budgets_are_compact(self):
-        self.assertIn("NARRATION_TOKENS=$((600 + DURATION_SECONDS * 5))", self.workflow)
-        self.assertIn("REPAIR_TOKENS=$((800 + DURATION_SECONDS * 5))", self.workflow)
+        self.assertIn("NARRATION_TOKENS=$((1200 + DURATION_SECONDS * 8))", self.workflow)
+        self.assertIn("REPAIR_TOKENS=$((1400 + DURATION_SECONDS * 8))", self.workflow)
         self.assertIn("MAP_TOKENS=4000", self.workflow)
         self.assertNotIn("num_predict:12000", self.workflow)
-        # 120 s narration: 600 + 600 = 1200 tokens instead of the 2800 that made
-        # the model reason for 20 minutes.
-        seconds, duration = 600, 120
-        self.assertEqual(seconds + duration * 5, 1200)
+        # 120 s narration: 1200 + 960 = 2160 tokens: enough for a thinking model to
+        # plan briefly AND write the story, so it never stalls on the ceiling.
+        seconds, duration = 1200, 120
+        self.assertEqual(seconds + duration * 8, 2160)
+
+    def test_no_wall_clock_cap_on_slow_models(self):
+        # Hard and smart presets may take as long as they need; only total silence
+        # (a frozen process) hands the call to the fallback.
+        self.assertNotIn("--max-seconds", self.workflow)
+        self.assertIn("AI_STALL=900", self.workflow)
+        self.assertIn('--stall-seconds "${AI_STALL:-900}"', self.workflow)
+        self.assertIn("smart_11b) AI_TIMEOUT=9000", self.workflow)
 
     def test_search_many_times_but_never_loop(self):
         # The AI may research as often as it needs...

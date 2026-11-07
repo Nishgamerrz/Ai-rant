@@ -15,6 +15,58 @@ from durations import check_duration, duration_arg  # noqa: E402
 MATERIALS = {"Plastic", "SmoothPlastic", "Concrete", "Grass", "Slate", "Wood", "Metal", "Neon", "Glass", "Brick", "Asphalt"}
 SHAPES = {"Block", "Ball", "Cylinder"}
 
+SHAPE_ALIASES = {
+    "block": "Block", "part": "Block", "box": "Block", "cube": "Block", "rectangle": "Block",
+    "ball": "Ball", "sphere": "Ball", "round": "Ball",
+    "cylinder": "Cylinder", "tube": "Cylinder", "pillar": "Cylinder", "column": "Cylinder",
+}
+MATERIAL_ALIASES = {
+    "smooth plastic": "SmoothPlastic", "smoothpl astic": "SmoothPlastic", "plastic": "Plastic",
+    "smoothplastic": "SmoothPlastic", "grass": "Grass", "turf": "Grass", "lawn": "Grass",
+    "brick": "Brick", "bricks": "Brick", "concrete": "Concrete", "cement": "Concrete",
+    "wood": "Wood", "wooden": "Wood", "plank": "Wood", "timber": "Wood",
+    "metal": "Metal", "metallic": "Metal", "steel": "Metal", "iron": "Metal",
+    "neon": "Neon", "glow": "Neon", "glass": "Glass", "window": "Glass",
+    "slate": "Slate", "stone": "Slate", "rock": "Slate",
+    "asphalt": "Asphalt", "road": "Asphalt", "pavement": "Asphalt",
+}
+
+
+def normalize_shape(value, default="Block"):
+    """Accept any spelling a model invents and return a real Roblox PartType."""
+    if isinstance(value, str):
+        key = " ".join(value.strip().casefold().replace("_", " ").replace("-", " ").split())
+        if key in SHAPE_ALIASES:
+            return SHAPE_ALIASES[key]
+        for candidate in SHAPES:
+            if candidate.casefold() == key.replace(" ", ""):
+                return candidate
+    return default
+
+
+def normalize_material(value, default="SmoothPlastic"):
+    """Accept `brick`, `Brick`, `smooth_plastic`, `Wood Planks`, ... alike."""
+    if isinstance(value, str):
+        key = " ".join(value.strip().casefold().replace("_", " ").replace("-", " ").split())
+        if key in MATERIAL_ALIASES:
+            return MATERIAL_ALIASES[key]
+        compact = key.replace(" ", "")
+        for candidate in MATERIALS:
+            if candidate.casefold() == compact:
+                return candidate
+        # "Wood Planks", "Brick Wall", "Metal Fence": match the leading word.
+        head = key.split(" ")[0]
+        if head in MATERIAL_ALIASES:
+            return MATERIAL_ALIASES[head]
+        if key in MATERIALS:
+            return key
+    return default
+
+
+def normalize_ground_material(value, default="Grass"):
+    return normalize_material(value, default)
+
+
 
 def default_plan():
     return {
@@ -805,11 +857,15 @@ def validate(plan, duration=90, usernames=(), min_props=16, visual_request=""):
     for index, prop in enumerate(props):
         if not isinstance(prop, dict):
             raise ValueError("every map prop must be an object")
-        shape = prop.get("shape", "Block")
-        material = prop.get("material", "SmoothPlastic")
-        pos, size = prop.get("position"), prop.get("size")
-        if not isinstance(shape, str) or shape not in SHAPES or not isinstance(material, str) or material not in MATERIALS:
-            raise ValueError("map prop has an unsupported shape or material")
+        # Models drift into their own key names ("type" instead of "shape",
+        # lowercase "brick", "dimensions"). Accept the aliases instead of throwing
+        # away a blueprint the model spent many minutes writing.
+        raw_shape = prop.get("shape", prop.get("type", prop.get("part_type", prop.get("partType"))))
+        raw_material = prop.get("material", prop.get("Material"))
+        shape = normalize_shape(raw_shape, "Block")
+        material = normalize_material(raw_material, "SmoothPlastic")
+        pos = prop.get("position", prop.get("Position"))
+        size = prop.get("size", prop.get("dimensions", prop.get("Dimension")))
         if (not isinstance(pos, list) or len(pos) != 3
                 or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in pos)
                 or not -250 <= pos[0] <= 250 or not 0 <= pos[1] <= 250
@@ -839,8 +895,8 @@ def validate(plan, duration=90, usernames=(), min_props=16, visual_request=""):
     return {
         "name": name, "theme": theme,
         "ground_color": color(plan.get("ground_color"), [88, 166, 91]),
-        "ground_material": plan.get("ground_material") if isinstance(plan.get("ground_material"), str) and plan.get("ground_material") in MATERIALS else "Grass",
-        "ambient_color": color(plan.get("ambient_color"), [185, 205, 225]),
+        "ground_material": normalize_ground_material(plan.get("ground_material", plan.get("groundMaterial")), "Grass"),
+        "ambient_color": color(plan.get("ambient_color", plan.get("ambient_light")), [185, 205, 225]),
         "props": clean_props,
         "camera_shots": normalize_camera_shots(plan.get("camera_shots"), duration, usernames),
         "face_expressions": normalize_face_expressions(plan.get("face_expressions"), duration, usernames),

@@ -41,7 +41,17 @@ class ModelUnusable(Exception):
     """Raised when Ollama fails (5xx) to load or run the selected model."""
 
 
-def stream(request: dict, url: str, label: str, timeout: float, quiet: bool) -> dict:
+class ModelTooSlow(Exception):
+    """Raised when a preset is so slow that the run would miss its budget.
+
+    A 14B model on a CPU runner can spend 20+ minutes on one narration request.
+    The workflow gives each call a wall-clock allowance; when it runs out this
+    exception triggers the fallback ladder instead of blocking the whole run.
+    """
+
+
+def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
+           max_seconds: float = 0.0, stall_seconds: float = 0.0) -> dict:
     request = {**request, "stream": True}
     payload = json.dumps(request).encode("utf-8")
     http = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
@@ -58,6 +68,8 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool) -> 
     answer_open = False
     repeated = False
     seen = 0
+    last_progress = time.time()
+    started_at = last_progress
     try:
         handle = urllib.request.urlopen(http, timeout=timeout)
     except urllib.error.HTTPError as exc:
@@ -111,6 +123,20 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool) -> 
                         print(f"[{label}] the model is looping on the same words instead of "
                               f"finishing; telling it to stop repeating and write the answer once.",
                               flush=True)
+            if piece_thinking or piece_content:
+                last_progress = time.time()
+            now = time.time()
+            if max_seconds and now - started_at > max_seconds:
+                if answer_open or thinking_open:
+                    print(flush=True)
+                raise ModelTooSlow(
+                    f"still going after {now - started_at:.0f}s "
+                    f"(budget {max_seconds:.0f}s); handing this call to the faster model")
+            if stall_seconds and now - last_progress > stall_seconds:
+                if answer_open or thinking_open:
+                    print(flush=True)
+                raise ModelTooSlow(
+                    f"no output for {stall_seconds:.0f}s; handing this call to the faster model")
             if event.get("done"):
                 tokens = int(event.get("eval_count") or 0)
                 done_reason = str(event.get("done_reason") or "")
@@ -161,8 +187,12 @@ def main() -> None:
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--fallback-model", default="",
                         help="known-good model to retry on when the selected one cannot run")
-    parser.add_argument("--fallback-thinking", default="false",
-                        help="whether the fallback model should use thinking (default false)")
+    parser.add_argument("--fallback-thinking", default="true",
+                        help="whether the fallback model should use thinking (default true)")
+    parser.add_argument("--max-seconds", type=float, default=0.0,
+                        help="wall-clock allowance for this call; 0 = no limit")
+    parser.add_argument("--stall-seconds", type=float, default=0.0,
+                        help="give up if the model emits nothing for this long; 0 = no limit")
     parser.add_argument("--keep-stream-flag", action="store_true",
                         help="keep stream:true in the written request file for debugging")
     args = parser.parse_args()
@@ -174,8 +204,10 @@ def main() -> None:
           f"(temperature {request.get('options', {}).get('temperature', 'default')}, "
           f"thinking {'on' if thinking_on else 'off'}); live thinking is printed below.", flush=True)
 
+    limits = {"max_seconds": args.max_seconds, "stall_seconds": args.stall_seconds}
+
     def run_once(payload: dict, note: str) -> dict:
-        result = stream(payload, args.url, args.label, args.timeout, args.quiet)
+        result = stream(payload, args.url, args.label, args.timeout, args.quiet, **limits)
         # A reasoning model can spend the whole num_predict budget thinking and
         # stop mid-sentence (`done_reason: "length"`). That used to surface as a
         # mysteriously short story and burn a whole retry round; finish it here
@@ -211,7 +243,7 @@ def main() -> None:
                              {"role": "user", "content": steer}],
                 "options": {**(payload.get("options") or {}), "num_predict": bigger},
             }
-            retried = stream(retry_payload, args.url, args.label, args.timeout, args.quiet)
+            retried = stream(retry_payload, args.url, args.label, args.timeout, args.quiet, **limits)
             retried["token_ceiling_retry"] = bigger
             retried["steered_after_repeat"] = looping
             if retried.get("done_reason") != "length" and not retried.get("repeated"):
@@ -237,6 +269,9 @@ def main() -> None:
                 return None
             result["thinking_unsupported"] = True
             return result
+        except ModelTooSlow as exc:
+            print(f"[{args.label}] {model} is too slow for this run ({exc}).", flush=True)
+            return None
         except ModelUnusable as exc:
             print(f"[{args.label}] {model} cannot run here ({exc}).", flush=True)
             return None
