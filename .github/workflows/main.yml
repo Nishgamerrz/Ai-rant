@@ -1016,6 +1016,10 @@ jobs:
             thin_male) VOICE_CANDIDATES="en-US-EricNeural en-US-GuyNeural"; RATE=+4%; PITCH=+12Hz ;;
             *) echo "Unknown voice choice: $VOICE_STYLE" >&2; exit 1 ;;
           esac
+          # Last line of defence before the narrator speaks: no Roblox username can
+          # reach the voiceover or its captions, whatever the story model wrote.
+          python tools/say.py tool "Checking the script for spoken usernames before recording."
+          python tools/prepare_narration.py --scrub dist/narration.txt
           VOICE=""
           for CANDIDATE in $VOICE_CANDIDATES; do
             if edge-tts --voice "$CANDIDATE" --rate="$RATE" --pitch="$PITCH" \
