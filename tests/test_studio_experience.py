@@ -143,7 +143,7 @@ class StudioExperienceTests(unittest.TestCase):
     def test_models_that_cannot_run_have_a_known_good_fallback(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
         # Every streaming call must be able to retry on a model we know loads.
-        self.assertEqual(workflow.count("--fallback-model"), 5)
+        self.assertEqual(workflow.count("--fallback-model"), 6)
         self.assertIn('echo "AI_FALLBACK_MODEL=qwen3:8b" >> "$GITHUB_ENV"', workflow)
         # llama3.2-vision is the mllama architecture, which current Ollama cannot
         # even load (HTTP 500), so it must never be selected again.
@@ -160,7 +160,7 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("smart_11b) AI_TIMEOUT=9000", workflow)
         self.assertIn("hard) AI_TIMEOUT=5400", workflow)
         self.assertIn('echo "AI_TIMEOUT=$AI_TIMEOUT" >> "$GITHUB_ENV"', workflow)
-        self.assertEqual(workflow.count('--timeout "${AI_TIMEOUT:-900}"'), 4)
+        self.assertEqual(workflow.count('--timeout "${AI_TIMEOUT:-900}"'), 5)
         self.assertNotIn("--max-seconds", workflow)
         self.assertNotIn("NARRATION_MAX", workflow)
 
@@ -171,7 +171,7 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertGreaterEqual(workflow.count("python tools/ollama_stream.py"), 5)
         self.assertIn("tools/ai_web_search.py", workflow)
         self.assertIn('search_queries', workflow)
-        self.assertIn("AI search round", workflow)
+        self.assertIn("AI help round", workflow)
 
     def test_workflow_form_is_compact_and_lists_comma_separated_usernames(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
