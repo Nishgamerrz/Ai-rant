@@ -1041,9 +1041,14 @@ jobs:
           # than leaving silence: one retry, capped at -20% so it still sounds like a
           # story short and never like an audiobook. Measured, then kept only if closer.
           if python -c "import sys; sys.exit(0 if $NARRATION_SECONDS < $DURATION_SECONDS * 0.9 else 1)"; then
+            # Speaking MORE SLOWLY makes the audio longer, so a short take needs a
+            # negative rate. The first version of this divided the wrong way round
+            # and asked for "+0%", which changed nothing: run #84 kept a 74-second
+            # voiceover in a 128-second video.
             FILL_RATE=$(python -c "
-          seconds=float('$NARRATION_SECONDS'); target=float('$DURATION_SECONDS')
-          percent=max(-20, min(4, round((max(1.0, min(seconds, target)) / max(seconds, 0.1) - 1) * 100)))
+          seconds=max(0.1, float('$NARRATION_SECONDS')); target=float('$DURATION_SECONDS')
+          percent=round((seconds / target - 1) * 100)
+          percent=max(-20, min(4, percent))
           print(('+' if percent >= 0 else '') + str(percent) + '%')")
             python tools/say.py warning "The narration is ${NARRATION_SECONDS}s for a ${DURATION_SECONDS}s video; speaking it once more at ${FILL_RATE} to fill the length."
             cp dist/narration.mp3 dist/narration_first_take.mp3
