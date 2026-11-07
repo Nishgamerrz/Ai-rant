@@ -100,12 +100,12 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
         run: |
-          echo "Cleaning the typed story prompt and theme with the Gemini sub-agent (spelling, grammar, a little more detail). It never says anything about the fix."
+          python tools/say.py tool "Cleaning the typed story prompt and theme with the Gemini sub-agent (spelling, grammar, a little more detail). It never says anything about the fix."
           python tools/gemini_topic.py \
             --output dist/refined_prompts.json \
             --github-output "$GITHUB_OUTPUT" || true
           if [ ! -s dist/refined_prompts.json ]; then
-            echo "No cleaned prompt was produced; the run uses the text exactly as typed."
+            python tools/say.py plan "No cleaned prompt was produced; the run uses the text exactly as typed."
           fi
 
       - name: Let the AI pick the exact ending
@@ -157,7 +157,7 @@ jobs:
           CAST_NAMES=$(jq -r 'join(", ")' dist/characters.json)
           echo "CAST_NAMES=$CAST_NAMES" >> "$GITHUB_ENV"
           echo "CHARACTER_USERNAMES_JSON=$(jq -c . dist/characters.json)" >> "$GITHUB_ENV"
-          echo "Cast usernames: ${CAST_NAMES:-none supplied}"
+          python tools/say.py plan "Cast usernames: ${CAST_NAMES:-none supplied}"
           test "$(jq 'length' dist/characters.json)" -ge 1 || { echo "Enter at least one Roblox username; the workflow checks users/<username>.obj/.gltf/.glb/.fbx/.dae/.ply/.stl/.3ds and .rbxm sources." >&2; exit 1; }
 
       - name: Show the public AI build plan and tools
@@ -237,18 +237,18 @@ jobs:
         env:
           MODEL_QUALITY: ${{ inputs.model_quality }}
         run: |
-          echo "Runner storage before cleanup:"
+          python tools/say.py plan "Runner storage before cleanup:"
           df -h "$GITHUB_WORKSPACE"
           # These large preinstalled SDKs are unused by this Python/Node workflow.
           sudo rm -rf /usr/local/lib/android/sdk /usr/share/dotnet /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/share/boost
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
           rm -rf "$HOME/.cache/pip" "$HOME/.npm/_cacache"
-          echo "Runner storage after cleanup:"
+          python tools/say.py plan "Runner storage after cleanup:"
           df -h "$GITHUB_WORKSPACE"
           AVAILABLE_KB=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}')
           AVAILABLE_GIB=$((AVAILABLE_KB / 1024 / 1024))
-          echo "Free storage after cleanup: ${AVAILABLE_GIB} GiB."
+          python tools/say.py plan "Free storage after cleanup: ${AVAILABLE_GIB} GiB."
           CACHE_RESTORE_ALLOWED=true
           # The selected model AND the safety-net fallback (qwen3:8b) both live on
           # this runner, so the requirement covers both weight files.
@@ -265,7 +265,7 @@ jobs:
           fi
           if [ "$AVAILABLE_GIB" -lt $((REQUIRED_GIB + 4)) ]; then
             CACHE_RESTORE_ALLOWED=false
-            echo "Less than $((REQUIRED_GIB + 4)) GiB is free; skipping the model cache archive to avoid exhausting runner storage."
+            python tools/say.py warning "Less than $((REQUIRED_GIB + 4)) GiB is free; skipping the model cache archive to avoid exhausting runner storage."
           fi
           echo "cache_restore_allowed=$CACHE_RESTORE_ALLOWED" >> "$GITHUB_OUTPUT"
 
@@ -352,12 +352,12 @@ jobs:
           # 15 minutes of complete silence == a frozen process, not a slow model.
           echo "AI_STALL=900" >> "$GITHUB_ENV"
           echo "AI_FALLBACK_MODEL=qwen3:8b" >> "$GITHUB_ENV"
-          echo "Selected model cache restored: ${MODEL_CACHE_HIT:-false}; pulling only $SELECTED_MODEL if its weights are not already present."
+          python tools/say.py success "Selected model cache restored: ${MODEL_CACHE_HIT:-false}; pulling only $SELECTED_MODEL if its weights are not already present."
           ollama pull "$SELECTED_MODEL"
           # Safety net: the stream helper can switch to this model if the selected
           # one cannot load or answer, so it must already be on disk.
           if [ -n "${AI_FALLBACK_MODEL:-}" ] && [ "$AI_FALLBACK_MODEL" != "$SELECTED_MODEL" ]; then
-            echo "Pulling the fallback model $AI_FALLBACK_MODEL so a mid-run switch never fails."
+            python tools/say.py plan "Pulling the fallback model $AI_FALLBACK_MODEL so a mid-run switch never fails."
             ollama pull "$AI_FALLBACK_MODEL"
           fi
           ollama show "$SELECTED_MODEL" >/dev/null
@@ -466,8 +466,8 @@ jobs:
           # before writing a word, which is what made smart_11b look "stuck".
           NARRATION_TOKENS=$((1200 + DURATION_SECONDS * 8))
           REPAIR_TOKENS=$((1400 + DURATION_SECONDS * 8))
-          echo "Token budget for this ${DURATION_SECONDS}s story: ${NARRATION_TOKENS} (repair ${REPAIR_TOKENS})."
-          echo "Speed settings: flash attention, q8 KV cache, 60-minute keep-alive, one loaded model."
+          python tools/say.py plan "Token budget for this ${DURATION_SECONDS}s story: ${NARRATION_TOKENS} (repair ${REPAIR_TOKENS})."
+          python tools/say.py plan "Speed settings: flash attention, q8 KV cache, 60-minute keep-alive, one loaded model."
           cat > narration_prompt.txt <<PROMPT
           Write ONE short, vivid, believable real-life mini-story in natural English for a video that runs exactly ${DURATION_SECONDS} seconds (${DURATION_LABEL}).
           The ending is a specific moment, not a round number: land the last sentence so it finishes at ${DURATION_LABEL} and nowhere else. Never pad toward a round minute and never write past it.
@@ -539,11 +539,11 @@ jobs:
           GEMINI_EDIT_DONE=0
           for attempt in 1 2 3; do
             if python tools/prepare_narration.py narration_response.json dist/narration.txt "$DURATION_SECONDS"; then
-              echo "Narration passed the ${MAX_WORDS}-word hard cap on attempt ${attempt}."
+              python tools/say.py success "Narration passed the ${MAX_WORDS}-word hard cap on attempt ${attempt}."
               break
             fi
             if [ "$GEMINI_EDIT_DONE" -eq 0 ] && [ -n "${GEMINI_API_KEY:-}" ]; then
-              echo "Draft missed the length gate; asking the Gemini sub-agent to edit it to ${TARGET_WORDS} words."
+              python tools/say.py tool "Draft missed the length gate; asking the Gemini sub-agent to edit it to ${TARGET_WORDS} words."
               python - <<'PYE' || true
           import json
           import os
@@ -585,12 +585,12 @@ jobs:
           sys.exit(0 if low <= len(words) <= high else 1)
           PYV
               then
-                echo "The Gemini sub-agent edited the narration to the right length; using it."
+                python tools/say.py success "The Gemini sub-agent edited the narration to the right length; using it."
                 break
               fi
             fi
             if [ "$attempt" -eq 3 ]; then
-              echo "AI still missed the limit after three attempts; applying the automatic final short-story guard."
+              python tools/say.py plan "AI still missed the limit after three attempts; applying the automatic final short-story guard."
               python tools/prepare_narration.py narration_response.json dist/narration.txt "$DURATION_SECONDS" --truncate "$STORY_TOPIC"
               break
             fi
@@ -607,7 +607,7 @@ jobs:
               REPAIR_ACTION="SHORTEN the previous draft: it is too long. Remove secondary details while preserving the hook, choice, and ending. Do not expand it."
               REPAIR_MODE="over-limit shortening"
             fi
-            echo "Retrying narration after ${CURRENT_WORDS} words (${REPAIR_MODE}); using the selected model and its configured reasoning mode."
+            python tools/say.py notice "Retrying narration after ${CURRENT_WORDS} words (${REPAIR_MODE}); using the selected model and its configured reasoning mode."
             jq -n --arg model "$AI_MODEL" --argjson think "$OLLAMA_THINKING" --arg draft "$DRAFT" --arg action "$REPAIR_ACTION" --arg current "$CURRENT_WORDS" \
               --arg topic "$STORY_TOPIC" --arg duration "$DURATION_SECONDS" --arg cast "$CAST_NAMES" --arg research "$WEB_RESEARCH" \
               --arg min "$MIN_WORDS" --arg max "$MAX_WORDS" --arg target "$TARGET_WORDS" --argjson tokens "$REPAIR_TOKENS" \
@@ -632,27 +632,27 @@ jobs:
           NARRATION=$(cat dist/narration.txt)
           FIRST_CAST=$(jq -r '.[0] // "Lead"' dist/characters.json)
           SECOND_CAST=$(jq -r '.[1] // (.[0] // "Friend")' dist/characters.json)
-          echo "Cast for this plan: ${FIRST_CAST} (lead), ${SECOND_CAST} (supporting)."
+          python tools/say.py plan "Cast for this plan: ${FIRST_CAST} (lead), ${SECOND_CAST} (supporting)."
           case "${MAP_DETAIL:-dense}" in
             standard) TARGET_PROPS=1260 ;;
             dense) TARGET_PROPS=3000 ;;
             ultra) TARGET_PROPS=5000 ;;
             *) echo "Unknown map detail: $MAP_DETAIL" >&2; exit 1 ;;
           esac
-          echo "Target world detail: $MAP_DETAIL ($TARGET_PROPS furnished aligned Parts)."
+          python tools/say.py plan "Target world detail: $MAP_DETAIL ($TARGET_PROPS furnished aligned Parts)."
           # The download step sets MAP_TOKENS per preset (5000-9000). Keep that
           # value: the blueprint has to fit 16-28 modelled anchors, the camera
           # list and the face timeline in one JSON document.
           MAP_TOKENS=${MAP_TOKENS:-6000}
           export MAP_TOKENS
-          echo "Blueprint output budget: ${MAP_TOKENS} tokens (preset ${MODEL_QUALITY})."
+          python tools/say.py plan "Blueprint output budget: ${MAP_TOKENS} tokens (preset ${MODEL_QUALITY})."
           # A 3-minute story needs more shots than a 30-second one, and every
           # version keeps room for face close-ups.
           SHOT_COUNT=$(( DURATION_SECONDS / 8 + 4 ))
           SHOT_COUNT=$(( SHOT_COUNT < 6 ? 6 : (SHOT_COUNT > 12 ? 12 : SHOT_COUNT) ))
           SHOT_MAX=$(( SHOT_COUNT + 4 < 24 ? SHOT_COUNT + 4 : 24 ))
           WEB_RESEARCH=$(jq -c . dist/web_research.json 2>/dev/null || echo '[]')
-          echo "Camera storyboard: ${SHOT_COUNT}-${SHOT_MAX} shots, AI-timed face expression beats, at least 3 face close-ups."
+          python tools/say.py plan "Camera storyboard: ${SHOT_COUNT}-${SHOT_MAX} shots, AI-timed face expression beats, at least 3 face close-ups."
           cat > map_prompt.txt <<PROMPT
           You may request live web research as many times as you genuinely need by returning search_queries; the workflow runs every query and sends the facts back. Do not repeat a query you already asked. If you notice you are repeating yourself or re-planning the same thing, say so briefly and return the best complete plan you have.
           You have full creative authority over this video and may do anything at any time: invent characters, props, buildings, colours, materials, emotions, camera moves, cut timing and expression timing however you think makes the best YouTube-Shorts-style Roblox story short. If you need current real-world facts at any point, add "search_queries": ["…"] to your JSON and the workflow will run those web searches and ask you again with the results.
@@ -691,7 +691,7 @@ jobs:
             '{model:$model, messages:[{role:"user",content:$prompt}], format:$schema[0], think:$think, stream:false, keep_alive:"60m", options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:$tokens}}' > map_request.json
           MAP_READY=0
           for attempt in 1 2; do
-            echo "AI world blueprint attempt ${attempt}/2 using ${AI_MODEL}; requires 8 valid landmarks, then expands to at least ${TARGET_PROPS} furnished Parts."
+            python tools/say.py plan "AI world blueprint attempt ${attempt}/2 using ${AI_MODEL}; requires 8 valid landmarks, then expands to at least ${TARGET_PROPS} furnished Parts."
             curl_status=0
             python tools/ollama_stream.py --request map_request.json \
               --output map_response.json --label "world + camera + face plan ${attempt}" \
@@ -699,7 +699,7 @@ jobs:
               --stall-seconds "${AI_STALL:-900}" \
               --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}" || curl_status=$?
             if [ "$curl_status" -ne 0 ]; then
-              echo "Map request failed with curl exit ${curl_status}."
+              python tools/say.py warning "Map request failed with curl exit ${curl_status}."
               if [ "$attempt" -lt 2 ]; then sleep 5; continue; fi
               break
             fi
@@ -744,13 +744,13 @@ jobs:
               if [ -z "$QUERIES" ] && [ "$TASKS" = "[]" ]; then break; fi
               HELP_SIG="${QUERIES}|${TASKS}"
               if [ "$HELP_SIG" = "$PREVIOUS_HELP" ]; then
-                echo "The AI asked for the same help again (round ${helper_round}); the answers are already in the prompt, so it will finish the plan now."
+                python tools/say.py success "The AI asked for the same help again (round ${helper_round}); the answers are already in the prompt, so it will finish the plan now."
                 break
               fi
               PREVIOUS_HELP="$HELP_SIG"
               if [ -n "$QUERIES" ]; then
-                echo "The AI asked for more web research (round ${helper_round}/4):"
-                echo "$QUERIES"
+                python tools/say.py tool "The AI asked for more web research (round ${helper_round}/4):"
+                python tools/say.py plan "$QUERIES"
                 mapfile -t QUERY_LIST <<< "$QUERIES"
                 python tools/ai_web_search.py dist/web_research.json "${QUERY_LIST[@]}"
                 WEB_RESEARCH=$(jq -c . dist/web_research.json)
@@ -787,7 +787,7 @@ jobs:
               > map_validation.log 2>&1 || validation_status=$?
             if [ "$validation_status" -eq 0 ]; then
               cat map_validation.log
-              echo "AI landmark blueprint expanded into a furnished world on attempt ${attempt}."
+              python tools/say.py success "AI landmark blueprint expanded into a furnished world on attempt ${attempt}."
               MAP_READY=1
               echo "AI landmark blueprint + themed expansion" > dist/map_source.txt
               break
@@ -806,7 +806,7 @@ jobs:
           PYCOUNT
           )
             VALIDATION_ERROR=$(python -c 'from pathlib import Path; print(Path("map_validation.log").read_text().replace("\n", " ")[:500])')
-            echo "Blueprint rejected (${CURRENT_PROPS} anchors; ${VALIDATION_ERROR}); correcting and retrying."
+            python tools/say.py warning "Blueprint rejected (${CURRENT_PROPS} anchors; ${VALIDATION_ERROR}); correcting and retrying."
             cat >> map_prompt.txt <<RETRY
           CORRECTION: re-read the whole blueprint, then regenerate it and fix this validation error: ${VALIDATION_ERROR}. Return 16–28 unique, valid anchors including 3 building cores, 3 story landmarks, theme-specific scenic props, complete camera/cast data, a face_expressions timeline of at least 6 AI-timed beats, and at least 3 shots with "framing":"face". Do not enumerate hundreds of small parts; the build step expands anchors into ${TARGET_PROPS}+ furnished Parts. Preserve the user's exact theme and story. Return only JSON.
           RETRY
@@ -814,7 +814,7 @@ jobs:
               '{model:$model, messages:[{role:"user",content:$prompt}], format:$schema[0], think:$think, stream:false, keep_alive:"60m", options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:$tokens}}' > map_request.json
           done
           if [ "$MAP_READY" -eq 0 ]; then
-            echo "AI map planning did not complete; creating a detailed procedural world from the user's theme and story instead."
+            python tools/say.py warning "AI map planning did not complete; creating a detailed procedural world from the user's theme and story instead."
             FALLBACK_STORY="${STORY_TOPIC}. $(cat dist/narration.txt)"
             python tools/build_story_map.py map_response.json dist/Roblox_Story_Map.json "$DURATION_SECONDS" \
               --json-only --fallback --theme "$WORLD_THEME" --story "$FALLBACK_STORY" \
@@ -843,7 +843,7 @@ jobs:
           # alignment, brightness, camera clearance, overlaps and materials, and
           # reports exactly what it corrected.
           for round in 1 2 3; do
-            echo "World review round ${round}/3..."
+            python tools/say.py plan "World review round ${round}/3..."
             python tools/realign_story_map.py dist/Roblox_Story_Map.json \
               --passes 1 --target-parts "$TARGET_PROPS" \
               --duration "$DURATION_SECONDS" --report "dist/world_review_${round}.json"
@@ -895,7 +895,7 @@ jobs:
               VOICE="$CANDIDATE"
               break
             fi
-            echo "Narrator voice $CANDIDATE was unavailable; trying the next one."
+            python tools/say.py warning "Narrator voice $CANDIDATE was unavailable; trying the next one."
           done
           test -n "$VOICE" || { echo "No narrator voice could be synthesized." >&2; exit 1; }
           test -s dist/narration.srt
@@ -970,9 +970,9 @@ jobs:
           SELECTED_AI_MODEL: ${{ env.AI_MODEL }}
         run: |
           if ollama stop "$SELECTED_AI_MODEL"; then
-            echo "Unloaded $SELECTED_AI_MODEL from memory before Chromium/Rapier rendering; cached model files remain on disk for the final summary."
+            python tools/say.py plan "Unloaded $SELECTED_AI_MODEL from memory before Chromium/Rapier rendering; cached model files remain on disk for the final summary."
           else
-            echo "Ollama could not unload the model cleanly; continuing with the render."
+            python tools/say.py warning "Ollama could not unload the model cleanly; continuing with the render."
           fi
 
       - name: Render the complete vertical MP4 without Roblox Studio or Blender
@@ -1072,7 +1072,7 @@ jobs:
           mkdir -p dist/Generation_Prompts
           cp narration_prompt.txt map_prompt.txt creation_summary_prompt.txt dist/Generation_Prompts/
           PACKAGE_RATE="${NARRATOR_RATE:-+4%}"
-          echo "Report speech-rate metadata: $PACKAGE_RATE"
+          python tools/say.py plan "Report speech-rate metadata: $PACKAGE_RATE"
           python tools/package_studio_deliverables.py \
             --directory dist \
             --map dist/Roblox_Story_Map.json \
