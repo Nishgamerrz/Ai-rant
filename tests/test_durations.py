@@ -1,9 +1,9 @@
-"""Guard against the duration rule drifting between tools again.
+"""The short length is free-form: any moment the user picks, never a round minute.
 
-A 120 s run once died at the very end because `build_studio_experience.py` still
-offered only 30/45/60 while the workflow form, the narration gate, the MP4
-renderer and the validator all accepted up to 180 s. Every gate must now read the
-same list from `tools/durations.py`.
+Two things must keep working:
+  * an exact request ("2:24", "144", "1m47s") reaches every stage unchanged, and
+  * a window ("2-3m") is honoured as a ceiling the AI ends inside -- 2:59 is fine,
+    3:00 and 3:01 are not.
 """
 from __future__ import annotations
 
@@ -18,39 +18,81 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from durations import DURATION_CHOICES, DURATIONS, MAX_DURATION, MIN_DURATION, check_duration  # noqa: E402
-
-EXPECTED = (30, 45, 60, 90, 120, 150, 180)
-
-
-class DurationSourceOfTruthTests(unittest.TestCase):
-    def test_supported_set_covers_long_form(self):
-        self.assertEqual(DURATIONS, EXPECTED)
-        self.assertEqual(DURATION_CHOICES, DURATIONS)
-        self.assertEqual(MIN_DURATION, 30)
-        self.assertEqual(MAX_DURATION, 180)
-
-    def test_check_duration_accepts_every_selectable_length(self):
-        for value in DURATIONS:
-            self.assertEqual(check_duration(value), float(value))
-            self.assertEqual(check_duration(str(value)), float(value))
-
-    def test_check_duration_rejects_unsupported_lengths(self):
-        for value in (0, 15, 75, 200, "abc", None):
-            with self.assertRaises(ValueError):
-                check_duration(value)
-
-    def test_workflow_form_matches_shared_list(self):
-        workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
-        start = workflow.index("duration_seconds:")
-        block = workflow[start:workflow.index("- '180'", start)] + "- '180'"
-        self.assertEqual(
-            [int(value) for value in re.findall(r"^\s+- '(\d+)'$", block, re.MULTILINE)],
-            list(DURATIONS),
-        )
+from durations import (  # noqa: E402
+    MAX_DURATION,
+    MIN_DURATION,
+    check_duration,
+    choose_length,
+    format_duration,
+    parse_duration,
+    parse_spec,
+)
 
 
-class EveryToolAcceptsLongFormTests(unittest.TestCase):
+class ParsesWhatAPersonTypesTests(unittest.TestCase):
+    def test_exact_lengths(self):
+        cases = {
+            "144": 144, 144: 144, "2:24": 144, "02:24": 144, "1:47": 107,
+            "1m47s": 107, "2m24s": 144, "2 min 24 sec": 144, "90s": 90,
+            "2 min and 30 sec": 150, "0:45": 45, "150.4": 150,
+        }
+        for raw, expected in cases.items():
+            self.assertEqual(parse_duration(raw), expected, msg=repr(raw))
+            self.assertEqual(format_duration(expected), format_duration(parse_duration(raw)))
+
+    def test_format_is_clock_style(self):
+        self.assertEqual(format_duration(144), "2:24")
+        self.assertEqual(format_duration(59), "0:59")
+        self.assertEqual(format_duration(180), "3:00")
+        self.assertEqual(format_duration(65.4), "1:05")
+
+    def test_rejects_nonsense_and_out_of_range(self):
+        for bad in ("", "abc", None, True, "2:xx", 5, 900, "10:00"):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                parse_duration(bad)
+
+    def test_check_duration_returns_seconds(self):
+        self.assertEqual(check_duration("2:24"), 144.0)
+        self.assertEqual(check_duration(144), 144.0)
+        with self.assertRaises(ValueError):
+            check_duration("2-3m")  # windows are settled by choose_length
+
+
+class WindowTests(unittest.TestCase):
+    def test_windows_parse_to_bounds(self):
+        for spec in ("2-3m", "2 to 3 min", "2:00-3:00", "120-180",
+                     "between 2 and 3 min", "2m-3m", "2-3 minutes"):
+            self.assertEqual(parse_spec(spec), (120, 180), msg=spec)
+        self.assertEqual(parse_spec("2:24"), (144, 144))
+        self.assertEqual(parse_spec("1:40-2:10"), (100, 130))
+
+    def test_pick_never_lands_on_a_round_minute(self):
+        for seed in range(40):
+            seconds = choose_length("2-3m", seed=seed)
+            self.assertGreaterEqual(seconds, 120)
+            self.assertLess(seconds, 180, "a 2-3m window must never reach 3:00")
+            self.assertNotEqual(seconds % 60, 0)
+
+    def test_pick_varies_and_can_reach_2_59(self):
+        picks = {choose_length("2-3m", seed=seed) for seed in range(60)}
+        self.assertGreater(len(picks), 3, "the ending should not always be the same second")
+        self.assertTrue(all(120 <= value <= 179 for value in picks))
+
+    def test_pick_stays_inside_short_windows(self):
+        for seed in range(20):
+            self.assertTrue(100 <= choose_length("1:40-2:10", seed=seed) <= 130)
+
+    def test_exact_request_is_never_changed(self):
+        for seed in range(5):
+            self.assertEqual(choose_length("2:24", seed=seed), 144)
+
+    def test_window_outside_supported_range_is_rejected(self):
+        for spec in ("0-1m", "10-20m"):
+            with self.assertRaises(ValueError, msg=spec):
+                parse_spec(spec)
+
+
+class EveryToolAcceptsAnyLengthTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
@@ -69,71 +111,53 @@ class EveryToolAcceptsLongFormTests(unittest.TestCase):
             "character_placements": [{"username": "Lead", "position": [0, 0, 24]}],
             "camera_shots": [
                 {"time": 0, "position": [0, 30, 70], "target": [0, 3, 24], "transition": "smooth"},
-                {"time": 60, "position": [-12, 14, 18], "target": [0, 3, 24], "transition": "smooth"},
-                {"time": 120, "position": [12, 14, 18], "target": [0, 3, 24], "transition": "snap"},
+                {"time": 63.4, "position": [-12, 14, 18], "target": [0, 3, 24], "transition": "smooth"},
+                {"time": 144, "position": [12, 14, 18], "target": [0, 3, 24], "transition": "snap"},
             ],
         }
         self.map.write_text(json.dumps(plan), encoding="utf-8")
         self.cast.write_text(json.dumps(["Lead"]), encoding="utf-8")
         self.narration = self.tmp / "narration.txt"
-        self.narration.write_text("Maya found the lost wallet. " * 40, encoding="utf-8")
+        self.narration.write_text("Maya found the lost wallet. " * 60, encoding="utf-8")
 
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _help(self, *script):
-        return subprocess.run(
-            [sys.executable, *script, "--help"],
-            cwd=ROOT, capture_output=True, text=True, check=True,
-        ).stdout
-
-    def test_cli_help_lists_every_duration(self):
-        expected = "{" + ",".join(str(value) for value in DURATIONS) + "}"
-        for script, arg in (
-            ("tools/build_studio_experience.py", "--duration"),
-            ("tools/validate_short.py", "--duration"),
-        ):
-            help_text = self._help(script)
-            self.assertIn(arg, help_text, msg=script)
-            self.assertIn(expected.replace(",", ", "), help_text.replace(",", ", "), msg=script)
-
-    def test_studio_builder_accepts_long_form(self):
-        for duration in (60, 120, 180):
-            output = self.tmp / f"place_{duration}.rbxlx"
-            readme = self.tmp / f"README_{duration}.md"
+    def test_studio_builder_takes_the_exact_moment(self):
+        for written, seconds in (("60", 60), ("2:24", 144), ("1m47s", 107), ("180", 180)):
+            output = self.tmp / f"place_{seconds}.rbxlx"
+            readme = self.tmp / f"README_{seconds}.md"
             result = subprocess.run(
                 [sys.executable, "tools/build_studio_experience.py",
                  "--map", str(self.map), "--cast", str(self.cast),
-                 "--duration", str(duration), "--narration", str(self.narration),
+                 "--duration", written, "--narration", str(self.narration),
                  "--output", str(output), "--readme", str(readme)],
                 cwd=ROOT, capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr[-2000:])
-            place = output.read_text(encoding="utf-8")
-            self.assertIn(f'"duration":{duration}', place)
-            self.assertIn(str(duration), readme.read_text(encoding="utf-8"))
+            self.assertIn(f'"duration":{seconds}', output.read_text(encoding="utf-8"))
+            self.assertIn(format_duration(seconds), readme.read_text(encoding="utf-8"))
 
-    def test_studio_builder_still_rejects_unlisted_length(self):
+    def test_studio_builder_rejects_impossible_lengths(self):
         result = subprocess.run(
             [sys.executable, "tools/build_studio_experience.py",
              "--map", str(self.map), "--cast", str(self.cast),
-             "--duration", "77", "--output", str(self.tmp / "nope.rbxlx")],
+             "--duration", "9:00", "--output", str(self.tmp / "nope.rbxlx")],
             cwd=ROOT, capture_output=True, text=True,
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("invalid choice", result.stderr)
+        self.assertIn("duration", result.stderr.lower())
 
-    def test_sound_bed_gate_accepts_long_form(self):
+    def test_sound_bed_gate_takes_any_length(self):
         from create_sound_bed import resolve_duration
 
-        for duration in DURATIONS:
-            self.assertEqual(resolve_duration(duration), float(duration))
-            self.assertEqual(resolve_duration(str(duration)), float(duration))
-        for bad in ("20", "200", "abc"):
+        for written, seconds in (("144", 144), ("2:24", 144), ("1m47s", 107)):
+            self.assertEqual(resolve_duration(written), float(seconds))
+        for bad in ("5", "9:00", "abc"):
             with self.assertRaises(SystemExit):
                 resolve_duration(bad)
 
-    def test_roblox_animation_accepts_long_form(self):
+    def test_roblox_animation_stretches_to_the_exact_second(self):
         animation = {
             "name": "StoryGesture",
             "keyframes": [
@@ -143,48 +167,87 @@ class EveryToolAcceptsLongFormTests(unittest.TestCase):
         }
         source = self.tmp / "animation.json"
         source.write_text(json.dumps(animation), encoding="utf-8")
-        for duration in (60, 120, 180):
-            destination = self.tmp / f"anim_{duration}.json"
+        for written, seconds in (("2:24", 144), ("180", 180)):
+            destination = self.tmp / f"anim_{seconds}.json"
             result = subprocess.run(
                 [sys.executable, "tools/build_roblox_animation.py",
-                 str(source), str(destination), str(duration), "--json-only"],
+                 str(source), str(destination), written, "--json-only"],
                 cwd=ROOT, capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr[-2000:])
             data = json.loads(destination.read_text(encoding="utf-8"))
-            self.assertAlmostEqual(float(data["duration_seconds"]), float(duration), delta=0.01)
-            self.assertAlmostEqual(float(data["keyframes"][-1]["time"]), float(duration), delta=0.01)
+            self.assertAlmostEqual(float(data["duration_seconds"]), float(seconds), delta=0.01)
+            self.assertAlmostEqual(float(data["keyframes"][-1]["time"]), float(seconds), delta=0.01)
 
-    def test_story_map_stage_accepts_long_form(self):
-        for duration in (60, 120, 180):
-            destination = self.tmp / f"map_out_{duration}.json"
+    def test_story_map_stage_takes_the_exact_moment(self):
+        for written, seconds in (("2:24", 144), ("180", 180)):
+            destination = self.tmp / f"map_out_{seconds}.json"
             result = subprocess.run(
                 [sys.executable, "tools/build_story_map.py",
-                 str(self.map), str(destination), str(duration),
+                 str(self.map), str(destination), written,
                  "--json-only", "--fallback", "--theme", "daylight plaza"],
                 cwd=ROOT, capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr[-2000:])
 
-    def test_legacy_python_renderer_and_node_renderer_share_the_list(self):
-        legacy = (ROOT / "tools/render_short.py").read_text(encoding="utf-8")
-        self.assertIn("from durations import DURATIONS", legacy)
-        self.assertNotIn("choices=(30, 45, 60)", legacy)
-
-        node = (ROOT / "tools/video_renderer/render_short.mjs").read_text(encoding="utf-8")
-        match = re.search(r"if \(!\[([^\]]+)\]\.includes\(args\.duration\)\)", node)
-        self.assertIsNotNone(match)
-        self.assertEqual(
-            [int(value) for value in re.findall(r"\d+", match.group(1))],
-            list(DURATIONS),
+    def test_narration_word_targets_scale_with_any_length(self):
+        response = self.tmp / "narration_response.json"
+        # Unique sentences so the extractor keeps every word; enough text for 144 s.
+        sentences = [
+            f"Beat {index} shows Maya crossing the busy market square with her friend."
+            for index in range(18)
+        ]
+        words = " ".join(sentences)
+        self.assertTrue(216 <= len(words.split()) <= 240, len(words.split()))
+        response.write_text(
+            json.dumps({"message": {"content": json.dumps({"narration": words})}}),
+            encoding="utf-8",
         )
+        output = self.tmp / "narration_out.txt"
+        result = subprocess.run(
+            [sys.executable, "tools/prepare_narration.py", str(response), str(output), "2:24"],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr[-2000:])
+        self.assertTrue(output.read_text(encoding="utf-8").strip())
 
-    def test_no_tool_hardcodes_the_old_short_list(self):
-        for path in (ROOT / "tools").rglob("*.py"):
-            if path.name == "durations.py":
-                continue
-            text = path.read_text(encoding="utf-8")
-            self.assertNotIn("choices=(30, 45, 60)", text, msg=str(path))
+
+class SharedRulesTests(unittest.TestCase):
+    def test_node_renderer_uses_the_same_bounds(self):
+        node = (ROOT / "tools/video_renderer/render_short.mjs").read_text(encoding="utf-8")
+        self.assertIsNone(
+            re.search(r"\[\s*30,\s*45,\s*60", node),
+            "the renderer must not hardcode a preset list any more")
+        self.assertIn(f"const MIN_DURATION = {MIN_DURATION};", node)
+        self.assertIn(f"const MAX_DURATION = {MAX_DURATION};", node)
+
+    def test_every_tool_reads_the_shared_module(self):
+        for name in (
+            "build_studio_experience", "build_story_map", "validate_short",
+            "render_short", "create_sound_bed", "build_roblox_animation",
+            "prepare_narration", "package_studio_deliverables",
+        ):
+            text = (ROOT / "tools" / f"{name}.py").read_text(encoding="utf-8")
+            self.assertIn("from durations import", text, msg=name)
+            self.assertNotIn("choices=(30, 45, 60)", text, msg=name)
+
+    def test_workflow_accepts_typed_and_windowed_lengths(self):
+        workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
+        start = workflow.index("duration_seconds:")
+        block = workflow[start:workflow.index("map_detail:", start)]
+        self.assertIn("type: string", block)
+        self.assertNotIn("type: choice", block)
+        self.assertIn("Let the AI pick the exact ending", workflow)
+        self.assertIn("DURATION_LABEL=", workflow)
+        self.assertIn("DURATION_WINDOW=", workflow)
+        self.assertNotIn("DURATION_SECONDS: ${{ inputs.duration_seconds }}", workflow)
+        self.assertIn("choose_length(raw, seed=seed)", workflow)
+
+    def test_workflow_tells_the_ai_the_exact_ending(self):
+        workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
+        self.assertIn("runs exactly ${DURATION_SECONDS} seconds (${DURATION_LABEL})", workflow)
+        self.assertIn("The ending is a specific moment, not a round number", workflow)
+        self.assertIn("never a round minute", workflow)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from durations import DURATIONS  # noqa: E402
+from durations import duration_arg  # noqa: E402
 
 import bpy
 from mathutils import Vector
@@ -30,7 +30,7 @@ def args_from_blender():
     parser.add_argument("--map", required=True)
     parser.add_argument("--characters", help="JSON array of Roblox usernames for the cast", default="")
     parser.add_argument("--profiles", help="JSON array of public avatar model profiles", default="")
-    parser.add_argument("--duration", type=int, choices=DURATIONS, required=True)
+    parser.add_argument("--duration", type=duration_arg, required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--width", type=int, default=720)
     parser.add_argument("--height", type=int, default=1280)

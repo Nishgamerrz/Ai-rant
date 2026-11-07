@@ -26,8 +26,14 @@ function argumentsFromProcess(argv) {
     if (!args[key]) throw new Error(`Missing --${key.replaceAll('_', '-')}`);
   }
   args.duration = Number(args.duration);
-  if (![30, 45, 60, 90, 120, 150, 180].includes(args.duration)) {
-    throw new Error('Duration must be 30, 45, 60, 90, 120, 150, or 180 seconds.');
+  // Any length is allowed: the workflow lets the user pick an exact moment such
+  // as 2:24, or a window the AI ends inside. Keep these bounds in sync with
+  // tools/durations.py (MIN_DURATION / MAX_DURATION); tests/test_durations.py
+  // fails if they drift.
+  const MIN_DURATION = 15;
+  const MAX_DURATION = 300;
+  if (!Number.isFinite(args.duration) || args.duration < MIN_DURATION || args.duration > MAX_DURATION) {
+    throw new Error(`Duration must be between ${MIN_DURATION} and ${MAX_DURATION} seconds, got ${args.duration}.`);
   }
   args.face_animation = args.face_animation ?? 'auto';
   if (!['auto', 'off', 'always'].includes(args.face_animation)) {

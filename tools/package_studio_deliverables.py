@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import zipfile
 from pathlib import Path
 from xml.sax.saxutils import escape
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from durations import duration_arg  # noqa: E402
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT
@@ -95,7 +99,7 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--voice", required=True)
     parser.add_argument("--rate", default="-8%")
-    parser.add_argument("--duration", type=int, required=True)
+    parser.add_argument("--duration", type=duration_arg, required=True)
     args = parser.parse_args()
     output_dir = args.directory
     summary = args.summary.read_text(encoding="utf-8").strip()
