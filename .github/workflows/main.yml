@@ -14,10 +14,18 @@ on:
         default: ''
         type: string
       duration_seconds:
-        description: 'Length — exact (2:24, 144, 1m47s) or a window the AI ends inside (2-3m)'
+        description: 'Length — pick it; the AI picks the exact seconds inside that minute'
         required: true
-        default: '2:24'
-        type: string
+        default: '120'
+        type: choice
+        options:
+          - '30'
+          - '45'
+          - '60'
+          - '90'
+          - '120'
+          - '150'
+          - '180'
       map_detail:
         description: 'World size'
         required: true
@@ -79,7 +87,12 @@ jobs:
           import sys
 
           sys.path.insert(0, 'tools')
-          from durations import choose_length, describe, format_duration, parse_spec
+          from durations import (
+              choose_from_selection,
+              describe,
+              format_duration,
+              selection_window,
+          )
 
           raw = os.environ.get('REQUESTED_LENGTH', '')
           seed = '|'.join([
@@ -88,8 +101,8 @@ jobs:
               os.environ.get('STORY_TOPIC', ''),
           ])
           try:
-              low, high = parse_spec(raw)
-              seconds = choose_length(raw, seed=seed)
+              low, high = selection_window(raw)
+              seconds = choose_from_selection(raw, seed=seed)
           except ValueError as exc:
               raise SystemExit(f"Length {raw!r} is not usable: {exc}. {describe()}")
           label = format_duration(seconds)
@@ -97,11 +110,10 @@ jobs:
               handle.write(f"DURATION_SECONDS={seconds}\n")
               handle.write(f"DURATION_LABEL={label}\n")
               handle.write(f"DURATION_WINDOW={format_duration(low)}-{format_duration(high)}\n")
-          if low == high:
-              print(f"Exact length requested: {label} ({seconds} s).")
-          else:
-              print(f"You asked for {format_duration(low)}-{format_duration(high)}; "
-                    f"the AI ends this one at {label} ({seconds} s) - never a round minute, never past the ceiling.")
+          print(f"You picked the {format_duration(low)} length; the AI ends this one at "
+                f"{label} ({seconds} s), inside {format_duration(low)}-{format_duration(high)}.")
+          print("The seconds are always the AI's choice: no round endings, and the video never "
+                "runs into the next minute's range.")
           print(f"Every stage and every AI prompt now uses exactly {seconds} seconds.")
           PY
 

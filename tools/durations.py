@@ -104,6 +104,32 @@ def parse_spec(raw):
     return low, high
 
 
+def selection_window(selection):
+    """Turn the length the user picked into the window the AI ends inside.
+
+    The dropdown picks the minute; the AI picks the seconds. Choose 2:00 and the
+    ending lands somewhere in 2:00-2:59 -- never 3:00, so a 2-minute pick can
+    never creep into the 3-4 minute range. Choose 1:30 and it stays inside
+    1:30-1:59, choose 30 s and it stays inside 30-59 s.
+    """
+    low = parse_duration(selection)
+    minute_end = ((low // 60) + 1) * 60 - 1
+    high = min(minute_end, MAX_DURATION)
+    if high < low:
+        high = low
+    return low, high
+
+
+def pick_between(low, high, seed=None):
+    """Choose one exact second in [low, high], avoiding tidy numbers."""
+    if high <= low:
+        return low
+    candidates = [value for value in range(low, high + 1) if value % 30]
+    if not candidates:
+        candidates = list(range(low, high + 1))
+    return random.Random(seed).choice(candidates)
+
+
 def choose_length(raw, seed=None):
     """Pick the exact ending, the way the AI would: never a round minute.
 
@@ -118,11 +144,13 @@ def choose_length(raw, seed=None):
     # Never land exactly on the next whole minute: 2-3m tops out at 2:59.
     if high % 60 == 0:
         high -= 1
-    window_low = max(low, high - 59)
-    candidates = [value for value in range(window_low, high + 1) if value % 30]
-    if not candidates:
-        candidates = list(range(window_low, high + 1))
-    return random.Random(seed).choice(candidates)
+    return pick_between(max(low, high - 59), high, seed)
+
+
+def choose_from_selection(selection, seed=None):
+    """The dropdown value plus the AI's own seconds, e.g. 120 -> 2:41."""
+    low, high = selection_window(selection)
+    return pick_between(low, high, seed)
 
 
 def format_duration(seconds) -> str:
