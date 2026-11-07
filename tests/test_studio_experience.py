@@ -75,7 +75,7 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn('--min-props 8 --target-props "$TARGET_PROPS"', workflow)
         self.assertIn("every deliberate snap cut must move both the camera and focus", workflow)
         self.assertIn("only when the user's story/topic explicitly requests that effect", workflow)
-        self.assertIn("num_predict:12000", workflow)
+        self.assertIn("num_predict:$tokens}}' > map_request.json", workflow)
         self.assertIn('--timeout "${AI_TIMEOUT:-900}"', workflow)
         self.assertIn("dist/web_research.json", workflow)
         self.assertIn("--fallback --theme", workflow)
@@ -112,11 +112,11 @@ class StudioExperienceTests(unittest.TestCase):
         # Narration and repair budgets scale with the story length so a thinking
         # model cannot spend the whole ceiling reasoning and cut the answer off;
         # the map plan and the summary keep their own generous budgets.
-        self.assertIn("options:{temperature:2.0, top_p:0.99, num_predict:$tokens}}' > narration_request.json", workflow)
-        self.assertIn("options:{temperature:2.0, top_p:0.99, num_predict:$tokens}, messages:", workflow)
-        self.assertIn("options:{temperature:2.0, top_p:0.99, num_predict:12000}", workflow)
-        self.assertIn("options:{temperature:2.0, top_p:0.99, num_predict:1600}}' > creation_summary_request.json", workflow)
-        self.assertIn("NARRATION_TOKENS=$((1600 + DURATION_SECONDS * 10))", workflow)
+        self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:$tokens}}' > narration_request.json", workflow)
+        self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:$tokens}, messages:", workflow)
+        self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:$tokens}}' > map_request.json", workflow)
+        self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:900}}' > creation_summary_request.json", workflow)
+        self.assertIn("NARRATION_TOKENS=$((600 + DURATION_SECONDS * 5))", workflow)
         for legacy in ("temperature:0.9,", "temperature:1.5,", "temperature:0.45,", "temperature:0.75,", "temperature:0.6,"):
             self.assertNotIn(legacy, workflow)
 

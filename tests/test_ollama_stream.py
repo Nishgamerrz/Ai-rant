@@ -30,13 +30,13 @@ class TokenBudgetTests(unittest.TestCase):
 
     def test_workflow_scales_the_budget_with_the_story_length(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
-        self.assertIn("NARRATION_TOKENS=$((1600 + DURATION_SECONDS * 10))", workflow)
-        self.assertIn("REPAIR_TOKENS=$((2000 + DURATION_SECONDS * 10))", workflow)
+        self.assertIn("NARRATION_TOKENS=$((600 + DURATION_SECONDS * 5))", workflow)
+        self.assertIn("REPAIR_TOKENS=$((800 + DURATION_SECONDS * 5))", workflow)
         self.assertIn("num_predict:$tokens}}' > narration_request.json", workflow)
         self.assertIn("num_predict:$tokens}, messages:", workflow)
-        self.assertNotIn("num_predict:1600}}' > narration_request.json", workflow)
-        # A thinking model needs room for the answer after its reasoning.
-        self.assertNotIn("num_predict:800}}' > creation_summary_request.json", workflow)
+        # Every request keeps the model loaded, which removes minute-long reloads.
+        self.assertIn('keep_alive:"60m"', workflow)
+        self.assertIn("num_ctx:8192", workflow)
 
     def test_workflow_asks_for_brief_reasoning(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
@@ -105,7 +105,8 @@ class TruncatedResponseTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, msg=result.stderr[-2000:])
                 self.assertIn("CUT OFF at the token ceiling", result.stdout)
-                self.assertIn("asking again with num_predict=", result.stdout)
+                self.assertIn("num_predict=", result.stdout)
+                self.assertIn("reasoning off", result.stdout)
                 data = json.loads(output_path.read_text(encoding="utf-8"))
                 self.assertEqual(json.loads(data["response"]), {"narration": "COMPLETE STORY"})
                 self.assertEqual(data["done_reason"], "stop")
@@ -116,6 +117,10 @@ class TruncatedResponseTests(unittest.TestCase):
         self.assertEqual(len(budgets), 2)
         self.assertEqual(budgets[0], 1600)
         self.assertGreater(budgets[1], budgets[0])
+        # The retry drops thinking: re-reasoning the same prompt would double the
+        # wall time on a slow CPU preset, which is exactly what we are fixing.
+        self.assertTrue(handler.requests[0].get("think"))
+        self.assertFalse(handler.requests[1].get("think"))
 
 
 class _PieceByPiece(BaseHTTPRequestHandler):
@@ -178,6 +183,44 @@ class LiveStreamingTests(unittest.TestCase):
         self.assertNotIn("writing\u2026", stdout)
         self.assertNotIn("reasoning preview", stdout)
         self.assertNotIn("\u2026", stdout)
+
+
+class RuntimeSpeedTests(unittest.TestCase):
+    """A CPU-only runner must not spend hours re-generating the same content."""
+
+    def setUp(self):
+        self.workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+
+    def test_ollama_runs_with_the_fast_settings(self):
+        for setting in ("OLLAMA_FLASH_ATTENTION=1", "OLLAMA_KV_CACHE_TYPE=q8_0",
+                        "OLLAMA_KEEP_ALIVE=60m", "OLLAMA_MAX_LOADED_MODELS=1"):
+            self.assertIn(setting, self.workflow)
+        self.assertIn('keep_alive:"60m"', self.workflow)
+        self.assertIn("num_ctx:8192", self.workflow)
+
+    def test_budgets_are_compact(self):
+        self.assertIn("NARRATION_TOKENS=$((600 + DURATION_SECONDS * 5))", self.workflow)
+        self.assertIn("REPAIR_TOKENS=$((800 + DURATION_SECONDS * 5))", self.workflow)
+        self.assertIn("MAP_TOKENS=4000", self.workflow)
+        self.assertNotIn("num_predict:12000", self.workflow)
+        # 120 s narration: 600 + 600 = 1200 tokens instead of the 2800 that made
+        # the model reason for 20 minutes.
+        seconds, duration = 600, 120
+        self.assertEqual(seconds + duration * 5, 1200)
+
+    def test_no_retry_storm(self):
+        self.assertIn("for attempt in 1 2; do", self.workflow)
+        self.assertNotIn("for attempt in 1 2 3; do", self.workflow)
+        self.assertIn("for search_round in 1; do", self.workflow)
+        self.assertNotIn("for search_round in 1 2; do", self.workflow)
+
+    def test_planning_asks_for_brief_reasoning(self):
+        self.assertIn("THINK BRIEFLY: this runs on a CPU-only machine", self.workflow)
+        self.assertNotIn("re-read your own blueprint three times", self.workflow)
+
+    def test_console_reports_throughput(self):
+        helper = (ROOT / "tools" / "ollama_stream.py").read_text(encoding="utf-8")
+        self.assertIn("tok/s", helper)
 
 
 if __name__ == "__main__":
