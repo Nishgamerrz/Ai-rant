@@ -54,6 +54,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from console_style import paint  # noqa: E402
+
 from gemini_workspace import guide as file_guide  # noqa: E402
 from gemini_workspace import topics_for  # noqa: E402
 
@@ -259,8 +261,9 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
         # Show the reply itself in the console so the exchange is visible:
         # local AI asks -> Gemini answers -> the answer goes back to the local AI.
         preview = " ".join(text.split())
-        print(f"[gemini sub-agent] reply to {task['id']} ({task['kind']}, {len(text)} chars): "
-              f"{preview[:700]}{'...' if len(preview) > 700 else ''}", flush=True)
+        print(paint(f"[gemini sub-agent] reply to {task['id']} ({task['kind']}, "
+                    f"{len(text)} chars): {preview[:700]}{'...' if len(preview) > 700 else ''}",
+                    "answer"), flush=True)
         results.append(entry)
     return {"model": model, "skipped": skipped, "results": results}
 
@@ -296,7 +299,8 @@ def main() -> None:
     if args.stdout:
         for entry in result["results"]:
             if entry.get("ok"):
-                print(f"[gemini sub-agent] full answer for {entry['id']}:\n{entry['text']}", flush=True)
+                print(paint(f"[gemini sub-agent] full answer for {entry['id']}:\n{entry['text']}",
+                    "answer"), flush=True)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         lines = ["## Gemini sub-agent", ""]

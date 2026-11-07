@@ -55,9 +55,9 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("sudo rm -rf /usr/local/lib/android/sdk", workflow)
         self.assertIn("this preset needs at least ${REQUIRED_GIB} GiB", workflow)
         self.assertIn("rm -f ollama.tar.zst", workflow)
-        self.assertIn("ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'animation_best' && 'deepseek-r1-8b-v1' || inputs.model_quality == 'smart_11b' && 'qwen3-14b-v1' || inputs.model_quality == 'hard' && 'qwen3-8b-v3' || 'qwen3-v2' }}", workflow)
-        self.assertIn("fast) SELECTED_MODEL=qwen3:1.7b", workflow)
-        self.assertIn("medium) SELECTED_MODEL=qwen3:4b", workflow)
+        self.assertIn("ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'animation_best' && 'deepseek-r1-8b-v1' || inputs.model_quality == 'smart_11b' && 'qwen3-14b-v1' || inputs.model_quality == 'hard' && 'qwen3-8b-v3' || inputs.model_quality == 'medium' && 'qwen3-8b-v1' || 'qwen3-4b-v1' }}", workflow)
+        self.assertIn("fast) SELECTED_MODEL=qwen3:4b", workflow)
+        self.assertIn("medium) SELECTED_MODEL=qwen3:8b", workflow)
         self.assertIn("hard) SELECTED_MODEL=qwen3:8b", workflow)
         self.assertIn("smart_11b) SELECTED_MODEL=qwen3:14b", workflow)
         self.assertIn("animation_best) SELECTED_MODEL=deepseek-r1:8b; MODEL_THINKING=true", workflow)
@@ -97,6 +97,7 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("smart_11b) REQUIRED_GIB=20", gate)
         self.assertIn("fast|medium) REQUIRED_GIB=8", gate)
         self.assertIn("smart_11b qwen3:14b (14.8B)", workflow)
+        self.assertIn("fast qwen3:4b, medium qwen3:8b, hard qwen3:8b", workflow)
         # Keeping the existing promises intact.
         marker = workflow.index("case \"$MODEL_QUALITY\" in", workflow.index("ollama serve"))
         case_block = workflow[marker:]

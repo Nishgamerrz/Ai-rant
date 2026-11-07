@@ -9,9 +9,11 @@ again with a bigger budget instead of handing a broken answer downstream.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -205,7 +207,12 @@ class RuntimeSpeedTests(unittest.TestCase):
     def test_budgets_are_compact(self):
         self.assertIn("NARRATION_TOKENS=$((1200 + DURATION_SECONDS * 8))", self.workflow)
         self.assertIn("REPAIR_TOKENS=$((1400 + DURATION_SECONDS * 8))", self.workflow)
-        self.assertIn("MAP_TOKENS=4000", self.workflow)
+        # The blueprint budget is set per preset (5000-9000) in the model step and
+        # reused by the plan step, so a modelled blueprint cannot be cut off.
+        self.assertIn("fast) MAP_TOKENS=5000", self.workflow)
+        self.assertIn("hard) MAP_TOKENS=8000", self.workflow)
+        self.assertIn("smart_11b) MAP_TOKENS=9000", self.workflow)
+        self.assertIn('MAP_TOKENS=${MAP_TOKENS:-6000}', self.workflow)
         self.assertNotIn("num_predict:12000", self.workflow)
         # 120 s narration: 1200 + 960 = 2160 tokens: enough for a thinking model to
         # plan briefly AND write the story, so it never stalls on the ceiling.
@@ -279,3 +286,171 @@ class RepetitionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _Recorder:
+    """A fake console that remembers every single write call."""
+
+    def __init__(self):
+        self.writes = []
+        self.flushes = 0
+
+    def write(self, text):
+        self.writes.append(text)
+
+    def flush(self):
+        self.flushes += 1
+
+
+class TypedConsoleTests(unittest.TestCase):
+    """The console must fill in letter by letter, never in bursts of words."""
+
+    def test_each_character_is_its_own_write_and_flush(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from ollama_stream import TypedConsole
+
+        recorder = _Recorder()
+        console = TypedConsole(delay=0, budget=0, out=recorder)
+        console.write("Maya counted the coins.")
+        self.assertEqual("".join(recorder.writes), "Maya counted the coins.")
+        self.assertEqual(len(recorder.writes), len("Maya counted the coins."))
+        self.assertTrue(all(len(chunk) <= 1 for chunk in recorder.writes))
+        # One flush per character: that is what pushes it to the log immediately.
+        self.assertGreaterEqual(recorder.flushes, len("Maya counted the coins."))
+
+    def test_a_big_chunk_arrives_one_letter_at_a_time(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from ollama_stream import TypedConsole
+
+        chunk = "x" * 900  # Ollama can hand over several sentences at once
+        recorder = _Recorder()
+        TypedConsole(delay=0, budget=0, out=recorder).write(chunk)
+        self.assertEqual(len(recorder.writes), 900)
+
+    def test_the_typing_pace_never_costs_more_than_its_budget(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from ollama_stream import TypedConsole
+
+        recorder = _Recorder()
+        console = TypedConsole(delay=0.02, budget=0.05, out=recorder)
+        started = time.time()
+        console.write("a" * 200)
+        elapsed = time.time() - started
+        self.assertEqual(len(recorder.writes), 200)      # everything still typed out
+        self.assertLess(elapsed, 0.5)                    # but the pace stopped early
+        self.assertGreaterEqual(console.spent, 0.04)
+
+    def test_a_heartbeat_says_the_model_is_still_working(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from ollama_stream import Heartbeat, TypedConsole
+
+        recorder = _Recorder()
+        beat = Heartbeat("world plan", interval=2.0, console=TypedConsole(0, 0, out=recorder))
+        beat.start()
+        time.sleep(2.4)
+        beat.stop()
+        beat.join(timeout=2)
+        text = "".join(recorder.writes)
+        self.assertIn("[world plan] the model is still working: waiting for the first token",
+                      text)
+        self.assertNotIn("\u2026", text)
+        # The heartbeat only writes whole lines: it never reprints streamed text.
+        self.assertTrue(all(chunk.count("\n") == 1 for chunk in recorder.writes if chunk.strip()))
+
+
+class TypingCommandLineTests(unittest.TestCase):
+    def setUp(self):
+        self.workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+
+    def test_the_helper_exposes_the_typing_knobs(self):
+        helper = (ROOT / "tools" / "ollama_stream.py").read_text(encoding="utf-8")
+        for flag in ("--type-delay", "--type-budget", "--heartbeat-seconds"):
+            self.assertIn(flag, helper)
+        self.assertIn("AI_TYPE_DELAY", helper)
+        self.assertIn("AI_TYPE_BUDGET", helper)
+
+    def test_the_job_unbuffers_python_and_sets_the_pace(self):
+        self.assertIn("PYTHONUNBUFFERED: '1'", self.workflow)
+        self.assertIn("AI_TYPE_DELAY: '0.002'", self.workflow)
+        self.assertIn("AI_TYPE_BUDGET: '120'", self.workflow)
+        self.assertIn("AI_HEARTBEAT: '15'", self.workflow)
+
+    def test_it_announces_itself_before_waiting(self):
+        helper = (ROOT / "tools" / "ollama_stream.py").read_text(encoding="utf-8")
+        self.assertIn("streaming live", helper)
+        self.assertIn("letter by letter", helper)
+
+class ColourTests(unittest.TestCase):
+    """Every kind of AI line gets its own colour, and typing never snaps."""
+
+    def test_colour_is_on_for_actions_even_though_it_is_not_a_tty(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from console_style import CODES, ansi, paint
+
+        os.environ["AI_COLOR"] = "1"
+        self.addCleanup(os.environ.pop, "AI_COLOR", None)
+        self.assertTrue(ansi("thinking"))
+        self.assertIn(CODES["thinking"], paint("thinking...", "thinking"))
+        self.assertNotEqual(ansi("thinking"), ansi("answer"))
+        self.assertNotEqual(ansi("answer"), ansi("error"))
+        self.assertNotEqual(ansi("success"), ansi("warning"))
+        for kind in ("thinking", "answer", "label", "notice", "success",
+                     "warning", "error", "tool", "plan", "thought"):
+            self.assertTrue(ansi(kind), f"{kind} has no colour")
+
+    def test_no_colour_when_switched_off_or_piped(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from console_style import paint, strip
+
+        os.environ["AI_COLOR"] = "0"
+        self.addCleanup(os.environ.pop, "AI_COLOR", None)
+        self.assertEqual(paint("plain", "answer"), "plain")
+        os.environ.pop("AI_COLOR")
+        os.environ["NO_COLOR"] = "1"
+        self.addCleanup(os.environ.pop, "NO_COLOR", None)
+        self.assertEqual(paint("plain", "answer"), "plain")
+        self.assertEqual(strip("\x1b[38;5;51mcyan\x1b[0m"), "cyan")
+
+    def test_thinking_and_answer_are_painted_in_different_colours(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from console_style import RESET, ansi, paint
+        from ollama_stream import TypedConsole
+
+        os.environ["AI_COLOR"] = "1"
+        self.addCleanup(os.environ.pop, "AI_COLOR", None)
+        recorder = _Recorder()
+        console = TypedConsole(delay=0, budget=0, out=recorder)
+        console.line(paint("[x] thinking \u25b8", "label", bold=True))
+        console.use("thinking")
+        console.write("grey words")
+        console.newline()
+        console.line(paint("[x] answer \u25b8", "label", bold=True))
+        console.use("answer")
+        console.write("bright words")
+        console.newline()
+        text = "".join(recorder.writes)
+        self.assertIn(ansi("thinking") + "grey", text)
+        self.assertIn(ansi("answer") + "bright", text)
+        self.assertIn(RESET, text)
+
+    def test_the_log_still_streams_character_by_character_with_colour_on(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from ollama_stream import TypedConsole
+
+        os.environ["AI_COLOR"] = "1"
+        self.addCleanup(os.environ.pop, "AI_COLOR", None)
+        recorder = _Recorder()
+        console = TypedConsole(delay=0, budget=0, out=recorder)
+        console.use("answer")
+        console.write("abcde")
+        letters = [chunk for chunk in recorder.writes if chunk and chunk not in ("\x1b[0m",)]
+        self.assertEqual("".join(letters).strip("\x1b[38;5;51m"), "abcde")
+
+    def test_the_job_turns_colour_on(self):
+        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+        self.assertIn("AI_COLOR: '1'", workflow)
+
+    def test_gemini_replies_are_coloured_too(self):
+        helper = (ROOT / "tools" / "gemini_subagent.py").read_text(encoding="utf-8")
+        self.assertIn("from console_style import paint", helper)
+        self.assertIn('paint(f"[gemini sub-agent] reply', helper)
