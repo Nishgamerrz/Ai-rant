@@ -77,10 +77,28 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Fix the spelling in the typed prompt
+        id: refine
+        continue-on-error: true
+        env:
+          # The raw form input: this step is what produces the cleaned outputs.
+          RAW_STORY_TOPIC: ${{ inputs.story_topic }}
+          RAW_WORLD_THEME: ${{ inputs.world_theme }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+        run: |
+          echo "Cleaning the typed story prompt and theme with the Gemini sub-agent (spelling, grammar, a little more detail). It never says anything about the fix."
+          python tools/gemini_topic.py \
+            --output dist/refined_prompts.json \
+            --github-output "$GITHUB_OUTPUT" || true
+          if [ ! -s dist/refined_prompts.json ]; then
+            echo "No cleaned prompt was produced; the run uses the text exactly as typed."
+          fi
+
       - name: Let the AI pick the exact ending
         env:
           REQUESTED_LENGTH: ${{ inputs.duration_seconds }}
-          STORY_TOPIC: ${{ inputs.story_topic }}
+          STORY_TOPIC: ${{ steps.refine.outputs.story_topic || inputs.story_topic }}
         run: |
           python - <<'PY'
           import os
@@ -131,8 +149,8 @@ jobs:
 
       - name: Show the public AI build plan and tools
         env:
-          STORY_TOPIC: ${{ inputs.story_topic }}
-          WORLD_THEME: ${{ inputs.world_theme }}
+          STORY_TOPIC: ${{ steps.refine.outputs.story_topic || inputs.story_topic }}
+          WORLD_THEME: ${{ steps.refine.outputs.world_theme || inputs.world_theme }}
           MODEL_QUALITY: ${{ inputs.model_quality }}
           CAST_NAMES: ${{ env.CAST_NAMES }}
           VOICE_STYLE: ${{ inputs.voice_style }}
@@ -157,6 +175,7 @@ jobs:
                   f'- **Length / preset / voice:** {clean(os.environ.get("DURATION_LABEL", "?"))} ({clean(os.environ["DURATION_SECONDS"])} s, window {clean(os.environ.get("DURATION_WINDOW", ""))}) / {clean(os.environ["MODEL_QUALITY"])} / {clean(os.environ["VOICE_STYLE"])}\n'
                   f'- **Avatar cast:** {clean(os.environ.get("CAST_NAMES", ""))}\n'
                   '- **Tools:** selected Ollama model, Roblox public avatar APIs, optional web research, edge-tts, Three.js + Rapier, Chromium, FFmpeg, Python validation, ReportLab, ZIP.\n'
+                  '- **Prompt cleanup:** the typed story prompt and theme are spell-checked and lightly enriched by the Gemini sub-agent before planning; the correction is never mentioned in the text.\n'
                   '- **Pipeline:** story and furnished world/camera plan → narration audio → overlay-free MP4 + Studio project → quality checks and package.\n'
                   '- **Username lookup:** the public Roblox Users API resolves entered usernames to IDs keylessly; no manual ID is needed.\n'
                   '- **Local model:** username-matched OBJ, glTF/GLB, FBX, COLLADA, PLY, STL, and 3DS files are auto-rigged for the MP4; direct local geometry takes priority over RBXM asset references.\n'
@@ -372,8 +391,8 @@ jobs:
 
       - name: Web search the AI can reuse in every planning stage
         env:
-          STORY_TOPIC: ${{ inputs.story_topic }}
-          WORLD_THEME: ${{ inputs.world_theme }}
+          STORY_TOPIC: ${{ steps.refine.outputs.story_topic || inputs.story_topic }}
+          WORLD_THEME: ${{ steps.refine.outputs.world_theme || inputs.world_theme }}
         run: |
           # The AI may ask for more searches at any point; this first sweep just
           # gives every planning stage usable starting context.
@@ -391,7 +410,7 @@ jobs:
 
       - name: Write a believable real-life story
         env:
-          STORY_TOPIC: ${{ inputs.story_topic }}
+          STORY_TOPIC: ${{ steps.refine.outputs.story_topic || inputs.story_topic }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
         run: |
@@ -565,9 +584,9 @@ jobs:
 
       - name: Design the complete prompt-themed 3D Roblox world and camera plan
         env:
-          STORY_TOPIC: ${{ inputs.story_topic }}
+          STORY_TOPIC: ${{ steps.refine.outputs.story_topic || inputs.story_topic }}
           MAP_DETAIL: ${{ inputs.map_detail }}
-          WORLD_THEME: ${{ inputs.world_theme }}
+          WORLD_THEME: ${{ steps.refine.outputs.world_theme || inputs.world_theme }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
         run: |
@@ -768,7 +787,7 @@ jobs:
 
       - name: Re-view the AI world and re-align every Part
         env:
-          STORY_TOPIC: ${{ inputs.story_topic }}
+          STORY_TOPIC: ${{ steps.refine.outputs.story_topic || inputs.story_topic }}
           MAP_DETAIL: ${{ inputs.map_detail }}
         run: |
           case "${MAP_DETAIL:-dense}" in
