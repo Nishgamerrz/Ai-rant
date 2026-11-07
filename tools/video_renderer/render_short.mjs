@@ -27,13 +27,17 @@ function argumentsFromProcess(argv) {
   for (const key of required) {
     if (!args[key]) throw new Error(`Missing --${key.replaceAll('_', '-')}`);
   }
-  args.duration = Number(args.duration || 2);
   // Any length is allowed: the workflow lets the user pick an exact moment such
   // as 2:24, or a window the AI ends inside. Keep these bounds in sync with
   // tools/durations.py (MIN_DURATION / MAX_DURATION); tests/test_durations.py
   // fails if they drift.
   const MIN_DURATION = 15;
   const MAX_DURATION = 300;
+  // A preflight only draws a single frame, so it has no length of its own: it
+  // uses the shortest legal one instead of tripping the bounds check below.
+  const stated = args.duration !== undefined && args.duration !== '';
+  args.duration = Number(stated ? args.duration : MIN_DURATION);
+  if (!args.preflight && !stated) throw new Error('Missing --duration');
   if (!Number.isFinite(args.duration) || args.duration < MIN_DURATION || args.duration > MAX_DURATION) {
     throw new Error(`Duration must be between ${MIN_DURATION} and ${MAX_DURATION} seconds, got ${args.duration}.`);
   }
@@ -648,7 +652,7 @@ async function launchBrowser() {
 }
 
 async function preflight(plan) {
-  const data = { plan, profiles: [], duration: 2, captions: '', faceAnimation: 'off' };
+  const data = { plan, profiles: [], duration: 15, captions: '', faceAnimation: 'off' };
   let stage = 'build the page';
   let html;
   try {
