@@ -4,48 +4,96 @@
  *
  * render_short.mjs is one giant template literal that is served to Chromium and
  * screenshotted frame by frame. Any backtick written *inside* that literal (a
- * comment like "handing over only `.bones`", say) silently ends the literal and
- * turns the following code into JavaScript expressions, so the file still passes
- * `node --check` and then dies at run time with nonsense like
+ * comment like "only `.bones`", say) silently ends the literal and turns the
+ * following code into expressions, so the file still passes `node --check` and
+ * then dies at run time with nonsense like
  *
- *     TypeError: WIDTHHEIGHTWIDTHHEIGHTencoded...bones is not a function
+ *     TypeError: WIDTHHEIGHT...encoded...bones is not a function
  *
- * twenty minutes into a render. This check builds the page for real and asserts
- * it is HTML, not accidental code.
+ * after the story, the plan and the model download are already done.
+ *
+ * This check pulls the real buildHtml() out of the source, runs it with dummy
+ * data, and asserts the result is a whole page. It exercises the actual code
+ * path, so a stray backtick anywhere in the function shows up here instead of on
+ * a runner twenty minutes later.
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const source = readFileSync(resolve(fileURLToPath(new URL('.', import.meta.url)), 'render_short.mjs'), 'utf8');
-const marker = 'return `<!doctype html>';
-const start = source.indexOf(marker);
-if (start < 0) throw new Error('buildHtml() no longer returns an HTML template');
-const literal = source.slice(start + 'return '.length, source.indexOf('`;', start) + 1);
+const here = resolve(fileURLToPath(new URL('.', import.meta.url)));
+const source = readFileSync(resolve(here, 'render_short.mjs'), 'utf8');
 
-let html;
-try {
-  // eslint-disable-next-line no-new-func
-  html = new Function('WIDTH', 'HEIGHT', 'encoded', `return ${literal}`)(720, 1280, '{"plan":{}}');
-} catch (error) {
-  throw new Error(`buildHtml() threw while building the page: ${error.message}`);
+/* --- pull the function out by matching braces ------------------------- */
+const start = source.indexOf('function buildHtml(');
+if (start < 0) throw new Error('buildHtml() is missing from render_short.mjs');
+let index = source.indexOf('{', start);
+let depth = 0;
+let end = -1;
+let inLiteral = false;
+let inQuote = '';
+for (let i = index; i < source.length; i += 1) {
+  const char = source[i];
+  const previous = source[i - 1];
+  if (previous === '\\') continue;
+  if (inQuote) {
+    if (char === inQuote) inQuote = '';
+    continue;
+  }
+  if (inLiteral) {
+    if (char === '`') inLiteral = false;
+    continue;
+  }
+  if (char === '`') { inLiteral = true; continue; }
+  if (char === '"' || char === "'") { inQuote = char; continue; }
+  if (char === '{') depth += 1;
+  if (char === '}') {
+    depth -= 1;
+    if (depth === 0) { end = i + 1; break; }
+  }
+}
+if (end < 0) throw new Error('could not find the end of buildHtml(); the file is broken');
+
+const body = source.slice(start, end);
+
+/* --- count the backticks the literal is allowed to have --------------- */
+const returnAt = body.indexOf('return `');
+if (returnAt < 0) throw new Error('buildHtml() no longer returns an HTML template');
+const literal = body.slice(returnAt + 'return '.length);
+const closing = literal.lastIndexOf('`;');
+if (closing < 0) throw new Error('the HTML template is never closed');
+const html = literal.slice(0, closing + 1).slice(1, -1); // strip the delimiters
+const inner = literal.slice(1, closing);
+if (inner.includes('`')) {
+  const where = inner.slice(0, inner.indexOf('`')).split('\n').length;
+  throw new Error(`a backtick inside the page template ends it early (about line ${where} `
+    + 'of the template): use quotes in comments, never `');
 }
 
+/* --- run the real function ------------------------------------------- */
+// buildHtml() calls safeData(); give the extracted function the real one.
+const safeData = (value) => JSON.stringify(value)
+  .replaceAll('<', '\\u003c').replaceAll('>', '\\u003e').replaceAll('&', '\\u0026');
+const factory = new Function('safeData', 'WIDTH', 'HEIGHT', `${body}\nreturn buildHtml;`);
+const page = factory(safeData, 720, 1280)({ plan: { props: [], camera_shots: [] }, profiles: [], duration: 5,
+  captions: '', faceAnimation: 'auto' });
+
 const checks = [
-  ['starts with a doctype', html.startsWith('<!doctype html>')],
-  ['ends with the closing html tag', html.trimEnd().endsWith('</script></body></html>')],
-  ['has exactly one <head>', (html.match(/<head>/g) || []).length === 1],
-  ['carries the frame size', html.includes('width:720px') && html.includes('height:1280px')],
-  ['carries the caption layer', html.includes('<div id="caption"></div>')],
-  ['leaves no unexpanded interpolation', !html.includes('${')],
-  ['leaves no stray template delimiter', !html.includes('`')],
+  ['starts with a doctype', page.startsWith('<!doctype html>')],
+  ['ends with the closing html tag', page.trimEnd().endsWith('</script></body></html>')],
+  ['has exactly one <head>', (page.match(/<head>/g) || []).length === 1],
+  ['is a whole page, not a fragment', page.length > 20000],
+  ['carries the frame size', page.includes('width:720px') && page.includes('height:1280px')],
+  ['carries the caption layer', page.includes('<div id="caption"></div>')],
+  ['leaves no unexpanded interpolation', !page.includes('${')],
+  ['leaves no stray template delimiter', !page.includes('`')],
 ];
 
 const failed = checks.filter(([, ok]) => !ok).map(([name]) => name);
 if (failed.length) {
   console.error(`buildHtml() produced a broken page: ${failed.join(', ')}`);
-  console.error(html.slice(0, 300));
+  console.error(page.slice(0, 300));
   process.exit(1);
 }
-console.log(`Page template check passed: ${html.length.toLocaleString()} characters of HTML, `
-  + `${checks.length} assertions, no stray backticks or unexpanded values.`);
+console.log(`Page template check passed: ${page.length.toLocaleString()} characters of HTML, `
+  + `${checks.length} assertions, the real buildHtml() executed with dummy data.`);

@@ -548,6 +548,28 @@ function buildHtml(data) {
   </script></body></html>`;
 }
 
+// The page is one enormous template literal. A stray backtick inside it ends the
+// literal early and turns the rest of the page into an expression, which used to
+// surface as "WIDTHHEIGHT...bones is not a function" *after* the world, the story
+// and the model download were already finished. Fail here instead, in the first
+// second of the render, with a message that says what to look for.
+function checkedHtml(data) {
+  let html;
+  try {
+    html = buildHtml(data);
+  } catch (error) {
+    throw new Error('buildHtml() could not build the page (' + error.message + '). '
+      + 'A backtick inside the HTML template (usually in a comment) ends it early; '
+      + 'run npm run test:page-template to find it.');
+  }
+  if (!html.startsWith('<!doctype html>')) {
+    throw new Error('buildHtml() did not return a page (it starts with '
+      + JSON.stringify(html.slice(0, 40)) + '); a backtick probably ended the '
+      + 'HTML template early. Run npm run test:page-template.');
+  }
+  return html;
+}
+
 function serveFile(response, path) {
   if (!existsSync(path) || !statSync(path).isFile()) { response.writeHead(404); response.end('Not found'); return; }
   response.writeHead(200, { 'Content-Type': contentType(path), 'Access-Control-Allow-Origin': '*' });
@@ -602,7 +624,7 @@ async function main() {
     ? readFileSync(args.captions, 'utf8') : '';
   const data={plan,profiles:orderedProfiles,duration:args.duration,
     captions:captionCues,faceAnimation:args.face_animation};
-  const server=createStaticServer(buildHtml(data),resolve(ASSET_ROOT,'dist/avatar-assets'));
+  const server=createStaticServer(checkedHtml(data),resolve(ASSET_ROOT,'dist/avatar-assets'));
   await new Promise((ok,fail)=>{server.once('error',fail);server.listen(0,'127.0.0.1',ok);});
   const address=server.address();
   const browser=await chromium.launch({headless:true,args:['--no-sandbox','--disable-dev-shm-usage','--enable-webgl','--ignore-gpu-blocklist','--use-gl=angle','--use-angle=swiftshader']});
