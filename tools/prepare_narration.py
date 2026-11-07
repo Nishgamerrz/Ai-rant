@@ -11,6 +11,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from durations import parse_duration  # noqa: E402
 
+# Run #85 rendered its whole video and was then refused with
+#   SHORT NOT APPROVED: narration reads out selected usernames: noob
+# The story prompt already forbids usernames, but a local model under pressure
+# still drops one into the prose. Speaking a Roblox username is the one thing the
+# narration must never do, so the text is scrubbed here - before the text-to-speech
+# call, which also produces the captions - rather than blamed after the render.
+INVENTED_NAMES = (
+    "Maya", "Leo", "Ari", "Nina", "Sam", "Ruby", "Theo", "Ivy",
+    "Milo", "Zara", "Owen", "Lena", "Jonah", "Priya", "Ellis", "June",
+)
+
 TEXT_KEYS = ("narration", "voiceover", "voiceover_script", "spoken_script", "script", "story", "narrative", "short_story", "text", "content")
 
 
@@ -97,6 +108,60 @@ def extract_narration(payload):
     return raw
 
 
+def cast_usernames() -> list[str]:
+    """The selected Roblox usernames, from the environment or the cast file."""
+    names = [name.strip() for name in os.environ.get("CAST_NAMES", "").split(",") if name.strip()]
+    if not names:
+        try:
+            payload = json.loads(Path("dist/characters.json").read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                payload = payload.get("characters") or list(payload)
+            names = [str(item.get("username") if isinstance(item, dict) else item)
+                     for item in payload]
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            names = []
+    return [name for name in names if name]
+
+
+def invented_names(usernames, seed_text: str = "") -> dict[str, str]:
+    """One stable, human first name per username.
+
+    Stable for a given cast, so a re-run of the same topic keeps the same people,
+    and never repeats a first name inside one video.
+    """
+    used: set[str] = set()
+    mapping: dict[str, str] = {}
+    offset = sum(ord(character) for character in seed_text) % len(INVENTED_NAMES)
+    for position, username in enumerate(usernames):
+        for step in range(len(INVENTED_NAMES)):
+            candidate = INVENTED_NAMES[(offset + position * 5 + step) % len(INVENTED_NAMES)]
+            if candidate.casefold() not in used:
+                break
+        used.add(candidate.casefold())
+        mapping[username] = candidate
+    return mapping
+
+
+def scrub_usernames(text: str, usernames=None, mapping=None) -> tuple[str, list[str]]:
+    """Swap every spoken username for an invented first name.
+
+    Matches the username as a standalone word (underscores and digits count as
+    word characters, so `noob` inside `noob_master` is left alone) and keeps the
+    sentence readable: "noob walked in" becomes "Ruby walked in".
+    """
+    usernames = list(usernames if usernames is not None else cast_usernames())
+    mapping = mapping or invented_names(usernames, text[:400])
+    replaced: list[str] = []
+    for username in sorted(usernames, key=len, reverse=True):
+        if not username:
+            continue
+        pattern = re.compile(r"(?<![\w])" + re.escape(username) + r"(?![\w])", re.IGNORECASE)
+        text, count = pattern.subn(mapping.get(username, "Sam"), text)
+        if count:
+            replaced.append(username)
+    return text, replaced
+
+
 def trim_to_word_limit(text, limit):
     """Trim at a sentence boundary when possible, preserving readable punctuation."""
     sentences = re.split(r"(?<=[.!?…])\s+", text.strip())
@@ -121,10 +186,26 @@ def trim_to_word_limit(text, limit):
     return clipped
 
 
+def scrub_file(path: Path) -> int:
+    """Rewrite a narration file in place with every spoken username replaced."""
+    text = path.read_text(encoding="utf-8")
+    cleaned, replaced = scrub_usernames(text)
+    if not replaced:
+        print(f"No Roblox username is spoken in {path}; nothing to change.")
+        return 0
+    path.write_text(cleaned, encoding="utf-8")
+    print(f"Replaced spoken username(s) {', '.join(replaced)} in {path} with invented first "
+          f"names, so the narrator never reads an account name aloud.")
+    return 0
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--scrub":
+        raise SystemExit(scrub_file(Path(sys.argv[2])))
     if len(sys.argv) not in (4, 6):
         raise SystemExit(
             "usage: prepare_narration.py RESPONSE.json OUTPUT.txt DURATION_SECONDS "
+            "[--truncate TOPIC] | prepare_narration.py --scrub narration.txt "
             "[--truncate TOPIC]"
         )
     response_path, output_path = map(Path, sys.argv[1:3])
@@ -146,6 +227,11 @@ def main():
         text = re.sub(r"\s+", " ", extract_narration(payload)).strip()
     except (OSError, json.JSONDecodeError):
         payload, text = {}, ""
+    text, replaced_usernames = scrub_usernames(text)
+    if replaced_usernames:
+        print("Replaced spoken Roblox username(s) " + ", ".join(replaced_usernames)
+              + " with invented first names before the voiceover.",
+              file=sys.stderr)
     words = re.findall(r"\b[\w’'-]+\b", text)
     forbidden = re.compile(r"\b(?:A\.I\.|AI|servers?|Roblox|avatars?|game mechanics?|generated)\b", re.IGNORECASE)
     forbidden_meta = forbidden.search(text)
@@ -162,7 +248,7 @@ def main():
         if not text or len(words) < minimum:
             # A compact known-good story is the last resort when the model stays
             # below the floor after the directional rewrite retries.
-            cast = [name.strip() for name in os.environ.get("CAST_NAMES", "").split(",") if name.strip()]
+            cast = list(invented_names(cast_usernames()).values())
             lead = cast[0] if cast else "Maya"
             group = lead if len(cast) == 1 else f"{', '.join(cast[:-1])} and {cast[-1]}" if cast else lead
             text = (
