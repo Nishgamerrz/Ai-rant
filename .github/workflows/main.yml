@@ -404,7 +404,7 @@ jobs:
           Topic: "${STORY_TOPIC}". Aim for ${TARGET_WORDS} words, strictly between ${MIN_WORDS} and ${MAX_WORDS} words.
           HARD LIMIT: never write more than ${MAX_WORDS} words. This is a brief short, not a long story. Do not pad it.
           You have full creative authority over this video: you may invent characters, details, events, emotions and timings, and you may change the story however you think makes the best short.
-          THINK BRIEFLY: settle the hook, one everyday problem, the cast's choice, and the ending in a few short lines, then write the final story once. Do not redraft it over and over and do not audit every word while thinking; the answer itself must be complete and must not run out of room.
+          THINK BRIEFLY: settle the hook, one everyday problem, the cast's choice, and the ending in a few short lines, then write the final story once. If you notice you are repeating the same idea or re-drafting the same paragraph, say so in a few words and move on; do not audit every word while thinking, and the answer itself must be complete and must not run out of room.
           The video must feel like a real Roblox story short: a small cast of characters acting out one clear everyday problem.
           Selected cast usernames (for internal casting only): ${CAST_NAMES:-none supplied}.
           NEVER put a username, handle, gamer tag, or account name in the narration, and never read one aloud, spell one, or say "username", "player", "avatar", "account", or "subscriber". Instead invent natural human first names for the characters and tell the story with those names. Match the number of speaking characters to the selected cast.
@@ -420,13 +420,13 @@ jobs:
             --output narration_response.json --label "story narration" \
             --timeout "${AI_TIMEOUT:-900}" \
             --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}"
-          for attempt in 1 2; do
+          for attempt in 1 2 3; do
             if python tools/prepare_narration.py narration_response.json dist/narration.txt "$DURATION_SECONDS"; then
               echo "Narration passed the ${MAX_WORDS}-word hard cap on attempt ${attempt}."
               break
             fi
-            if [ "$attempt" -eq 2 ]; then
-              echo "AI still missed the limit; applying the automatic final short-story guard instead of regenerating again."
+            if [ "$attempt" -eq 3 ]; then
+              echo "AI still missed the limit after three attempts; applying the automatic final short-story guard."
               python tools/prepare_narration.py narration_response.json dist/narration.txt "$DURATION_SECONDS" --truncate "$STORY_TOPIC"
               break
             fi
@@ -482,6 +482,7 @@ jobs:
           WEB_RESEARCH=$(jq -c . dist/web_research.json 2>/dev/null || echo '[]')
           echo "Camera storyboard: ${SHOT_COUNT}-${SHOT_MAX} shots, AI-timed face expression beats, at least 3 face close-ups."
           cat > map_prompt.txt <<PROMPT
+          You may request live web research as many times as you genuinely need by returning search_queries; the workflow runs every query and sends the facts back. Do not repeat a query you already asked. If you notice you are repeating yourself or re-planning the same thing, say so briefly and return the best complete plan you have.
           You have full creative authority over this video and may do anything at any time: invent characters, props, buildings, colours, materials, emotions, camera moves, cut timing and expression timing however you think makes the best YouTube-Shorts-style Roblox story short. If you need current real-world facts at any point, add "search_queries": ["…"] to your JSON and the workflow will run those web searches and ask you again with the results.
           Think through the complete story and invent/design the entire playable, detailed Roblox Studio world plus a cinematic camera plan with animated faces.
           Story/topic: "${STORY_TOPIC}"
@@ -494,7 +495,7 @@ jobs:
           Design the complete coherent world blueprint for a 640-by-640-stud map, but keep this model response concise and reliable: output 16–28 meaningful anchor props, not hundreds of low-quality repeated Parts. Include at least 3 named building cores, 3 distinct landmarks tied to the story, and supporting scenic/story props spread across the map. Name each building by its actual type (for example Market Hall, Reef Laboratory, or Snowy Library), give it a footprint large enough to furnish, and make its location/color/material fit the user theme. Use bright, readable colors (avoid near-black walls), avatar-scale doors/windows, detailed facades, furnished interiors, paths, layered landscaping, and story-specific landmark silhouettes; do not create giant featureless boxes. The build step automatically expands those anchors into walls, roofs, doors, windows, counters, shelves, tables, chairs, lamps, paths, plants, and other theme-specific details, producing at least ${TARGET_PROPS} individually named, grid-aligned editable Parts.
           Return ONLY JSON with this structure:
           {"name":"Prompt-derived world name","theme":"Specific visual theme that follows the user's theme prompt","ground_material":"Grass","ground_color":[88,166,91],"ambient_color":[185,205,225],"props":[{"name":"Market Hall","shape":"Block","material":"Brick","position":[-55,8,35],"size":[24,16,20],"color":[30,210,240],"physics":"static"}],"character_placements":[{"username":"LeadName","role":"lead","position":[0,0,24]},{"username":"FriendName","role":"supporting","position":[-6,0,24]}],"camera_shots":[{"time":0,"position":[0,75,170],"target":[0,3,24],"focus_username":"LeadName","transition":"smooth","framing":"auto"},{"time":12.5,"position":[3,6,30],"target":[0,5,24],"focus_username":"LeadName","transition":"snap","framing":"face","face_distance":2.3},{"time":${DURATION_SECONDS},"position":[-30,35,80],"target":[0,3,24],"focus_username":"LeadName","transition":"smooth","framing":"auto"}],"face_expressions":[{"time":0,"expression":"neutral","intensity":0.6,"username":"LeadName"},{"time":12.4,"expression":"worried","intensity":0.9,"username":"LeadName"},{"time":18,"expression":"happy","intensity":1,"username":"LeadName"}],"search_queries":[]}
-          Quality bar for every anchor you return: X, Y and Z positions and all three size dimensions must sit on a 0.5-stud grid; props must never overlap each other; no prop may be darker than RGB 104 average luminance; no prop may sit in the cast lane (|X| < 20 and Z 4–54) so faces stay unobstructed for the close-ups; assign a material that fits the object (Wood, Brick, Glass, Concrete, Metal, Neon, Grass, SmoothPlastic) and a physics value that fits it (static for buildings/furniture, dynamic only for small loose objects); colours must be bright, saturated and contrast with neighbouring props so shadows read clearly. Check your blueprint once for anything that breaks those rules, that floats above the ground, that clips through a building, or that faces the wrong way, then return it. THINK BRIEFLY: this runs on a CPU-only machine, so do not re-plan the world over and over, do not repeat the JSON in your reasoning, and do not re-read the plan more than once.
+          Quality bar for every anchor you return: X, Y and Z positions and all three size dimensions must sit on a 0.5-stud grid; props must never overlap each other; no prop may be darker than RGB 104 average luminance; no prop may sit in the cast lane (|X| < 20 and Z 4–54) so faces stay unobstructed for the close-ups; assign a material that fits the object (Wood, Brick, Glass, Concrete, Metal, Neon, Grass, SmoothPlastic) and a physics value that fits it (static for buildings/furniture, dynamic only for small loose objects); colours must be bright, saturated and contrast with neighbouring props so shadows read clearly. Check your blueprint once for anything that breaks those rules, that floats above the ground, that clips through a building, or that faces the wrong way, then return it. THINK BRIEFLY: this runs on a CPU-only machine. Do not re-plan the world over and over, do not repeat the JSON in your reasoning, and if you catch yourself looping on the same point, stop and return the complete plan.
           Treat props as blueprint anchors: 3–6 building cores, large distinctive story landmarks, and supporting scene anchors. Give each building its own recognizable footprint; the deterministic build step will model open facades, visible windows, furnishing, and structural details. Add enough diverse anchor locations to fill the map, not one central pile. Keep story-specific landmarks prominent and every named username camera-visible.
           Use the user theme prompt as the source of truth for every design choice. Derive the theme from the story only when the user left the theme blank. Make the theme unmistakable and specific; do not fall back to the same generic city/neon plaza. The finished environment is expanded by code to ${TARGET_PROPS}+ Parts; this compact AI blueprint should prioritize coherence, varied locations, and meaningful design over repeating primitive objects.
           Include one character_placements entry for every supplied username using exact spelling, roles lead/supporting, positions X=-8..8, Y=0..3, Z=12..38. Do not add username labels, screen text, floating numbers, scars, tattoos, badges, or other visual effects unless the user's story/topic explicitly asks for them. When requested, keep the effect attached to the specified avatar body part/location. Keep a clear 30-by-40-stud area around this cast so characters and camera remain unobstructed.
@@ -522,7 +523,11 @@ jobs:
             fi
             # The AI is told it may do anything at any time, including asking for
             # fresh web research mid-plan. Each request is executed and fed back.
-            for search_round in 1; do
+            PREVIOUS_QUERIES=""
+            # The AI may ask for fresh web research as many times as it needs --
+            # up to four rounds here. Identical queries stop the loop, so a model
+            # that repeats itself is told to move on instead of searching forever.
+            for search_round in 1 2 3 4; do
               QUERIES=$(python - <<'PYQ'
           import json
           try:
@@ -535,7 +540,12 @@ jobs:
           PYQ
               )
               if [ -z "$QUERIES" ]; then break; fi
-              echo "The AI asked for more web research (round ${search_round}):"
+              if [ "$QUERIES" = "$PREVIOUS_QUERIES" ]; then
+                echo "The AI asked for the same web research again (round ${search_round}); telling it the answers are already in the prompt and to finish the plan instead of repeating."
+                break
+              fi
+              PREVIOUS_QUERIES="$QUERIES"
+              echo "The AI asked for more web research (round ${search_round}/4):"
               echo "$QUERIES"
               mapfile -t QUERY_LIST <<< "$QUERIES"
               python tools/ai_web_search.py dist/web_research.json "${QUERY_LIST[@]}"
