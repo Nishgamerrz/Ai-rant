@@ -52,7 +52,8 @@ class PromptTests(unittest.TestCase):
     def test_the_meaning_must_be_kept(self):
         prompt = build_prompt("x", "story")
         self.assertIn("Keep the user's story, setting, characters and intent", prompt)
-        self.assertIn("Do not replace their idea with your own", prompt)
+        self.assertIn("Do not replace their idea", prompt)
+        self.assertIn("with your own", prompt)
 
     def test_the_theme_has_its_own_rules(self):
         theme = build_prompt("rainy markt street", "theme")
@@ -260,3 +261,56 @@ class WorkflowWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PremiseKeptTests(unittest.TestCase):
+    """Run #78's cleanup turned a what-if premise into a scene.
+
+    Gemini rewrote "In a world where the last person to fall asleep each night
+    gets one wish, two brothers keep each other awake on purpose" as "At midnight,
+    two brothers in their bunk beds try to stay awake, knowing the last one to
+    fall asleep gets one wish ." - a moment instead of an idea, with a space
+    before the full stop. The user's own wording is better than that, so the
+    rewrite is dropped.
+    """
+
+    RAW = ("In a world where the last person to fall asleep each night gets one "
+           "wish, two brothers keep each other awake on purpose")
+    SCENE = ("At midnight, two brothers in their bunk beds try to stay awake, "
+             "knowing the last one to fall asleep gets one wish .")
+
+    def test_the_instructions_ask_for_the_premise_to_be_kept(self):
+        prompt = build_prompt(self.RAW, "story")
+        self.assertIn('"In a world where ..."', prompt)
+        self.assertIn("keep\n  that opening word for word", prompt)
+        self.assertIn("must survive unchanged", prompt)
+
+    def test_a_rewrite_that_becomes_a_scene_is_rejected(self):
+        text, reason = sanitize(self.SCENE, self.RAW)
+        self.assertIsNone(text)
+        self.assertIn("premise", reason)
+
+    def test_a_rewrite_that_keeps_the_premise_is_accepted(self):
+        reply = ("In a world where the last person to fall asleep each night gets "
+                 "one wish, two brothers in their bunk beds keep each other awake "
+                 "on purpose.")
+        text, reason = sanitize(reply, self.RAW)
+        self.assertEqual(reason, "ok")
+        self.assertTrue(text.startswith("In a world where"))
+
+    def test_a_small_rewording_of_the_opener_is_still_allowed(self):
+        text, reason = sanitize("In a world, the last one awake each night gets one wish.", self.RAW)
+        self.assertEqual(reason, "ok")
+
+    def test_a_trailing_space_before_the_full_stop_is_closed(self):
+        text, _ = sanitize("At midnight, two brothers try to stay awake .", "two brothers stay awake")
+        self.assertEqual(text, "At midnight, two brothers try to stay awake.")
+
+    def test_a_missing_full_stop_is_added(self):
+        text, _ = sanitize("At midnight two brothers stay awake", "two brothers stay awake")
+        self.assertTrue(text.endswith("."))
+
+    def test_a_prompt_without_a_premise_is_not_forced_into_one(self):
+        text, reason = sanitize("A student finds a lost wallet on the way to school.",
+                                "a stdent finds a lost wallett on the way to shcool")
+        self.assertEqual(reason, "ok")
