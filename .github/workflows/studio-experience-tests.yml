@@ -39,6 +39,7 @@ jobs:
           npm run test:avatar-obj
           npm run test:module-resolution
           npm run test:caption-overlay
+          npm run test:page-template
 
       - name: Install and smoke-test the RBXM parser
         run: |

@@ -404,3 +404,62 @@ class WorkflowWiringTests(unittest.TestCase):
         gate = self.workflow.index("Gemini edit result")
         move = self.workflow.index("mv dist/narration_gemini.txt dist/narration.txt")
         self.assertLess(gate, move)
+
+
+class AlwaysDelegateTests(unittest.TestCase):
+    """The AI must use the sub-agent on every run, and the run must not depend on it."""
+
+    def setUp(self):
+        self.workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    def test_the_narration_prompt_forbids_an_empty_task_list(self):
+        self.assertIn("YOU MUST USE THE GEMINI SUB-AGENT ON EVERY RUN", self.workflow)
+        self.assertIn('NEVER RETURN AN EMPTY "subagent_tasks" LIST', self.workflow)
+        self.assertIn("too long or too short for the word target", self.workflow)
+
+    def test_the_schema_makes_the_task_list_required(self):
+        self.assertEqual(self.workflow.count('required:["narration","subagent_tasks"]'), 2)
+
+    def test_the_world_planner_is_told_to_always_delegate(self):
+        self.assertIn("YOU MUST USE THE GEMINI SUB-AGENT ON EVERY RUN: delegate at least one",
+                      self.workflow)
+        self.assertIn('export HELPER_ROUND="$helper_round"', self.workflow)
+
+    def test_a_model_that_delegates_nothing_still_gets_a_gemini_check(self):
+        start = self.workflow.index("python - <<'PYD' || true")
+        block = self.workflow[start:self.workflow.index("\n          PYD", start)]
+        script = "\n".join(line[10:] for line in block.splitlines()[1:])
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "narration_response.json").write_text(json.dumps({
+                "message": {"content": json.dumps({"narration": "Max slept in.",
+                                                   "subagent_tasks": []})},
+            }), encoding="utf-8")
+            result = subprocess.run([sys.executable, "-"], input=script, text=True,
+                                    capture_output=True, cwd=work,
+                                    env={**os.environ, "DURATION_SECONDS": "133"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            written = json.loads((work / "story_subagent_tasks.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(written["tasks"]), 1)
+            task = written["tasks"][0]
+            self.assertEqual(task["kind"], "verify")
+            self.assertEqual(task["topic"], "narration")
+            self.assertIn("Max slept in.", task["input"])
+            self.assertIn("delegated nothing", result.stdout)
+
+    def test_a_model_that_does_delegate_is_left_alone(self):
+        start = self.workflow.index("python - <<'PYD' || true")
+        block = self.workflow[start:self.workflow.index("\n          PYD", start)]
+        script = "\n".join(line[10:] for line in block.splitlines()[1:])
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "narration_response.json").write_text(json.dumps({
+                "message": {"content": json.dumps({
+                    "narration": "Max slept in.",
+                    "subagent_tasks": [{"id": "t1", "kind": "name",
+                                        "instruction": "Does Max sound real?"}]})},
+            }), encoding="utf-8")
+            subprocess.run([sys.executable, "-"], input=script, text=True, capture_output=True,
+                           cwd=work, env={**os.environ, "DURATION_SECONDS": "133"})
+            written = json.loads((work / "story_subagent_tasks.json").read_text(encoding="utf-8"))
+            self.assertEqual([task["id"] for task in written["tasks"]], ["t1"])

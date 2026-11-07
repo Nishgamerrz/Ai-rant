@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -513,3 +514,35 @@ class StudioExperienceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PageTemplateTests(unittest.TestCase):
+    """The served page must be built for real, not just parse as JavaScript.
+
+    A backtick inside the one big template literal (a comment like "only `.bones`")
+    ends the literal early and turns the rest into code. `node --check` passes, and
+    the render then dies with "WIDTHHEIGHT...bones is not a function" after the
+    world has already been planned.
+    """
+
+    def test_the_page_template_builds_without_stray_backticks(self):
+        renderer = (ROOT / "tools/video_renderer/render_short.mjs").read_text(encoding="utf-8")
+        start = renderer.index("return `<!doctype")
+        body = renderer[start:renderer.index("function serveFile", start)]
+        self.assertEqual(body.count("`"), 2, "a backtick inside the page template ends it early")
+
+    def test_the_template_check_runs_the_builder(self):
+        script = ROOT / "tools/video_renderer/template_check.mjs"
+        self.assertTrue(script.is_file())
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed here")
+        result = subprocess.run([node, str(script)], capture_output=True, text=True,
+                                cwd=ROOT / "tools/video_renderer")
+        self.assertEqual(result.returncode, 0, result.stderr[-1500:])
+        self.assertIn("Page template check passed", result.stdout)
+
+    def test_both_workflows_run_the_page_template_check(self):
+        for name in ("main.yml", "studio-experience-tests.yml"):
+            text = (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+            self.assertIn("npm run test:page-template", text, name)
