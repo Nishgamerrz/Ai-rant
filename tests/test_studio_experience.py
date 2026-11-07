@@ -392,7 +392,7 @@ class StudioExperienceTests(unittest.TestCase):
             emit_lua(normalized, lua_output)
             generated_lua = lua_output.read_text(encoding="utf-8")
             self.assertIn("p.Anchored = physicsMode ~= 'dynamic'", generated_lua)
-            self.assertIn('"dynamic")', generated_lua)
+            self.assertIn('"dynamic", nil, nil)', generated_lua)
         with self.assertRaises(ValueError):
             validate({**plan, "props": props[:119]}, 60, (), min_props=120)
 

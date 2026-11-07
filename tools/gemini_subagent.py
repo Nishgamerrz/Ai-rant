@@ -67,7 +67,10 @@ MAX_TASKS = 3
 MAX_INPUT_CHARS = 12000
 MAX_INSTRUCTION_CHARS = 1200
 
-KINDS = ("edit", "answer", "verify", "code", "name")
+# "write" is a free-form letter to Gemini: the planning model may send it any
+# message it likes - a question, a draft it wants improved, a decision it wants
+# a second opinion on - and gets prose back. Nothing is applied to a file.
+KINDS = ("edit", "answer", "verify", "code", "name", "write")
 
 SYSTEM_RULES = (
     "You are the helper sub-agent for a local text model that is building a short, "

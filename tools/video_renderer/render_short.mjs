@@ -86,6 +86,8 @@ function buildHtml(data) {
   import { TDSLoader } from '/modules/three/examples/jsm/loaders/TDSLoader.js';
   import { animateAvatarRig, applyRobloxAnimationRig, buildAvatarRig, measureFaceAnchor } from '/avatar_rig.mjs';
   import { chooseFaceCamera, chooseSafeCamera } from '/scene_camera.mjs';
+  import { buildShapeGeometry, SHAPE_ROTATIONS } from '/map_shapes.mjs';
+  import { createParticleField, isAdditive, sampleParticles } from '/particles.mjs';
   import { applyFaceHeadMotion, blinkSchedule, createFaceRig, defaultFaceTimeline, faceStateAt,
     normalizeExpressionTimeline, parseSrt, speechPulses, syntheticPulses } from '/face_rig.mjs';
   const DATA=JSON.parse(document.getElementById('render-data').textContent);
@@ -148,11 +150,14 @@ function buildHtml(data) {
   const floor=new THREE.Mesh(new THREE.PlaneGeometry(760,760),new THREE.MeshStandardMaterial({color:new THREE.Color(...groundRgb.map(v=>v/255)),roughness:0.95}));
   floor.rotation.x=-Math.PI/2; floor.position.y=-0.06; floor.receiveShadow=true; scene.add(floor);
   const foundation=new THREE.Mesh(new THREE.BoxGeometry(760,2.4,760),new THREE.MeshStandardMaterial({color:new THREE.Color(...groundRgb.map(v=>v/255)),roughness:1})); foundation.position.set(0,-1.26,0); foundation.receiveShadow=true; scene.add(foundation);
-  const geometry={Block:new THREE.BoxGeometry(1,1,1),Ball:new THREE.SphereGeometry(0.5,16,12),Cylinder:new THREE.CylinderGeometry(0.5,0.5,1,14)};
+  // Every shape fits inside one 1x1x1 cube and is scaled by the Part's size, so a
+  // single instanced draw call still covers the whole map. The shapes themselves
+  // live in map_shapes.mjs, which a Node smoke test builds for real.
+  const geometry=buildShapeGeometry();
   const settings={Plastic:[0,.78],SmoothPlastic:[0,.38],Concrete:[0,.93],Grass:[0,1],Slate:[0,.91],Wood:[0,.8],Metal:[.62,.38],Neon:[0,.25],Glass:[.08,.13],Brick:[0,.93],Asphalt:[0,1]};
   const buckets=new Map();
   function addPart(part){
-    const shape=['Block','Ball','Cylinder'].includes(part.shape)?part.shape:'Block';
+    const shape=geometry[part.shape]?part.shape:'Block';
     const mat=['Plastic','SmoothPlastic','Concrete','Grass','Slate','Wood','Metal','Neon','Glass','Brick','Asphalt'].includes(part.material)?part.material:'Plastic';
     const key=shape+'|'+mat;
     if(!buckets.has(key)) buckets.set(key,{shape,mat,parts:[]});
@@ -247,11 +252,132 @@ function buildHtml(data) {
       position.set(Number(part.position[0]),Number(part.position[1]),Number(part.position[2]));
       scale.set(Math.max(.03,Number(part.size[0])),Math.max(.03,Number(part.size[1])),Math.max(.03,Number(part.size[2])));
       quaternion.identity();
-      if(part.shape==='Cylinder') quaternion.setFromEuler(new THREE.Euler(0,0,Math.PI/2));
+      const spin=SHAPE_ROTATIONS[part.shape];
+      if(spin) quaternion.setFromEuler(new THREE.Euler(spin[0],spin[1],spin[2]));
       matrix.compose(position,quaternion,scale); instanced.setMatrixAt(index,matrix); instanced.setColorAt(index,rgb(part.color||[135,165,205]));
       const body=dynamicPropBodies.get(part);if(body)dynamicPropInstances.push({part,body,mesh:instanced,index});
     });
     instanced.instanceMatrix.needsUpdate=true; scene.add(instanced);
+  }
+  // LIGHTS. A Part with a light is a lamp: it keeps its own colour and casts a
+  // pool of light that the AI can make bigger, brighter or darker by number.
+  const lampLights=[];
+  for(const p of safeProps){
+    const spec=p.light;
+    if(!spec)continue;
+    const [x,y,z]=p.position;
+    const tint=new THREE.Color(...(Array.isArray(spec.color)?spec.color:[255,226,156]).map(v=>Math.max(0,Math.min(255,Number(v)||0))/255));
+    const brightness=Math.max(0,Math.min(5,Number(spec.brightness??1.6)));
+    const range=Math.max(1,Math.min(60,Number(spec.range??22)));
+    // Brightness and range are Roblox units; a point light at 5 studs should read
+    // as a bright pool, so intensity scales with both.
+    const intensity=brightness*Math.max(6,range*1.15);
+    let light;
+    if(spec.kind==='Spot'){
+      const angle=Math.max(5,Math.min(180,Number(spec.angle??90)));
+      light=new THREE.SpotLight(tint,intensity,range*1.3,THREE.MathUtils.degToRad(angle/2),.45,1.6);
+      light.position.set(x,y+Math.max(.5,p.size[1]/2),z);
+      light.target.position.set(x,y-4,z);
+      scene.add(light.target);
+    }else{
+      light=new THREE.PointLight(tint,intensity,range*1.3,1.7);
+      light.position.set(x,y+Math.max(.4,p.size[1]/2),z);
+    }
+    if(lampLights.length<40) scene.add(light);
+    lampLights.push(light);
+    // A visible bulb so the source itself is not an invisible nothing.
+    const bulb=new THREE.Mesh(new THREE.SphereGeometry(Math.max(.22,Math.min(1.6,Math.max(...p.size)*.07)),10,8),
+      new THREE.MeshStandardMaterial({color:tint,emissive:tint,emissiveIntensity:2.2,roughness:.3}));
+    bulb.position.copy(light.position); scene.add(bulb);
+  }
+  window.lightSummary={lights:lampLights.length};
+
+  // PARTICLE EFFECTS. Sparkles, fire, smoke, confetti, rain, snow and the rest of
+  // the catalogue. Positions are computed from the render clock, not accumulated
+  // frame by frame, so every frame is reproducible and a re-render matches.
+  const LOOKS={
+    star:{points:[[0,-1],[.35,-.35],[1,0],[.35,.35],[0,1],[-.35,.35],[-1,0],[-.35,-.35]]},
+    glow:null, puff:null, bubble:null, square:null, flake:null,
+    streak:null, heart:null, petal:null, leaf:null, bolt:null,
+  };
+  const effectTextures=new Map();
+  function effectTexture(look){
+    if(effectTextures.has(look))return effectTextures.get(look);
+    const size=64,canvas=document.createElement('canvas');
+    canvas.width=canvas.height=size;
+    const g=canvas.getContext('2d');
+    const mid=size/2;
+    const radial=(stops)=>{const grd=g.createRadialGradient(mid,mid,0,mid,mid,mid);stops.forEach(s=>grd.addColorStop(s[0],s[1]));return grd;};
+    g.fillStyle='rgba(255,255,255,0)';g.fillRect(0,0,size,size);
+    if(look==='star'){
+      g.fillStyle=radial([[0,'rgba(255,255,255,1)'],[.45,'rgba(255,255,255,.85)'],[1,'rgba(255,255,255,0)']]);
+      g.beginPath();g.arc(mid,mid,mid,0,Math.PI*2);g.fill();
+      g.fillStyle='rgba(255,255,255,.95)';
+      g.beginPath();g.moveTo(mid,2);g.lineTo(mid+6,mid-6);g.lineTo(size-2,mid);g.lineTo(mid+6,mid+6);
+      g.lineTo(mid,size-2);g.lineTo(mid-6,mid+6);g.lineTo(2,mid);g.lineTo(mid-6,mid-6);g.closePath();g.fill();
+    }else if(look==='glow'){
+      g.fillStyle=radial([[0,'rgba(255,255,255,1)'],[.4,'rgba(255,255,255,.55)'],[1,'rgba(255,255,255,0)']]);
+      g.beginPath();g.arc(mid,mid,mid,0,Math.PI*2);g.fill();
+    }else if(look==='puff'){
+      g.fillStyle=radial([[0,'rgba(255,255,255,.85)'],[.55,'rgba(255,255,255,.35)'],[1,'rgba(255,255,255,0)']]);
+      g.beginPath();g.arc(mid,mid,mid,0,Math.PI*2);g.fill();
+    }else if(look==='bubble'){
+      g.strokeStyle='rgba(255,255,255,.9)';g.lineWidth=5;
+      g.beginPath();g.arc(mid,mid,mid-6,0,Math.PI*2);g.stroke();
+      g.fillStyle='rgba(255,255,255,.28)';g.beginPath();g.arc(mid,mid,mid-6,0,Math.PI*2);g.fill();
+      g.fillStyle='rgba(255,255,255,.85)';g.beginPath();g.arc(mid-10,mid-12,6,0,Math.PI*2);g.fill();
+    }else if(look==='square'){
+      g.fillStyle='rgba(255,255,255,.95)';g.fillRect(mid-20,mid-20,40,40);
+    }else if(look==='flake'){
+      g.strokeStyle='rgba(255,255,255,.95)';g.lineWidth=5;g.lineCap='round';
+      for(let i=0;i<3;i++){const a=i*Math.PI/3;g.beginPath();g.moveTo(mid-Math.cos(a)*mid*.9,mid-Math.sin(a)*mid*.9);g.lineTo(mid+Math.cos(a)*mid*.9,mid+Math.sin(a)*mid*.9);g.stroke();}
+    }else if(look==='streak'){
+      g.fillStyle=radial([[0,'rgba(255,255,255,.95)'],[1,'rgba(255,255,255,0)']]);
+      g.fillRect(mid-5,0,10,size);
+    }else if(look==='heart'){
+      g.fillStyle='rgba(255,255,255,.95)';g.beginPath();
+      g.moveTo(mid,size-10);
+      g.bezierCurveTo(2,mid+8,mid-22,6,mid-10,10);g.bezierCurveTo(mid-4,12,mid,mid-8,mid,mid-2);
+      g.bezierCurveTo(mid,mid-8,mid+4,12,mid+10,10);g.bezierCurveTo(mid+22,6,size-2,mid+8,mid,size-10);
+      g.fill();
+    }else if(look==='petal'||look==='leaf'){
+      g.fillStyle='rgba(255,255,255,.95)';g.beginPath();
+      g.ellipse(mid,mid,mid*.75,mid*.34,Math.PI/5,0,Math.PI*2);g.fill();
+    }else if(look==='bolt'){
+      g.fillStyle='rgba(255,255,255,.98)';g.beginPath();
+      g.moveTo(mid+10,2);g.lineTo(mid-14,mid+4);g.lineTo(mid-2,mid+4);g.lineTo(mid-10,size-2);
+      g.lineTo(mid+16,mid-4);g.lineTo(mid+2,mid-4);g.closePath();g.fill();
+    }
+    const texture=new THREE.CanvasTexture(canvas);
+    texture.needsUpdate=true;
+    effectTextures.set(look,texture);
+    return texture;
+  }
+  const effectSystems=[];
+  for(const p of safeProps){
+    const effect=p.effect;
+    if(!effect)continue;
+    const field=createParticleField(effect,effectSystems.length+1);
+    const positions=new Float32Array(field.count*3);
+    const geo=new THREE.BufferGeometry();
+    geo.setAttribute('position',new THREE.BufferAttribute(positions,3));
+    const tint=new THREE.Color(...(Array.isArray(effect.color)?effect.color:[255,199,64]).map(v=>Math.max(0,Math.min(255,Number(v)||0))/255));
+    const additive=isAdditive(effect.family);
+    const material=new THREE.PointsMaterial({size:Math.max(.08,Number(effect.size)||.4),map:effectTexture(effect.look||'glow'),
+      color:tint,transparent:true,opacity:additive?.95:.8,depthWrite:false,sizeAttenuation:true,
+      blending:additive?THREE.AdditiveBlending:THREE.NormalBlending});
+    const points=new THREE.Points(geo,material);
+    points.frustumCulled=false;
+    scene.add(points);
+    effectSystems.push({points,geo,positions,field,origin:p.position,effect});
+  }
+  window.effectSummary={systems:effectSystems.length,
+    families:[...new Set(effectSystems.map(system=>system.effect.family))]};
+  function updateEffects(t){
+    for(const system of effectSystems){
+      sampleParticles(system.field,system.origin,system.effect,t,system.positions);
+      system.geo.attributes.position.needsUpdate=true;
+    }
   }
   // Floor tiles and far green terrain soften the map edge without replacing the AI-authored theme.
   const horizon=new THREE.Mesh(new THREE.PlaneGeometry(2600,2600),new THREE.MeshStandardMaterial({color:rgb(DATA.plan.ground_color||[88,166,91]),roughness:1})); horizon.rotation.x=-Math.PI/2; horizon.position.y=-.08; scene.add(horizon);
@@ -541,7 +667,7 @@ function buildHtml(data) {
     captionEl.style.transform='translate(-50%,-50%) scale('+pop.toFixed(3)+')';
   }
   window.renderAt=async(t)=>{
-    for(const actor of actors)animateActor(actor,t);cameraAt(t);captionAt(t);
+    for(const actor of actors)animateActor(actor,t);cameraAt(t);captionAt(t);updateEffects(t);
     physicsWorld.step();physicsWorld.step();
     for(const item of dynamicPropInstances){
       const p=item.body.translation(),r=item.body.rotation(),size=item.part.size;
@@ -588,6 +714,8 @@ function createStaticServer(html, avatarRoot) {
     if (pathname === '/') { response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); response.end(html); return; }
     if (pathname === '/avatar_rig.mjs') { serveFile(response, join(ROOT, 'avatar_rig.mjs')); return; }
     if (pathname === '/scene_camera.mjs') { serveFile(response, join(ROOT, 'scene_camera.mjs')); return; }
+    if (pathname === '/map_shapes.mjs') { serveFile(response, join(ROOT, 'map_shapes.mjs')); return; }
+    if (pathname === '/particles.mjs') { serveFile(response, join(ROOT, 'particles.mjs')); return; }
     if (pathname === '/face_rig.mjs') { serveFile(response, join(ROOT, 'face_rig.mjs')); return; }
     if (pathname.startsWith('/modules/')) {
       const path = resolve(ROOT, 'node_modules', normalize(pathname.slice('/modules/'.length)));

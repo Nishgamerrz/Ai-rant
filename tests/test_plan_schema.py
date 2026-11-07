@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from build_story_map import normalize_material, normalize_shape, validate  # noqa: E402
+from build_story_map import SHAPES, normalize_material, normalize_shape, validate  # noqa: E402
 from plan_schema import build_schema  # noqa: E402
 
 CAST = ["normal", "noob"]
@@ -63,9 +63,10 @@ class SchemaTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, msg=result.stderr[-2000:])
                 data = json.loads(out_path.read_text(encoding="utf-8"))
-                self.assertEqual(data["properties"]["props"]["items"]
-                                 ["properties"]["shape"]["enum"],
-                                 ["Block", "Ball", "Cylinder"])
+                # Every shape the renderer can draw is offered, triangle included.
+                self.assertEqual(set(data["properties"]["props"]["items"]
+                                     ["properties"]["shape"]["enum"]),
+                                 set(SHAPES))
 
 
 class AliasTests(unittest.TestCase):

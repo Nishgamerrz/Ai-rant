@@ -99,7 +99,11 @@ class WorkspaceGuideTests(unittest.TestCase):
         text = guide({"kind": "edit", "instruction": "fix the props",
                       "apply_to": "dist/Roblox_Story_Map.json"})
         self.assertIn("WORLD BLUEPRINT", text)
-        self.assertIn("exactly one of: Block, Ball, Cylinder", text)
+        self.assertIn("Wedge (a triangle", text)
+        self.assertIn("Hemisphere (a dome)", text)
+        self.assertIn("Truss", text)
+        self.assertIn("brightness", text)
+        self.assertIn("520 presets", text)
         self.assertIn("SmoothPlastic", text)
         self.assertIn("multiples of 0.5", text)
         self.assertIn("|x| + width/2 <= 320", text)

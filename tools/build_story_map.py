@@ -12,8 +12,22 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from durations import check_duration, duration_arg  # noqa: E402
 
+from effects_catalog import resolve as resolve_effect  # noqa: E402
+
 MATERIALS = {"Plastic", "SmoothPlastic", "Concrete", "Grass", "Slate", "Wood", "Metal", "Neon", "Glass", "Brick", "Asphalt"}
-SHAPES = {"Block", "Ball", "Cylinder"}
+
+# Every shape the renderer can draw. The five Roblox part types are first, then
+# the hand-built ones: a triangle (Wedge) was impossible before, so roofs, sails,
+# ramps, kites and arrow signs could only be faked with thin blocks.
+SHAPES = {
+    "Block", "Ball", "Cylinder", "Wedge", "CornerWedge",
+    "Cone", "Pyramid", "Prism", "Torus", "Ring", "Hemisphere", "Truss",
+}
+# Roblox has no Part with these five silhouettes, so the Studio project uses the
+# nearest real part type and keeps the AI's intent in the name.
+STUDIO_SHAPE_FALLBACK = {"Cone": "Cylinder", "Pyramid": "CornerWedge", "Prism": "Wedge",
+                         "Torus": "Cylinder", "Ring": "Cylinder", "Hemisphere": "Ball",
+                         "Truss": "Block"}
 
 # The AI may declare what each anchor IS with "model". A building anchor is then
 # expanded into a full furnished building (walls, gable roof, glass, furniture,
@@ -61,6 +75,16 @@ SHAPE_ALIASES = {
     "block": "Block", "part": "Block", "box": "Block", "cube": "Block", "rectangle": "Block",
     "ball": "Ball", "sphere": "Ball", "round": "Ball",
     "cylinder": "Cylinder", "tube": "Cylinder", "pillar": "Cylinder", "column": "Cylinder",
+    "triangle": "Wedge", "wedge": "Wedge", "ramp": "Wedge", "slope": "Wedge", "roof": "Wedge",
+    "prism": "Prism", "triangular prism": "Prism",
+    "corner": "CornerWedge", "corner wedge": "CornerWedge", "cornerwedge": "CornerWedge",
+    "cone": "Cone", "spike": "Cone", "tepee": "Cone",
+    "pyramid": "Pyramid", "diamond": "Pyramid",
+    "torus": "Torus", "donut": "Torus", "doughnut": "Torus",
+    "ring": "Ring", "hoop": "Ring", "loop": "Ring",
+    "hemisphere": "Hemisphere", "dome": "Hemisphere", "half ball": "Hemisphere",
+    "truss": "Truss", "lattice": "Truss", "frame": "Truss", "scaffold": "Truss",
+    "beam": "Block", "plane": "Block", "flat": "Block",
 }
 MATERIAL_ALIASES = {
     "smooth plastic": "SmoothPlastic", "smoothpl astic": "SmoothPlastic", "plastic": "Plastic",
@@ -108,6 +132,79 @@ def normalize_material(value, default="SmoothPlastic"):
 def normalize_ground_material(value, default="Grass"):
     return normalize_material(value, default)
 
+
+
+LIGHT_KINDS = {"Point", "Spot", "Surface"}
+LIGHT_ALIASES = {
+    "point": "Point", "pointlight": "Point", "bulb": "Point", "lamp": "Point",
+    "spot": "Spot", "spotlight": "Spot", "beam": "Spot", "flashlight": "Spot",
+    "surface": "Surface", "surfacelight": "Surface", "window": "Surface", "panel": "Surface",
+}
+# A light is a Part that also glows: the Part is the visible lamp, the light is the
+# pool of colour it throws. Brightness and range are the two dials the AI asked to
+# be able to raise and lower, and the colour is the third.
+LIGHT_DEFAULTS = {"kind": "Point", "color": [255, 226, 156], "brightness": 1.6,
+                  "range": 22.0, "angle": 90.0}
+
+
+def normalize_light(value):
+    """Return a bounded light, or None when the prop has no light."""
+    if value is True:  # "light": true means "a plain lamp"
+        value = {"kind": "Point"}
+    if isinstance(value, str):
+        if not value.strip():
+            return None
+        value = {"kind": value}
+    if not isinstance(value, dict) or not value:
+        return None
+    if value.get("enabled") is False or value.get("on") is False:
+        return None
+    raw_kind = " ".join(str(value.get("kind", value.get("type", value.get("light", "Point")))).strip().casefold().split())
+    kind = LIGHT_ALIASES.get(raw_kind, LIGHT_ALIASES.get(raw_kind.replace(" ", ""), ""))
+    if kind not in LIGHT_KINDS:
+        kind = "Point"
+
+    def number(key, low, high, default):
+        try:
+            result = float(value.get(key, default))
+        except (TypeError, ValueError):
+            return default
+        if result != result:
+            return default
+        return round(max(low, min(high, result)), 3)
+
+    color = value.get("color") or value.get("colour")
+    if not (isinstance(color, (list, tuple)) and len(color) == 3):
+        color = (value.get("hex") or value.get("color_hex"))
+        if isinstance(color, str):
+            digits = color.strip().lstrip("#")
+            if len(digits) == 6:
+                try:
+                    color = [int(digits[i:i + 2], 16) for i in (0, 2, 4)]
+                except ValueError:
+                    color = None
+            else:
+                color = None
+        else:
+            color = None
+    try:
+        color = [max(0, min(255, int(round(float(channel))))) for channel in color] if color else list(LIGHT_DEFAULTS["color"])
+    except (TypeError, ValueError):
+        color = list(LIGHT_DEFAULTS["color"])
+    return {
+        "kind": kind,
+        "color": color,
+        # Brightness, range and angle use Roblox's own units so the Studio export
+        # and the MP4 agree: 0-5 brightness, 0-60 studs of range, 0-180 degrees.
+        "brightness": number("brightness", 0.0, 5.0, LIGHT_DEFAULTS["brightness"]),
+        "range": number("range", 0.0, 60.0, LIGHT_DEFAULTS["range"]),
+        "angle": number("angle", 0.0, 180.0, LIGHT_DEFAULTS["angle"]),
+    }
+
+
+def normalize_effect(value):
+    """Return a bounded particle effect, or None."""
+    return resolve_effect(value)
 
 
 def default_plan():
@@ -1211,7 +1308,27 @@ def validate(plan, duration=90, usernames=(), min_props=16, visual_request=""):
         model = normalize_model(prop.get("model", prop.get("kind")))
         if model:
             clean_prop["model"] = model
+        light = normalize_light(prop.get("light", prop.get("lights")))
+        if light:
+            clean_prop["light"] = light
+        effect = normalize_effect(prop.get("effect", prop.get("particles", prop.get("fx"))))
+        if effect:
+            clean_prop["effect"] = effect
         clean_props.append(clean_prop)
+    # A hundred dynamic lights would black out the software renderer, so only the
+    # first MAX_LIGHTS keep their light; the rest stay ordinary Parts. Effects are
+    # cheap but each one is a particle system, so they are capped too.
+    MAX_LIGHTS, MAX_EFFECTS = 40, 60
+    lights = effects = 0
+    for prop in clean_props:
+        if "light" in prop:
+            lights += 1
+            if lights > MAX_LIGHTS:
+                prop.pop("light")
+        if "effect" in prop:
+            effects += 1
+            if effects > MAX_EFFECTS:
+                prop.pop("effect")
     return {
         "name": name, "theme": theme,
         "ground_color": color(plan.get("ground_color"), [88, 166, 91]),
@@ -1239,7 +1356,7 @@ def emit_lua(plan, output):
         "map.Name = 'GeneratedStoryMap'",
         f"map:SetAttribute('DisplayName', {lua_string(plan['name'])})",
         "map.Parent = Workspace",
-        "local function makePart(name, size, position, color, material, shape, physicsMode)",
+        "local function makePart(name, size, position, color, material, shape, physicsMode, light, effect)",
         "    local p = Instance.new('Part')",
         "    p.Name = name",
         "    p.Anchored = physicsMode ~= 'dynamic'",
@@ -1249,9 +1366,33 @@ def emit_lua(plan, output):
         "    p.CFrame = transform",
         "    p.Color = Color3.fromRGB(color[1], color[2], color[3])",
         "    p.Material = Enum.Material[material]",
-        "    p.Shape = Enum.PartType[shape]",
+        "-- Roblox has five part types; the hand-built silhouettes borrow the",
+        "-- nearest one so the Studio build always runs.",
+        "    local partTypes = {Cone = 'Cylinder', Pyramid = 'CornerWedge', Prism = 'Wedge', Torus = 'Cylinder', Ring = 'Cylinder', Hemisphere = 'Ball', Truss = 'Block'}",
+        "    p.Shape = Enum.PartType[partTypes[shape] or shape]",
         "    p.TopSurface = Enum.SurfaceType.Smooth",
         "    p.BottomSurface = Enum.SurfaceType.Smooth",
+        "    if light then",
+        "        local source = Instance.new(light.kind == 'Spot' and 'SpotLight' or (light.kind == 'Surface' and 'SurfaceLight' or 'PointLight'))",
+        "        source.Color = Color3.fromRGB(light.color[1], light.color[2], light.color[3])",
+        "        source.Brightness = light.brightness",
+        "        source.Range = light.range",
+        "        if source:IsA('SpotLight') then source.Angle = light.angle end",
+        "        source.Parent = p",
+        "    end",
+        "    if effect then",
+        "        local emitter = Instance.new('ParticleEmitter')",
+        "        emitter.Name = effect.family .. ' Effect'",
+        "        emitter.Color = ColorSequence.new(Color3.fromRGB(effect.color[1], effect.color[2], effect.color[3]))",
+        "        emitter.Rate = math.max(1, math.floor(effect.rate * 60))",
+        "        emitter.Lifetime = NumberRange.new(effect.life * 0.7, effect.life)",
+        "        emitter.Speed = NumberRange.new(effect.speed * 0.6, effect.speed)",
+        "        emitter.SpreadAngle = Vector2.new(effect.spread * 90, effect.spread * 90)",
+        "        emitter.Size = NumberSequence.new(effect.size)",
+        "        emitter.Acceleration = Vector3.new(0, effect.gravity * 10, 0)",
+        "        emitter.LightEmission = effect.twinkle and 0.8 or 0.2",
+        "        emitter.Parent = p",
+        "    end",
         "    p.Parent = map",
         "    return p",
         "end",
@@ -1263,9 +1404,20 @@ def emit_lua(plan, output):
         pos = ", ".join(map(str, prop["position"]))
         size = ", ".join(map(str, prop["size"]))
         color = ", ".join(map(str, prop["color"]))
+        light = prop.get("light")
+        effect = prop.get("effect")
+        light_lua = ("{" + f"kind = {lua_string(light['kind'])}, color = {{{', '.join(map(str, light['color']))}}}, "
+                     f"brightness = {light['brightness']}, range = {light['range']}, angle = {light['angle']}" + "}"
+                     ) if light else "nil"
+        effect_lua = ("{" + f"family = {lua_string(effect['family'])}, color = {{{', '.join(map(str, effect['color']))}}}, "
+                      f"rate = {effect['rate']}, size = {effect['size']}, speed = {effect['speed']}, "
+                      f"life = {effect['life']}, gravity = {effect['gravity']}, spread = {effect['spread']}, "
+                      f"twinkle = {'true' if effect.get('twinkle') else 'false'}"+ "}"
+                      ) if effect else "nil"
         lines.append(
             f"makePart({lua_string(prop['name'])}, {{{size}}}, {{{pos}}}, {{{color}}}, "
-            f"{lua_string(prop['material'])}, {lua_string(prop['shape'])}, {lua_string(prop.get('physics', 'static'))})"
+            f"{lua_string(prop['material'])}, {lua_string(prop['shape'])}, "
+            f"{lua_string(prop.get('physics', 'static'))}, {light_lua}, {effect_lua})"
         )
     ambient = plan["ambient_color"]
     theme_text = plan.get("theme", "").casefold()

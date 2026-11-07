@@ -12,7 +12,8 @@
     "test:face": "node face_rig_smoke_test.mjs",
     "test:avatar-glb": "node avatar_glb_smoke_test.mjs",
     "test:caption-overlay": "node caption_smoke_test.mjs",
-    "test:page-template": "node template_check.mjs"
+    "test:page-template": "node template_check.mjs",
+    "test:map-features": "node map_features_smoke_test.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "0.21.0",

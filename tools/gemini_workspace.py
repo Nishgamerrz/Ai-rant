@@ -49,7 +49,14 @@ workflow overwrites the whole file with your answer, so:
   command, or a new dependency.
 - Never touch, mention or rename the cast usernames unless the task says so.
 Numbers stay inside the ranges below. Out-of-range numbers are not clamped for
-you on every field, so a value outside a range can throw the whole plan away."""
+you on every field, so a value outside a range can throw the whole plan away.
+
+WRITING BACK
+Some tasks are free-form messages from the planning model: a question, a draft it
+wants a second opinion on, a design it wants finished. Those come to you as normal
+prose and it is fine to answer in normal prose - it is being read by another model
+that will act on your answer. Give the actual design in full (concrete numbers,
+positions, key names), not advice about how to make one."""
 
 SPECS: dict[str, str] = {
     "map": """\
@@ -78,9 +85,27 @@ character_placements, camera_shots, face_expressions, search_queries.
               legs; a stall a counter, awning, poles and produce. Always set it.
               Building anchors should be 18-40 studs wide, 10-22 tall, 16-34 deep
               so the interior has room for furniture; a tree 6-14 wide, 6-18 tall.
-    shape     exactly one of: Block, Ball, Cylinder.
+    shape     one of: Block, Ball, Cylinder, Wedge (a triangle - roofs, ramps,
+              sails, kites), Prism (a tent/triangular prism), CornerWedge (a hip
+              roof), Cone, Pyramid, Torus, Ring, Hemisphere (a dome), Truss (a
+              lattice frame). Wedge, Prism, Cone, Pyramid, Torus, Ring,
+              Hemisphere and Truss are drawn as their real silhouette in the MP4.
     material  exactly one of: Plastic, SmoothPlastic, Concrete, Grass, Slate,
               Wood, Metal, Neon, Glass, Brick, Asphalt.
+    light     optional {"kind":"Point|Spot|Surface","color":[r,g,b],
+              "brightness":0-5,"range":0-60,"angle":0-180}. The Part becomes the
+              lamp; brightness and range are how bright and how far the pool of
+              light reaches, and the colour is free. 0 brightness means off.
+    effect    optional {"name":"gold sparkles","color":[r,g,b],"rate":0.05-1,
+              "size":0.05-6,"speed":0-12,"life":0.1-12,"gravity":-10-6,
+              "spread":0-1}. A particle effect anchored on that Part. "name" may be
+              any of 520 presets: 20 families (sparkles, glitter, stars, embers,
+              fire, flames, smoke, mist, fog, dust, pollen, confetti, snow, rain,
+              bubbles, hearts, petals, leaves, lightning, magic) x 26 colours
+              (gold, amber, copper, ember, red, crimson, rose, pink, magenta,
+              violet, indigo, blue, azure, cyan, teal, mint, emerald, lime, olive,
+              yellow, cream, white, silver, slate, brown, rainbow). rate is the
+              density, gravity is negative to fall and positive to rise.
     position  [x, y, z] in studs. x and z -250..250, y 0..250. y is the height of
               the part's CENTRE above the ground, so a 16-stud-tall wall sitting on
               the ground is y = 8, not 0 and not 16.
