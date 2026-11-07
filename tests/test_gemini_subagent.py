@@ -90,6 +90,96 @@ class RequestTests(unittest.TestCase):
         self.assertLess(prompt.index("(Note:"), prompt.index("Task kind:"))
 
 
+class WorkspaceGuideTests(unittest.TestCase):
+    """Gemini must know how the files it may edit actually work."""
+
+    def test_map_edits_get_the_blueprint_rules(self):
+        from gemini_workspace import guide
+
+        text = guide({"kind": "edit", "instruction": "fix the props",
+                      "apply_to": "dist/Roblox_Story_Map.json"})
+        self.assertIn("WORLD BLUEPRINT", text)
+        self.assertIn("exactly one of: Block, Ball, Cylinder", text)
+        self.assertIn("SmoothPlastic", text)
+        self.assertIn("multiples of 0.5", text)
+        self.assertIn("|x| + width/2 <= 320", text)
+
+    def test_camera_and_face_rules_come_with_the_blueprint(self):
+        from gemini_workspace import guide
+
+        text = guide({"kind": "edit", "instruction": "retime the close-up shots",
+                      "topic": "cameras"})
+        self.assertIn("CAMERA PLAN", text)
+        self.assertIn("WORLD BLUEPRINT", text)  # always shipped together
+        self.assertIn("1.6..4.0", text)
+        self.assertIn('"smooth" or "snap"', text)
+
+    def test_narration_edits_get_the_script_rules(self):
+        from gemini_workspace import guide
+
+        text = guide({"kind": "edit", "instruction": "cut to 200 words",
+                      "apply_to": "dist/narration.txt"})
+        self.assertIn("NARRATION TEXT", text)
+        self.assertIn("half sentence", text)
+
+    def test_code_and_model_rules(self):
+        from gemini_workspace import guide
+
+        code = guide({"kind": "code", "instruction": "write a tool to count props",
+                      "topic": "code"})
+        self.assertIn("Python 3.11", code)
+        self.assertIn("if __name__", code)
+        models = guide({"kind": "answer", "instruction": "what mesh format is users/normal.obj",
+                        "topic": "models"})
+        self.assertIn("AVATAR MODELS", models)
+        self.assertIn("never invent a mesh", models)
+
+    def test_every_file_task_is_told_to_return_the_whole_file(self):
+        from gemini_workspace import guide
+
+        text = guide({"kind": "edit", "instruction": "tidy the animation",
+                      "apply_to": "dist/animation.json"})
+        self.assertIn("HOW TO CHANGE FILES", text)
+        self.assertIn("Return the complete file, never a diff", text)
+        self.assertIn("R15 ANIMATION TRACK", text)
+
+    def test_a_path_does_not_drag_in_unrelated_rules(self):
+        from gemini_workspace import topics_for
+
+        # "Story" is in the file name, but a camera edit must not get the narration
+        # rules, and a narration edit must not get the camera rules.
+        self.assertEqual(
+            topics_for({"kind": "edit", "instruction": "retime the face beats",
+                        "apply_to": "dist/Roblox_Story_Map.json"}),
+            ["map", "cameras", "faces"])
+        self.assertEqual(
+            topics_for({"kind": "edit", "instruction": "cut to 200 words",
+                        "apply_to": "dist/narration.txt"}), ["narration"])
+
+    def test_the_console_says_which_rules_were_attached(self):
+        helper = (ROOT / "tools" / "gemini_subagent.py").read_text(encoding="utf-8")
+        self.assertIn("giving it the file rules", helper)
+
+    def test_a_plain_question_gets_no_file_manual(self):
+        from gemini_workspace import guide
+
+        self.assertEqual(guide({"kind": "answer", "instruction": "capital of France?"}), "")
+
+    def test_the_prompt_carries_the_manual_and_names_the_file(self):
+        prompt = build_prompt({"kind": "edit", "instruction": "fix the camera shots",
+                               "apply_to": "dist/Roblox_Story_Map.json"})
+        self.assertIn("REFERENCE FOR THE FILES IN THIS REPOSITORY", prompt)
+        self.assertIn("This answer replaces the file dist/Roblox_Story_Map.json.", prompt)
+        self.assertIn("complete new file contents", prompt)
+
+    def test_the_local_ai_can_name_the_topic(self):
+        from gemini_subagent import normalize_request
+
+        task = normalize_request({"tasks": [
+            {"kind": "edit", "instruction": "x", "topic": "Cameras"}]})["tasks"][0]
+        self.assertEqual(task["topic"], "cameras")
+
+
 class SafetyTests(unittest.TestCase):
     def test_only_writes_inside_the_workspace(self):
         with tempfile.TemporaryDirectory() as tmp:
