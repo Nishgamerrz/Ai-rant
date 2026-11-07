@@ -306,3 +306,101 @@ class WorkflowWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _TruncatingGemini(BaseHTTPRequestHandler):
+    """Hands back a half-finished reply the first time, like the real cut-off did."""
+
+    calls: list[dict] = []
+    plan: list[str] = []          # finishReason per call, e.g. ["MAX_TOKENS", "STOP"]
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        payload = json.loads(self.rfile.read(length))
+        type(self).calls.append(payload)
+        index = len(type(self).calls) - 1
+        plan = type(self).plan or ["STOP"]
+        reason = plan[index] if index < len(plan) else plan[-1]
+        text = "First half of the story, then it stops mid-sentence" if reason == "MAX_TOKENS" \
+            else "The complete narration, every word of it."
+        body = json.dumps({"candidates": [{"content": {"parts": [{"text": text}]},
+                                           "finishReason": reason}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class TruncationTests(unittest.TestCase):
+    """A half-written edit must never be written over the narration."""
+
+    def _server(self, plan):
+        handler = type("Handler", (_TruncatingGemini,), {"calls": [], "plan": plan})
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        return handler, f"http://127.0.0.1:{server.server_port}/v1beta/models/x:generateContent"
+
+    def test_a_cut_off_reply_is_retried_with_a_bigger_ceiling(self):
+        handler, url = self._server(["MAX_TOKENS", "STOP"])
+        result = run_tasks({"tasks": [{"kind": "answer", "instruction": "write it"}]},
+                           api_key="k", model="gemini-2.5-flash", root=Path("."), url=url)
+        self.assertTrue(result["results"][0]["ok"])
+        self.assertEqual(result["results"][0]["text"], "The complete narration, every word of it.")
+        first, second = handler.calls[0]["generationConfig"], handler.calls[1]["generationConfig"]
+        self.assertGreater(second["maxOutputTokens"], first["maxOutputTokens"])
+
+    def test_a_reply_that_never_stops_is_reported_not_applied(self):
+        handler, url = self._server(["MAX_TOKENS"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "dist").mkdir()
+            narration = root / "dist" / "narration.txt"
+            narration.write_text("a complete draft that works\n", encoding="utf-8")
+            result = run_tasks({"tasks": [{"kind": "edit", "instruction": "shorten",
+                                           "input": "draft",
+                                           "apply_to": "dist/narration.txt"}]},
+                               api_key="k", model="gemini-2.5-flash", root=root, url=url)
+            self.assertFalse(result["results"][0]["ok"])
+            self.assertIn("cut off", result["results"][0]["error"])
+            self.assertEqual(narration.read_text(encoding="utf-8"),
+                             "a complete draft that works\n")
+
+    def test_thinking_is_switched_off_so_the_budget_goes_on_the_words(self):
+        handler, url = self._server(["STOP"])
+        run_tasks({"tasks": [{"kind": "edit", "instruction": "shorten"}]},
+                  api_key="k", model="gemini-2.5-flash", root=Path("."), url=url)
+        config = handler.calls[0]["generationConfig"]
+        self.assertEqual(config["thinkingConfig"], {"thinkingBudget": 0})
+        self.assertGreaterEqual(config["maxOutputTokens"], 4096)
+
+    def test_a_model_without_thinking_control_is_not_sent_the_setting(self):
+        handler, url = self._server(["STOP"])
+        run_tasks({"tasks": [{"kind": "answer", "instruction": "hi"}]},
+                  api_key="k", model="gemini-1.5-flash", root=Path("."), url=url)
+        self.assertNotIn("thinkingConfig", handler.calls[0]["generationConfig"])
+
+
+class WorkflowWiringTests(unittest.TestCase):
+    def setUp(self):
+        self.workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    def test_the_delegation_block_can_actually_run(self):
+        # It used os.environ without importing os, so the task file was never
+        # written and every delegated task was silently dropped.
+        start = self.workflow.index("python - <<'PYD' || true")
+        block = self.workflow[start:self.workflow.index("\n          PYD", start)]
+        self.assertIn("import os", block)
+        self.assertIn("story_subagent_tasks.json", block)
+
+    def test_the_gemini_edit_cannot_overwrite_a_good_draft(self):
+        self.assertIn("'apply_to': 'dist/narration_gemini.txt'", self.workflow)
+        # dist/narration.txt is only replaced after the word-count gate passes.
+        gate = self.workflow.index("Gemini edit result")
+        move = self.workflow.index("mv dist/narration_gemini.txt dist/narration.txt")
+        self.assertLess(gate, move)

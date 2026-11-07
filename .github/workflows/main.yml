@@ -499,6 +499,7 @@ jobs:
           # simply continues with the first draft.
           python - <<'PYD' || true
           import json
+          import os
           from pathlib import Path
           try:
               payload = json.loads(Path('narration_response.json').read_text(encoding='utf-8'))
@@ -559,16 +560,17 @@ jobs:
               os.environ['MAX_WORDS'] + " words (aim for " + os.environ['TARGET_WORDS'] +
               "). Keep the same characters, the same events and a complete ending. Plain spoken "
               "English, no stage directions, no quotation marks around the whole text, and return "
-              "only the finished narration."
+              "the complete finished narration in one piece - do not stop part-way through."
           )
           Path('narration_edit_tasks.json').write_text(json.dumps({
               'context': 'Narration for a ' + os.environ['DURATION_SECONDS'] + '-second short.',
               'tasks': [{'id': 'narration-edit', 'kind': 'edit', 'instruction': instruction,
                          'input': draft, 'topic': 'narration',
-                         'apply_to': 'dist/narration.txt'}],
+                         'apply_to': 'dist/narration_gemini.txt'}],
           }), encoding='utf-8')
           PYE
               GEMINI_EDIT_DONE=1
+              rm -f dist/narration_gemini.txt
               python tools/gemini_subagent.py --request narration_edit_tasks.json \
                 --output narration_edit_results.json || true
               if python - <<'PYV'
@@ -576,8 +578,11 @@ jobs:
           import re
           import sys
           from pathlib import Path
-          path = Path('dist/narration.txt')
+          # The sub-agent writes to a side file: an edit that comes back short or
+          # mangled must never replace a draft that was already complete.
+          path = Path('dist/narration_gemini.txt')
           if not path.is_file():
+              print("Gemini left no edited file.")
               sys.exit(1)
           words = re.findall(r"\b[\w\u2019'-]+\b", path.read_text(encoding='utf-8'))
           low, high = int(os.environ['MIN_WORDS']), int(os.environ['MAX_WORDS'])
@@ -585,8 +590,11 @@ jobs:
           sys.exit(0 if low <= len(words) <= high else 1)
           PYV
               then
+                mv dist/narration_gemini.txt dist/narration.txt
                 python tools/say.py success "The Gemini sub-agent edited the narration to the right length; using it."
                 break
+              else
+                python tools/say.py warning "The Gemini edit did not fit ${MIN_WORDS}-${MAX_WORDS} words, so it was not used; the draft stands."
               fi
             fi
             if [ "$attempt" -eq 3 ]; then

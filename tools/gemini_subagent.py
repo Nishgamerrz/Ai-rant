@@ -166,17 +166,52 @@ def _extract_text(payload) -> str:
         return ""
 
 
+def _finish_reason(payload) -> str:
+    """Why Gemini stopped: "STOP", "MAX_TOKENS", "SAFETY", ..."""
+    try:
+        return str(payload["candidates"][0].get("finishReason") or "").upper()
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return ""
+
+
+def _generation_config(model: str, max_tokens: int, thinking_off: bool) -> dict:
+    """Ask for a complete answer, and stop the model burning the budget on thought.
+
+    Gemini 2.5 Flash reasons before it writes, and those reasoning tokens come
+    out of maxOutputTokens. With the old flat 2048 the model could spend the whole
+    budget thinking and hand back a third of the requested narration - which the
+    workflow then wrote into dist/narration.txt, cutting the story in half.
+    Thinking is switched off for these short mechanical jobs, and the ceiling is
+    high enough that a 220-word narration cannot be truncated.
+    """
+    config: dict = {"temperature": 0.4, "maxOutputTokens": max_tokens}
+    if thinking_off and "2.5" in model and "flash" in model:
+        config["thinkingConfig"] = {"thinkingBudget": 0}
+    return config
+
+
 def call_gemini(prompt: str, *, api_key: str, model: str = DEFAULT_MODEL,
                 timeout: float = 120.0, url: str | None = None) -> str:
-    """One Gemini call. Raises GeminiUnavailable on quota/auth/network trouble."""
+    """One Gemini call. Raises GeminiUnavailable on quota/auth/network trouble.
+
+    A reply that stopped at the token ceiling is never returned as an answer: an
+    edit that is silently cut in half would be written over the narration file.
+    It is retried once with double the ceiling, and then reported as a failure so
+    the workflow keeps the draft it already had.
+    """
     if not api_key:
         raise GeminiUnavailable("no API key configured")
-    body = json.dumps({
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 2048},
-    }).encode("utf-8")
     request_url = url or ENDPOINT.format(model=model)
-    for attempt in (1, 2):
+    max_tokens = 4096
+    thinking_off = True
+    attempt = 0
+    while attempt < 4:
+        attempt += 1
+        config = _generation_config(model, max_tokens, thinking_off)
+        body = json.dumps({
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": config,
+        }).encode("utf-8")
         request = urllib.request.Request(
             request_url, data=body,
             headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
@@ -185,17 +220,27 @@ def call_gemini(prompt: str, *, api_key: str, model: str = DEFAULT_MODEL,
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 payload = json.loads(response.read().decode("utf-8", "replace"))
             text = _extract_text(payload)
+            reason = _finish_reason(payload)
             if not text:
                 raise GeminiUnavailable("the response contained no text")
+            if reason == "MAX_TOKENS":
+                if max_tokens < 16384:
+                    max_tokens *= 2
+                    continue
+                raise GeminiUnavailable("the reply was cut off at the token ceiling")
             return text
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:200]
-            if exc.code in (429, 500, 503) and attempt == 1:
+            # Older models reject thinkingConfig outright; drop it and try again.
+            if exc.code == 400 and thinking_off and "think" in detail.lower():
+                thinking_off = False
+                continue
+            if exc.code in (429, 500, 503) and attempt <= 2:
                 time.sleep(3)
                 continue
             raise GeminiUnavailable(f"HTTP {exc.code}: {detail}") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            if attempt == 1:
+            if attempt <= 2:
                 time.sleep(2)
                 continue
             raise GeminiUnavailable(f"{type(exc).__name__}: {exc}") from exc
