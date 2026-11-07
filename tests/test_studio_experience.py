@@ -116,7 +116,7 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:$tokens}, messages:", workflow)
         self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:$tokens}}' > map_request.json", workflow)
         self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:900}}' > creation_summary_request.json", workflow)
-        self.assertIn("NARRATION_TOKENS=$((600 + DURATION_SECONDS * 5))", workflow)
+        self.assertIn("NARRATION_TOKENS=$((1200 + DURATION_SECONDS * 8))", workflow)
         for legacy in ("temperature:0.9,", "temperature:1.5,", "temperature:0.45,", "temperature:0.75,", "temperature:0.6,"):
             self.assertNotIn(legacy, workflow)
 
@@ -155,10 +155,14 @@ class StudioExperienceTests(unittest.TestCase):
 
     def test_slow_models_get_a_larger_request_budget(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
-        self.assertIn("smart_11b) AI_TIMEOUT=2600", workflow)
-        self.assertIn("hard) AI_TIMEOUT=1200", workflow)
+        # Slow presets are allowed to take as long as they need: the socket guard
+        # is hours, not minutes, and there is no wall-clock cap on any call.
+        self.assertIn("smart_11b) AI_TIMEOUT=9000", workflow)
+        self.assertIn("hard) AI_TIMEOUT=5400", workflow)
         self.assertIn('echo "AI_TIMEOUT=$AI_TIMEOUT" >> "$GITHUB_ENV"', workflow)
         self.assertEqual(workflow.count('--timeout "${AI_TIMEOUT:-900}"'), 4)
+        self.assertNotIn("--max-seconds", workflow)
+        self.assertNotIn("NARRATION_MAX", workflow)
 
     def test_workflow_streams_ai_output_and_supports_live_search(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
