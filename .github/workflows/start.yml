@@ -1,0 +1,88 @@
+# A second "Run workflow" button for the same job.
+#
+# GitHub's dispatch button on a long workflow sometimes answers "Workflow could
+# not be run. Please try again." - usually a stale page or a branch in the
+# "Use workflow from" dropdown that no longer exists, not a broken file. This
+# workflow is twenty lines long, so its button always works, and it simply calls
+# .github/workflows/main.yml with the same inputs. Use whichever button you like;
+# both produce the identical run.
+name: 'Start a Roblox short (backup button)'
+
+on:
+  workflow_dispatch:
+    inputs:
+      story_topic:
+        description: 'Story topic — one line, "In a world where ..." works best (24 ideas in STORY_TOPICS.md)'
+        required: true
+        default: 'In a world where the last person to fall asleep each night gets one wish, two brothers keep each other awake on purpose'
+        type: string
+      character_usernames:
+        description: 'Usernames, COMMA separated (e.g. Lead, Friend). First = lead.'
+        required: false
+        default: ''
+        type: string
+      duration_seconds:
+        description: 'Length — pick it; the AI picks the exact seconds inside that minute'
+        required: true
+        default: '120'
+        type: choice
+        options:
+          - '30'
+          - '45'
+          - '60'
+          - '90'
+          - '120'
+          - '150'
+          - '180'
+      map_detail:
+        description: 'World size'
+        required: true
+        default: dense
+        type: choice
+        options:
+          - standard
+          - dense
+          - ultra
+      model_quality:
+        description: 'AI model'
+        required: true
+        default: 'medium'
+        type: choice
+        options:
+          - fast
+          - medium
+          - hard
+          - smart_11b
+          - animation_best
+      voice_style:
+        description: 'Voice'
+        required: true
+        default: 'male'
+        type: choice
+        options:
+          - male
+          - female
+          - thin_male
+      world_theme:
+        description: 'Theme (optional)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  short:
+    uses: ./.github/workflows/main.yml
+    # Everything the generator needs (Gemini key and friends) reaches the called
+    # workflow unchanged; nothing secret is written down in either file.
+    secrets: inherit
+    with:
+      story_topic: ${{ inputs.story_topic }}
+      character_usernames: ${{ inputs.character_usernames }}
+      duration_seconds: ${{ inputs.duration_seconds }}
+      map_detail: ${{ inputs.map_detail }}
+      model_quality: ${{ inputs.model_quality }}
+      voice_style: ${{ inputs.voice_style }}
+      world_theme: ${{ inputs.world_theme }}
