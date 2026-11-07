@@ -21,11 +21,14 @@ sys.path.insert(0, str(ROOT / "tools"))
 from durations import (  # noqa: E402
     MAX_DURATION,
     MIN_DURATION,
+    SUGGESTED_DURATIONS,
     check_duration,
+    choose_from_selection,
     choose_length,
     format_duration,
     parse_duration,
     parse_spec,
+    selection_window,
 )
 
 
@@ -90,6 +93,48 @@ class WindowTests(unittest.TestCase):
         for spec in ("0-1m", "10-20m"):
             with self.assertRaises(ValueError, msg=spec):
                 parse_spec(spec)
+
+
+class DropdownPlusAiSecondsTests(unittest.TestCase):
+    """Pick the length from the menu; the AI picks the exact seconds."""
+
+    def test_menu_is_the_old_selection(self):
+        self.assertEqual(SUGGESTED_DURATIONS, (30, 45, 60, 90, 120, 150, 180))
+
+    def test_each_selection_stays_inside_its_own_minute(self):
+        expected = {
+            30: (30, 59), 45: (45, 59), 60: (60, 119), 90: (90, 119),
+            120: (120, 179), 150: (150, 179), 180: (180, 239),
+        }
+        for selection, window in expected.items():
+            self.assertEqual(selection_window(selection), window, msg=selection)
+
+    def test_pick_never_leaves_the_selected_minute(self):
+        for selection in SUGGESTED_DURATIONS:
+            low, high = selection_window(selection)
+            for seed in range(30):
+                seconds = choose_from_selection(selection, seed=seed)
+                self.assertGreaterEqual(seconds, low, msg=(selection, seconds))
+                self.assertLessEqual(seconds, high, msg=(selection, seconds))
+                self.assertNotEqual(seconds % 60, 0, "never a round minute")
+
+    def test_two_minutes_never_becomes_three(self):
+        for seed in range(40):
+            seconds = choose_from_selection(120, seed=seed)
+            self.assertLess(seconds, 180)
+            self.assertGreaterEqual(seconds, 120)
+
+    def test_pick_varies_between_runs(self):
+        picks = {choose_from_selection(120, seed=seed) for seed in range(60)}
+        self.assertGreater(len(picks), 5)
+
+    def test_same_seed_repeats_so_a_rerun_is_reproducible(self):
+        self.assertEqual(choose_from_selection(120, seed="abc"),
+                         choose_from_selection(120, seed="abc"))
+
+    def test_selection_accepts_the_strings_the_form_sends(self):
+        self.assertEqual(selection_window("120"), (120, 179))
+        self.assertEqual(selection_window("30"), (30, 59))
 
 
 class EveryToolAcceptsAnyLengthTests(unittest.TestCase):
@@ -231,23 +276,28 @@ class SharedRulesTests(unittest.TestCase):
             self.assertIn("from durations import", text, msg=name)
             self.assertNotIn("choices=(30, 45, 60)", text, msg=name)
 
-    def test_workflow_accepts_typed_and_windowed_lengths(self):
+    def test_workflow_form_is_a_length_menu_not_a_text_box(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
         start = workflow.index("duration_seconds:")
         block = workflow[start:workflow.index("map_detail:", start)]
-        self.assertIn("type: string", block)
-        self.assertNotIn("type: choice", block)
+        self.assertIn("type: choice", block)
+        self.assertNotIn("type: string", block)
+        self.assertEqual(
+            [int(value) for value in re.findall(r"^\s+- '(\d+)'$", block, re.MULTILINE)],
+            list(SUGGESTED_DURATIONS),
+        )
         self.assertIn("Let the AI pick the exact ending", workflow)
         self.assertIn("DURATION_LABEL=", workflow)
         self.assertIn("DURATION_WINDOW=", workflow)
         self.assertNotIn("DURATION_SECONDS: ${{ inputs.duration_seconds }}", workflow)
-        self.assertIn("choose_length(raw, seed=seed)", workflow)
+        self.assertIn("choose_from_selection(raw, seed=seed)", workflow)
+        self.assertIn("selection_window(raw)", workflow)
 
     def test_workflow_tells_the_ai_the_exact_ending(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
         self.assertIn("runs exactly ${DURATION_SECONDS} seconds (${DURATION_LABEL})", workflow)
         self.assertIn("The ending is a specific moment, not a round number", workflow)
-        self.assertIn("never a round minute", workflow)
+        self.assertIn("not on a round minute", workflow)
 
 
 if __name__ == "__main__":
