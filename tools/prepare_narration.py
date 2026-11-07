@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract a compact, bounded 30–60 second narration from Ollama output."""
+"""Extract a compact, bounded 30–180 second narration from Ollama output."""
 from __future__ import annotations
 
 import json

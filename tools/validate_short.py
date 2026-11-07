@@ -10,6 +10,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from durations import DURATIONS  # noqa: E402
+
 WORD_RE = re.compile(r"\b[\w’'-]+\b")
 META_RE = re.compile(r"\b(?:A\.I\.|AI|servers?|Roblox|avatars?|game mechanics?|generated)\b", re.I)
 SRT_RE = re.compile(
@@ -70,7 +73,7 @@ def main() -> None:
     parser.add_argument("--characters", type=Path)
     parser.add_argument("--profiles", type=Path)
     parser.add_argument("--map-plan", type=Path)
-    parser.add_argument("--duration", required=True, type=int, choices=(30, 45, 60, 90, 120, 150, 180))
+    parser.add_argument("--duration", required=True, type=int, choices=DURATIONS)
     args = parser.parse_args()
 
     for label, path in (("final MP4", args.video), ("silent render", args.silent_video),
