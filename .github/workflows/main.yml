@@ -1247,6 +1247,12 @@ jobs:
 
       - name: Render the complete vertical MP4 without Roblox Studio or Blender
         run: |
+          # A failed render used to leave nothing but "Process completed with exit
+          # code 1", and the runner's raw log cannot always be downloaded. Everything
+          # the renderer says is now kept, and on a failure the tail is written to the
+          # run summary and published with the still previews, so the next failure is
+          # diagnosable in one click instead of a guess.
+          set +e
           node tools/video_renderer/render_short.mjs \
             --map dist/Roblox_Story_Map.json \
             --characters dist/characters.json \
@@ -1255,8 +1261,23 @@ jobs:
             --captions dist/narration.srt \
             --face-animation always \
             --preview dist/preview \
-            --output dist/short_silent.mp4
-          test -s dist/short_silent.mp4
+            --output dist/short_silent.mp4 2>&1 | tee dist/render.log
+          RENDER_STATUS=${PIPESTATUS[0]}
+          set -e
+          if [ "$RENDER_STATUS" -ne 0 ] || [ ! -s dist/short_silent.mp4 ]; then
+            mkdir -p dist/preview
+            cp dist/render.log dist/preview/render_failure.log
+            {
+              echo "## The renderer failed"
+              echo
+              echo '```'
+              tail -n 80 dist/render.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            python tools/say.py error "The renderer exited with status $RENDER_STATUS; the last 80 lines are in the run summary."
+            exit 1
+          fi
+          grep -E "Frame audit|Projection probe|avatar|skinned" dist/render.log | tail -n 20 || true
           ffmpeg -hide_banner -y -i dist/short_silent.mp4 -i dist/narration.mp3 \
             -filter_complex "[1:a]apad=whole_dur=${DURATION_SECONDS},atrim=duration=${DURATION_SECONDS},loudnorm=I=-16:TP=-1.5:LRA=11[a]" \
             -map 0:v:0 -map '[a]' -c:v copy -aspect 9:16 -c:a aac -b:a 192k -t "$DURATION_SECONDS" \
