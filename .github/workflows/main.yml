@@ -1138,6 +1138,8 @@ jobs:
             echo "- World planning source: $(cat dist/map_source.txt); no fixed 100-Part cap, and the world includes the authentic-avatar cast, narration audio, and an overlay-free AI camera tour."
             echo "- A vertical H.264/AAC MP4 is rendered automatically in the Linux workflow with headless Three.js and FFmpeg; no local Roblox Studio or Blender run is needed."
             echo "- The AI plans and times every facial expression; the renderer animates a mouth that follows the narration and cuts to face close-ups like a Roblox story short."
+            echo "- The renderer measured its own frames before shipping: see the \`Projection probe\` and \`Frame audit\` lines in the render step, which fail the run on a stretched or black world."
+            echo "- Small PNG stills of that same footage are in the \`short-preview-stills\` artifact, and on the [media-preview branch](https://github.com/$GITHUB_REPOSITORY/tree/media-preview), so the look can be checked without downloading the MP4."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Free model RAM for the physics renderer
