@@ -154,6 +154,10 @@ jobs:
           RAW_WORLD_THEME: ${{ inputs.world_theme }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          # Fallback: when Gemini is out of quota, unreachable or broken, the
+          # sub-agent uses these free Groq models instead, then tries Gemini again.
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: ${{ vars.GROQ_MODEL }}
         run: |
           python tools/say.py tool "Cleaning the typed story prompt and theme with the Gemini sub-agent (spelling, grammar, a little more detail). It never says anything about the fix."
           python tools/gemini_topic.py \
@@ -614,6 +618,10 @@ jobs:
           STORY_TOPIC: ${{ steps.refine.outputs.story_topic || inputs.story_topic }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          # Fallback: when Gemini is out of quota, unreachable or broken, the
+          # sub-agent uses these free Groq models instead, then tries Gemini again.
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: ${{ vars.GROQ_MODEL }}
         run: |
           # Narration length scales with the exact length picked for this run.
           # The old budget assumed 1.6 words per second; the bright short-form read
@@ -724,7 +732,7 @@ jobs:
               python tools/say.py success "Narration passed the ${MAX_WORDS}-word hard cap on attempt ${attempt}."
               break
             fi
-            if [ "$GEMINI_EDIT_DONE" -eq 0 ] && [ -n "${GEMINI_API_KEY:-}" ]; then
+            if [ "$GEMINI_EDIT_DONE" -eq 0 ] && { [ -n "${GEMINI_API_KEY:-}" ] || [ -n "${GROQ_API_KEY:-}" ]; }; then
               python tools/say.py tool "Draft missed the length gate; asking the Gemini sub-agent to edit it to ${TARGET_WORDS} words."
               python - <<'PYE' || true
           import json
@@ -764,7 +772,7 @@ jobs:
           path = Path('dist/narration_gemini.txt')
           if not path.is_file():
               if Path('dist/gemini_quota_exhausted').is_file():
-                  print("Gemini is out of quota, so it did not edit the narration; "
+                  print("Neither Gemini nor the Groq fallback edited the narration; "
                         "the AI's own draft (and its own repair) stands.")
               else:
                   print("Gemini left no edited file.")
@@ -825,6 +833,10 @@ jobs:
           WORLD_THEME: ${{ steps.refine.outputs.world_theme || inputs.world_theme }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          # Fallback: when Gemini is out of quota, unreachable or broken, the
+          # sub-agent uses these free Groq models instead, then tries Gemini again.
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: ${{ vars.GROQ_MODEL }}
         run: |
           # The world plan reuses the same resident model as the story: no reload,
           # so it starts thinking immediately.
@@ -1007,10 +1019,11 @@ jobs:
               marker.write_text('sent', encoding='utf-8')
               print('The AI delegated nothing for the models, so the workflow sent the '
                     'required 1-2 finished model designs to the sub-agent itself.')
-          # Out of quota: sending the tasks would fail every one of them and then buy a
-          # fresh ten-minute re-plan for nothing. Keep the draft plan and let the AI ask
-          # for web research only.
-          if tasks and Path('dist/gemini_quota_exhausted').is_file():
+          # Out of quota AND no Groq fallback: sending the tasks would fail every one
+          # of them and then buy a fresh ten-minute re-plan for nothing, so keep the
+          # draft plan. With a Groq key the tasks still run - on the fallback.
+          if tasks and Path('dist/gemini_quota_exhausted').is_file() \
+                  and not os.environ.get('GROQ_API_KEY', '').strip():
               print('Gemini is out of quota for this run, so the delegated tasks are '
                     'skipped and the plan you already wrote stands.')
               tasks = []
@@ -1109,7 +1122,7 @@ jobs:
                 break
               fi
             done
-            if [ ! -f map_subagent_review.done ] && [ -f dist/gemini_quota_exhausted ]; then
+            if [ ! -f map_subagent_review.done ] && [ -f dist/gemini_quota_exhausted ] && [ -z "${GROQ_API_KEY:-}" ]; then
               python tools/say.py warning "Gemini is out of quota, so the required map/camera review could not run; the AI's own plan is used as-is and the run continues."
               touch map_subagent_review.done
             fi
