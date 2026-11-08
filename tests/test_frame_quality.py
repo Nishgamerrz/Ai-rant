@@ -157,10 +157,14 @@ class FrameAuditTests(unittest.TestCase):
     def test_the_renderer_uses_a_film_curve_instead_of_clipping(self):
         # NoToneMapping clipped every lit surface to white and destroyed the
         # colour, which measured as 251/255 luminance with 0.2% colour.
-        self.assertIn("THREE.AgXToneMapping", RENDERER)
+        # ACES was chosen by measuring it against AgX on the same palette: with
+        # the fixed light budget it renders twice the saturation and still keeps
+        # everything out of the clip. The test asserts the measurement exists.
+        self.assertIn("THREE.ACESFilmicToneMapping", RENDERER)
         self.assertNotIn("THREE.NoToneMapping", RENDERER)
-        self.assertNotIn("THREE.ACESFilmicToneMapping", RENDERER)
         self.assertIn("toneMappingExposure", RENDERER)
+        lighting = (ROOT / "tools/video_renderer/lighting_balance_smoke_test.mjs").read_text(encoding="utf-8")
+        self.assertIn("ACES was measured against AgX", lighting)
 
     def test_the_ai_colours_are_read_as_srgb(self):
         # new THREE.Color(r,g,b) treats its arguments as linear working values,

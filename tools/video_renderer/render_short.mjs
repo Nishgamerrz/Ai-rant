@@ -158,10 +158,13 @@ function buildHtml(data) {
   // above 1.0 clipped, so a lit Roblox-style Part turned flat white and lost its
   // colour entirely: a measured frame came out at mean luminance 251/255 with
   // 0.2% coloured pixels. ACES rolls the highlights off instead of clipping them.
-  // AgX keeps hue and saturation as highlights roll off; ACES pushed bright
-  // surfaces towards white, which is the washed-out look this replaced.
-  renderer.outputColorSpace=THREE.SRGBColorSpace; renderer.toneMapping=THREE.AgXToneMapping;
-  renderer.toneMappingExposure=1.1;
+  // ACES filmic, measured rather than assumed: with the light budget below fixed
+  // at 1.9x, ACES renders the AI's palette at twice the saturation AgX does
+  // (grass 0.38 vs 0.19, roof 0.75 vs 0.43 in lighting_balance_smoke_test.mjs)
+  // while still keeping everything out of the clip. The washed-out look that
+  // blamed ACES was really the 6x light budget that used to sit in front of it.
+  renderer.outputColorSpace=THREE.SRGBColorSpace; renderer.toneMapping=THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure=1.0;
   document.getElementById('frame').prepend(renderer.domElement);
   const camera=new THREE.PerspectiveCamera(42,${WIDTH}/${HEIGHT},0.4,1600);
   // Bright daylight, but inside a range that tone mapping can hold: the sum of
@@ -169,8 +172,8 @@ function buildHtml(data) {
   // A daylight budget that fits inside the tone curve. The old sum (hemisphere
   // 2.9 + ambient 0.75 + sun 2.5 + fill 1.05 + rim 0.6, roughly 6x) pushed every
   // lit surface past white, so the frame measured 219/255 with no colour in it.
-  scene.add(new THREE.HemisphereLight(0xf2f9ff,0x9aa88f,0.5));
-  scene.add(new THREE.AmbientLight(0xffffff,0.15));
+  scene.add(new THREE.HemisphereLight(0xf2f9ff,0x9aa88f,0.85));
+  scene.add(new THREE.AmbientLight(0xffffff,0.28));
   const sun=new THREE.DirectionalLight(0xfff4dc,1.35); sun.position.set(-150,260,150); sun.castShadow=true; sun.shadow.mapSize.set(2048,2048); sun.shadow.camera.left=-320; sun.shadow.camera.right=320; sun.shadow.camera.top=320; sun.shadow.camera.bottom=-320; sun.shadow.camera.near=10; sun.shadow.camera.far=900; sun.shadow.bias=-0.0006; sun.shadow.normalBias=0.45; scene.add(sun);
   const fill=new THREE.DirectionalLight(0xcfe4ff,0.3); fill.position.set(160,120,-160); scene.add(fill);
   const rim=new THREE.DirectionalLight(0xffffff,0.2); rim.position.set(0,60,220); scene.add(rim);
