@@ -85,7 +85,7 @@ class NoStretchTests(unittest.TestCase):
 
     def test_the_start_of_run_preflight_also_refuses_a_black_or_grey_picture(self):
         preflight = RENDERER.split("async function preflight(")[1]
-        self.assertIn("window.measureFrame()", preflight)
+        self.assertIn("await measureJpeg(shot)", preflight)
         # The same thresholds as the sampled audit, so the two cannot disagree.
         self.assertIn("health.blackFraction > 0.55", preflight)
         self.assertIn("health.colourFraction < 0.05", preflight)
@@ -103,10 +103,16 @@ class NoStretchTests(unittest.TestCase):
 
 
 class FrameAuditTests(unittest.TestCase):
-    def test_the_page_can_measure_the_frame_it_drew(self):
-        self.assertIn("window.measureFrame", RENDERER)
+    def test_the_audit_measures_the_pixels_that_are_encoded(self):
         for key in ("meanLuminance", "blackFraction", "colourFraction", "centreBlackFraction"):
             self.assertIn(key, RENDERER)
+        # Reading a WebGL canvas back from a separate task returns an empty
+        # buffer, which reported a bright frame as 100% black. The audit decodes
+        # the exact JPEG that is piped into ffmpeg instead.
+        self.assertIn("async function measureJpeg(jpeg)", RENDERER)
+        self.assertNotIn("window.measureFrame", RENDERER)
+        self.assertIn("const stats=await measureJpeg(jpeg)", RENDERER)
+        self.assertIn("...await measureJpeg(shot)", RENDERER)
 
     def test_the_renderer_reports_the_audit(self):
         self.assertIn("Frame audit over", RENDERER)
@@ -147,3 +153,26 @@ class FrameAuditTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EncodedFrameMeasurementTests(unittest.TestCase):
+    """The audit must read the shipped pixels, and must not invent a black world.
+
+    A WebGL canvas read back from a different task is empty once the compositor
+    has cleared it. That is what reported a bright preflight frame as "100% pure
+    black" and stopped two real runs, so the reader itself is checked here.
+    """
+
+    def test_the_measurer_decodes_raw_pixels_through_ffmpeg(self):
+        body = RENDERER.split("async function measureJpeg(jpeg)", 1)[1].split("async function preflight(", 1)[0]
+        self.assertIn("'-f', 'image2pipe'", body)
+        self.assertIn("'-pix_fmt', 'rgb24'", body)
+        self.assertIn("'-f', 'rawvideo'", body)
+        self.assertIn("PROBE_WIDTH * PROBE_HEIGHT * 3", body)
+
+    def test_a_failed_decode_is_an_error_not_a_black_frame(self):
+        body = RENDERER.split("async function measureJpeg(jpeg)", 1)[1].split("const BASE_ARGS", 1)[0]
+        self.assertIn("could not measure a rendered frame", body)
+        self.assertIn("raw.length}/${expected} bytes", body)
+        # Silence would turn a broken probe into a mysterious "the world is black".
+        self.assertNotIn("catch", body)

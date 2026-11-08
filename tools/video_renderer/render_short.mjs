@@ -655,37 +655,6 @@ function buildHtml(data) {
       captions:captions.length};
     renderer.compile(scene,camera);return true;
   });
-  // Measure the frame that was just drawn: how bright it is, how much of it is
-  // pure black, how colourful it is, and how black the middle of the shot is.
-  // A world whose materials silently failed renders as black silhouettes, and
-  // that used to be discovered only by watching the finished MP4.
-  window.measureFrame=()=>{
-    const probe=document.createElement('canvas');
-    probe.width=180;probe.height=320;
-    const ctx=probe.getContext('2d',{willReadFrequently:true});
-    ctx.drawImage(renderer.domElement,0,0,probe.width,probe.height);
-    const {data}=ctx.getImageData(0,0,probe.width,probe.height);
-    let sum=0,black=0,bright=0,colourful=0,centreDark=0,centreCount=0;
-    const pixels=probe.width*probe.height;
-    const centreColumn=probe.width/2;
-    for(let i=0;i<data.length;i+=4){
-      const r=data[i],g=data[i+1],b=data[i+2];
-      const l=.2126*r+.7152*g+.0722*b;
-      sum+=l;
-      if(l<26)black+=1;
-      if(l>232)bright+=1;
-      if(Math.max(r,g,b)-Math.min(r,g,b)>42)colourful+=1;
-      const column=(i/4)%probe.width;
-      if(Math.abs(column-centreColumn)<=45){centreCount+=1;if(l<26)centreDark+=1;}
-    }
-    return {
-      meanLuminance:Number((sum/pixels).toFixed(1)),
-      blackFraction:Number((black/pixels).toFixed(3)),
-      brightFraction:Number((bright/pixels).toFixed(3)),
-      colourFraction:Number((colourful/pixels).toFixed(3)),
-      centreBlackFraction:Number((centreDark/Math.max(1,centreCount)).toFixed(3))
-    };
-  };
   // Captions follow the narration's own SRT cues: the line on screen is the line
   // being spoken. A cue pops in slightly small and settles within a tenth of a
   // second, the way story shorts animate their text.
@@ -804,6 +773,53 @@ async function writeFrame(stream, png) {
   if (!stream.write(png)) await once(stream, 'drain');
 }
 
+// Measure the pixels that actually go into the MP4, not the WebGL drawing buffer.
+//
+// Reading a WebGL canvas back from a separate JavaScript task returns an empty
+// buffer once the compositor has cleared it, which made a perfectly bright frame
+// measure as 100% black. These are the exact JPEG bytes that are piped to ffmpeg,
+// decoded with the same ffmpeg that encodes them and downsampled to 180x320, so
+// the audit describes the shipped picture.
+const PROBE_WIDTH = 180;
+const PROBE_HEIGHT = 320;
+async function measureJpeg(jpeg) {
+  const probe = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'image2pipe',
+    '-vcodec', 'mjpeg', '-i', 'pipe:0', '-vf', `scale=${PROBE_WIDTH}:${PROBE_HEIGHT}`,
+    '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1'], { stdio: ['pipe', 'pipe', 'inherit'] });
+  const chunks = [];
+  probe.stdout.on('data', chunk => chunks.push(chunk));
+  const exit = once(probe, 'close');
+  probe.stdin.end(jpeg);
+  const [code] = await exit;
+  const raw = Buffer.concat(chunks);
+  const expected = PROBE_WIDTH * PROBE_HEIGHT * 3;
+  if (code !== 0 || raw.length < expected) {
+    throw new Error(`could not measure a rendered frame: ffmpeg exited ${code} with ${raw.length}/${expected} bytes`);
+  }
+  let sum = 0, black = 0, bright = 0, colourful = 0, centreDark = 0, centreCount = 0;
+  const pixels = PROBE_WIDTH * PROBE_HEIGHT;
+  const centreColumn = PROBE_WIDTH / 2;
+  for (let i = 0, pixel = 0; i < expected; i += 3, pixel += 1) {
+    const r = raw[i], g = raw[i + 1], b = raw[i + 2];
+    const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    sum += l;
+    if (l < 26) black += 1;
+    if (l > 232) bright += 1;
+    if (Math.max(r, g, b) - Math.min(r, g, b) > 42) colourful += 1;
+    if (Math.abs((pixel % PROBE_WIDTH) - centreColumn) <= 45) {
+      centreCount += 1;
+      if (l < 26) centreDark += 1;
+    }
+  }
+  return {
+    meanLuminance: Number((sum / pixels).toFixed(1)),
+    blackFraction: Number((black / pixels).toFixed(3)),
+    brightFraction: Number((bright / pixels).toFixed(3)),
+    colourFraction: Number((colourful / pixels).toFixed(3)),
+    centreBlackFraction: Number((centreDark / Math.max(1, centreCount)).toFixed(3))
+  };
+}
+
 // Prove the whole render path works - the page template, Chromium, WebGL, Three.js,
 // Rapier, the physics step and the screenshot - before the workflow spends an hour
 // planning a world. Every historical failure of this renderer (a stray backtick in
@@ -890,7 +906,7 @@ async function preflight(plan) {
     if (shot.length < 4096) throw new Error(`the rendered frame is only ${shot.length} bytes; the scene is blank`);
     // Catch a stretching or black world at the start of the run, not after it.
     stage = 'measure the picture';
-    const health = await page.evaluate(() => ({ projection: window.probeProjection(), ...window.measureFrame() }));
+    const health = { projection: await page.evaluate(() => window.probeProjection()), ...await measureJpeg(shot) };
     // The runner turns this into an annotation, so the numbers survive even when
     // the raw job log cannot be opened.
     console.log(`::notice title=Render preflight picture::${health.projection.canvas[0]}x${health.projection.canvas[1]} canvas, `
@@ -1014,7 +1030,7 @@ async function main() {
       const jpeg=await page.screenshot({type:'jpeg',quality:92,timeout:30000});
       await writeFrame(ffmpeg.stdin,jpeg);
       if(previewFrame.has(frame)||frame%Math.round(FPS*15)===0){
-        const stats=await page.evaluate(()=>window.measureFrame());
+        const stats=await measureJpeg(jpeg);
         const shotProjection=await page.evaluate(()=>window.probeProjection());
         if(Math.abs(shotProjection.stretch-1)>0.02){
           throw new Error(`Shot at t=${time.toFixed(1)}s is stretched: ${shotProjection.pixelsPerUnitX}px across vs ${shotProjection.pixelsPerUnitY}px tall per world unit (ratio ${shotProjection.stretch}, expected 1).`);
