@@ -15,7 +15,8 @@
     "test:page-template": "node template_check.mjs",
     "test:projection": "node projection_smoke_test.mjs",
     "test:map-features": "node map_features_smoke_test.mjs",
-    "test:part-colour": "node part_colour_smoke_test.mjs"
+    "test:part-colour": "node part_colour_smoke_test.mjs",
+    "test:lighting": "node lighting_balance_smoke_test.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "0.21.0",

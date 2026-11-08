@@ -42,6 +42,7 @@ jobs:
           npm run test:projection
           npm run test:page-template
           npm run test:part-colour
+          npm run test:lighting
           npm run test:map-features
 
       - name: Install and smoke-test the RBXM parser
