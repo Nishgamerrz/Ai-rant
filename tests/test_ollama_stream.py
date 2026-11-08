@@ -571,6 +571,53 @@ class ThroughputTests(unittest.TestCase):
                        30, True, min_tps=0.001, tps_window=30.0)
         self.assertIn("Maya found it", result["response"])
 
+    def test_a_call_projected_to_take_an_hour_is_handed_over_early(self):
+        """A trickle that never stalls can still eat the whole run.
+
+        qwen3:14b needs about two tokens per second on a CPU runner, which is
+        fifty minutes for a 6000-token world plan. Nobody is stuck and no rate
+        floor is breached, so the finish time is projected from the measured rate
+        instead and the call is handed over.
+        """
+        sys.path.insert(0, str(ROOT / "tools"))
+        from ollama_stream import ModelTooSlow, stream
+
+        handler = type("Handler", (_SlowTrickle,), {"calls": []})
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        request = {"model": "qwen3:14b", "messages": [{"role": "user", "content": "hi"}],
+                   "think": True, "options": {"num_predict": 6000}}
+        with self.assertRaises(ModelTooSlow) as caught:
+            stream(request, f"http://127.0.0.1:{server.server_port}/api/chat", "world plan",
+                   30, True, tps_window=0.5, projected_seconds=30.0)
+        message = str(caught.exception)
+        self.assertIn("projected", message)
+        self.assertIn("6000 tokens", message)
+
+    def test_a_quick_call_is_not_interrupted_by_the_projection(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from ollama_stream import stream
+
+        handler = type("Handler", (_PieceByPiece,), {})
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        request = {"model": "qwen3:8b", "messages": [{"role": "user", "content": "hi"}],
+                   "think": True, "options": {"num_predict": 4000}}
+        result = stream(request, f"http://127.0.0.1:{server.server_port}/api/chat", "story",
+                       30, True, tps_window=0.01, projected_seconds=3600.0)
+        self.assertIn("Maya found it", result["response"])
+
+    def test_every_ai_call_gets_the_projection_budget(self):
+        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+        self.assertIn("AI_PROJECTED_SECONDS: '1500'", workflow)
+        # Every streaming call must carry it, or one slow step still eats the run.
+        self.assertEqual(workflow.count('--stall-seconds "${AI_STALL:-900}"'),
+                         workflow.count('--projected-seconds "${AI_PROJECTED_SECONDS:-1500}"'))
+
     def test_the_job_sets_a_floor_and_a_window(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
         self.assertIn("AI_MIN_TPS: '1.2'", workflow)

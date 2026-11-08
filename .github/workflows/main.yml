@@ -130,6 +130,13 @@ jobs:
       # is still allowed to finish.
       AI_MIN_TPS: '1.2'
       AI_TPS_WINDOW: '90'
+      # ...and a trickle above that floor can still take an hour: a 14B model at
+      # 2 tokens/s needs fifty minutes for a 6000-token world plan. Once the rate
+      # is measurable, the finish time is projected from it, and a call that would
+      # land later than this hands over to the fallback model. This is a projection
+      # from measured progress, not a wall clock, so a model that is genuinely
+      # working is never interrupted; one that is not cannot eat the render.
+      AI_PROJECTED_SECONDS: '1500'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -573,6 +580,7 @@ jobs:
             --output narration_response.json --label "story narration" \
             --timeout "${AI_TIMEOUT:-900}" \
             --stall-seconds "${AI_STALL:-900}" \
+            --projected-seconds "${AI_PROJECTED_SECONDS:-1500}" \
             --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}"
           # A delegated task from the story call is answered once, then the story is
           # asked again with the answers. Never fatal: if Gemini is missing the run
@@ -624,6 +632,7 @@ jobs:
               --output narration_response.json --label "story + sub-agent answers" \
               --timeout "${AI_TIMEOUT:-900}" \
               --stall-seconds "${AI_STALL:-900}" \
+            --projected-seconds "${AI_PROJECTED_SECONDS:-1500}" \
               --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}" || true
           fi
           GEMINI_EDIT_DONE=0
@@ -714,6 +723,7 @@ jobs:
               --output narration_response.json --label "narration repair ${attempt}" \
               --timeout "${AI_TIMEOUT:-900}" \
               --stall-seconds "${AI_STALL:-900}" \
+            --projected-seconds "${AI_PROJECTED_SECONDS:-1500}" \
               --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}"
           done
           test -s dist/narration.txt
@@ -804,6 +814,7 @@ jobs:
               --output map_response.json --label "world + camera + face plan ${attempt}" \
               --timeout "${AI_TIMEOUT:-900}" \
               --stall-seconds "${AI_STALL:-900}" \
+            --projected-seconds "${AI_PROJECTED_SECONDS:-1500}" \
               --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}" || curl_status=$?
             if [ "$curl_status" -ne 0 ]; then
               python tools/say.py warning "Map request failed with curl exit ${curl_status}."
@@ -887,6 +898,7 @@ jobs:
                 --label "world plan + AI help round ${helper_round}" \
                 --timeout "${AI_TIMEOUT:-900}" \
                 --stall-seconds "${AI_STALL:-900}" \
+            --projected-seconds "${AI_PROJECTED_SECONDS:-1500}" \
                 --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}" || break
             done
             validation_status=0
@@ -1262,6 +1274,7 @@ jobs:
           python tools/ollama_stream.py --request creation_summary_request.json \
             --output creation_summary_response.json --label "creation summary" \
             --timeout 3600 --stall-seconds "${AI_STALL:-900}" \
+            --projected-seconds "${AI_PROJECTED_SECONDS:-1500}" \
             --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}"
           python - <<'PY'
           from pathlib import Path
