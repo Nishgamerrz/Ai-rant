@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -468,3 +469,116 @@ class SubAgentIsOptionalTests(unittest.TestCase):
                            cwd=work, env={**os.environ, "DURATION_SECONDS": "133"})
             written = json.loads((work / "story_subagent_tasks.json").read_text(encoding="utf-8"))
             self.assertEqual([task["id"] for task in written["tasks"]], ["t1"])
+
+
+_QUOTA_MARKER_ENV = "GEMINI_QUOTA_MARKER"
+
+
+class _QuotaGemini(BaseHTTPRequestHandler):
+    """Refuses every call the way a free key out of quota does."""
+
+    calls: list[dict] = []
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        type(self).calls.append({"at": time.monotonic()})
+        body = json.dumps({"error": {"code": 429, "status": "RESOURCE_EXHAUSTED",
+                                     "message": "You exceeded your current quota"}}).encode()
+        self.send_response(429)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class QuotaTests(unittest.TestCase):
+    """A 429 must cost one request, not a retry storm, and never fail the run."""
+
+    def setUp(self):
+        # The marker goes to a temp path: a stray dist/gemini_quota_exhausted in the
+        # repository would make every later test believe the quota was already gone.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.marker = Path(tmp.name) / "gemini_quota_exhausted"
+        previous = os.environ.get(_QUOTA_MARKER_ENV)
+        os.environ[_QUOTA_MARKER_ENV] = str(self.marker)
+        self.addCleanup(lambda: os.environ.pop(_QUOTA_MARKER_ENV, None) if previous is None
+                        else os.environ.__setitem__(_QUOTA_MARKER_ENV, previous))
+        handler = type("Handler", (_QuotaGemini,), {"calls": []})
+        self.server = HTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.shutdown)
+        self.addCleanup(self.server.server_close)
+        self.url = f"http://127.0.0.1:{self.server.server_port}/v1beta/models/x:generateContent"
+        self.handler = handler
+
+    def test_a_429_stops_at_once_and_leaves_a_marker(self):
+        started = time.monotonic()
+        result = run_tasks({"tasks": [
+            {"id": "t1", "kind": "answer", "instruction": "one"},
+            {"id": "t2", "kind": "answer", "instruction": "two"},
+        ]}, api_key="k", model="m", root=Path("."), url=self.url)
+        self.assertLess(time.monotonic() - started, 20, "429 must not be retried with sleeps")
+        self.assertEqual(len(self.handler.calls), 1, "only the first task may hit the API")
+        self.assertTrue(result["quota_exhausted"])
+        self.assertEqual([entry["ok"] for entry in result["results"]], [False, False])
+        self.assertIn("quota", result["results"][0]["error"])
+        self.assertTrue(self.marker.is_file())
+
+    def test_later_requests_do_not_touch_the_network(self):
+        run_tasks({"tasks": [{"kind": "answer", "instruction": "one"}]},
+                  api_key="k", model="m", root=Path("."), url=self.url)
+        self.assertEqual(len(self.handler.calls), 1)
+        again = run_tasks({"tasks": [{"kind": "answer", "instruction": "two"}]},
+                          api_key="k", model="m", root=Path("."), url=self.url)
+        self.assertEqual(len(self.handler.calls), 1, "the marker must short-circuit it")
+        self.assertTrue(again["quota_exhausted"])
+
+    def test_the_command_line_still_exits_zero(self):
+        request = self.marker.parent / "request.json"
+        request.write_text(json.dumps({"tasks": [{"kind": "answer", "instruction": "x"}]}),
+                           encoding="utf-8")
+        output = self.marker.parent / "out.json"
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "gemini_subagent.py"),
+             "--request", str(request), "--output", str(output), "--url", self.url],
+            cwd=self.marker.parent, env={**os.environ, "GEMINI_API_KEY": "k"},
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-800:])
+        self.assertIn("quota", proc.stdout.lower())
+        self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["quota_exhausted"], True)
+
+
+class QuotaWorkflowTests(unittest.TestCase):
+    def test_the_workflow_skips_the_required_tasks_instead_of_replanning(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("Path('dist/gemini_quota_exhausted').is_file()", text)
+        self.assertIn("skipped and the plan you already wrote stands", text)
+        self.assertIn("out of quota, so the required map/camera review could not run", text)
+        self.assertIn("Gemini is out of quota, so it did not edit the narration", text)
+
+
+class StaleMarkerTests(unittest.TestCase):
+    """A marker from yesterday must not switch the sub-agent off today."""
+
+    def test_an_old_marker_is_ignored_and_removed(self):
+        import gemini_subagent
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "m"
+            marker.write_text("old", encoding="utf-8")
+            old = time.time() - (gemini_subagent.QUOTA_MARKER_HOURS + 1) * 3600
+            os.utime(marker, (old, old))
+            previous = os.environ.get(_QUOTA_MARKER_ENV)
+            os.environ[_QUOTA_MARKER_ENV] = str(marker)
+            try:
+                self.assertFalse(gemini_subagent.quota_is_exhausted())
+                self.assertFalse(marker.exists())
+            finally:
+                if previous is None:
+                    os.environ.pop(_QUOTA_MARKER_ENV, None)
+                else:
+                    os.environ[_QUOTA_MARKER_ENV] = previous

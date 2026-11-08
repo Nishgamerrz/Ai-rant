@@ -88,6 +88,68 @@ class GeminiUnavailable(Exception):
     """Raised when the key is missing, the quota is gone, or the API errors."""
 
 
+class QuotaExhausted(GeminiUnavailable):
+    """The free Gemini key has no quota left.
+
+    Retrying is pointless: the quota is per project and per day, so every later
+    call in this run would fail the same way - run #99 spent minutes watching a
+    429 come back while the story step waited. The first 429 sets a marker file
+    and every following call returns at once, without touching the network.
+    """
+
+
+# Where the marker lives. It is a file so it survives between workflow steps,
+# which each start a fresh Python process.
+QUOTA_MARKER = Path("dist/gemini_quota_exhausted")
+
+
+def marker_path(root: Path | None = None) -> Path:
+    # An env override keeps tests (and a caller with its own workspace) away from
+    # the repository's dist/ folder.
+    override = os.environ.get("GEMINI_QUOTA_MARKER", "").strip()
+    if override:
+        return Path(override)
+    return (root or Path.cwd()) / QUOTA_MARKER
+
+
+# The free quota comes back, so a marker is only trusted for the rest of the day
+# it was written in. Without this, one bad run could leave a file behind that
+# silently switched the sub-agent off for every later run.
+QUOTA_MARKER_HOURS = 12
+
+
+def quota_is_exhausted(root: Path | None = None) -> bool:
+    try:
+        path = marker_path(root)
+        if not path.is_file():
+            return False
+        age_hours = (time.time() - path.stat().st_mtime) / 3600
+        if age_hours > QUOTA_MARKER_HOURS:
+            path.unlink(missing_ok=True)
+            print(f"[gemini sub-agent] ignoring a {age_hours:.0f}h-old quota marker; "
+                  f"the free quota has reset in the meantime.", flush=True)
+            return False
+        return True
+    except OSError:
+        return False
+
+
+def mark_quota_exhausted(detail: str, root: Path | None = None) -> None:
+    """Remember for the rest of the run that Gemini has no quota left."""
+    path = marker_path(root)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(" ".join(str(detail).split())[:400] + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    # GitHub renders this with a title, so the reason is visible in the run summary.
+    print(f"::warning title=Gemini quota exhausted::The free Gemini key has no quota "
+          f"left ({' '.join(str(detail).split())[:200]}). Every remaining sub-agent "
+          f"call in this run is skipped so the render is not held up; the run "
+          f"continues with the AI's own work. Add quota or a fresh GEMINI_API_KEY to "
+          f"use the sub-agent again.", flush=True)
+
+
 def _clean_task(task, index: int) -> dict | None:
     if not isinstance(task, dict):
         return None
@@ -204,6 +266,8 @@ def call_gemini(prompt: str, *, api_key: str, model: str = DEFAULT_MODEL,
     """
     if not api_key:
         raise GeminiUnavailable("no API key configured")
+    if quota_is_exhausted():
+        raise QuotaExhausted("Gemini quota was already exhausted in this run")
     request_url = url or ENDPOINT.format(model=model)
     max_tokens = 4096
     thinking_off = True
@@ -238,7 +302,11 @@ def call_gemini(prompt: str, *, api_key: str, model: str = DEFAULT_MODEL,
             if exc.code == 400 and thinking_off and "think" in detail.lower():
                 thinking_off = False
                 continue
-            if exc.code in (429, 500, 503) and attempt <= 2:
+            # 429 is a quota wall, not a hiccup: stop at once and remember it.
+            if exc.code == 429:
+                mark_quota_exhausted(detail or "HTTP 429")
+                raise QuotaExhausted(f"HTTP 429: {detail}") from exc
+            if exc.code in (500, 503) and attempt <= 2:
                 time.sleep(3)
                 continue
             raise GeminiUnavailable(f"HTTP {exc.code}: {detail}") from exc
@@ -276,10 +344,16 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
                     f"skipping {len(request.get('tasks', []))} delegated task(s) and "
                     f"continuing.", "warning"), flush=True)
     started_all = time.monotonic()
+    quota_gone = quota_is_exhausted(root)
     for task in request.get("tasks", []):
         if skipped:
             results.append({"id": task["id"], "kind": task["kind"], "ok": False,
                             "error": "no API key"})
+            continue
+        if quota_gone:
+            # One line for the whole request instead of one failure per task.
+            results.append({"id": task["id"], "kind": task["kind"], "ok": False,
+                            "error": "Gemini quota exhausted; skipped"})
             continue
         print(paint(f"[gemini sub-agent] {task['kind']} task {task['id']} -> {model}: "
                     f"{task['instruction'][:100]}", "tool"), flush=True)
@@ -292,6 +366,16 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
         try:
             text = call_gemini(build_prompt(task, request.get("context", "")),
                                api_key=api_key, model=model, timeout=timeout, url=url)
+        except QuotaExhausted as exc:
+            print(paint(f"[gemini sub-agent] out of quota ({exc}); skipping the rest "
+                        f"of this request and letting the run continue.", "warning"),
+                  flush=True)
+            results.append({"id": task["id"], "kind": task["kind"], "ok": False,
+                            "seconds": round(time.monotonic() - started, 1),
+                            "error": "Gemini quota exhausted; skipped"})
+            quota_gone = True
+            mark_quota_exhausted(str(exc), root)
+            continue
         except GeminiUnavailable as exc:
             print(paint(f"[gemini sub-agent] task {task['id']} failed ({exc}); "
                         f"continuing without it.", "error"), file=sys.stderr, flush=True)
@@ -325,6 +409,7 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
                     f"({touched}).", "success"), flush=True)
         results.append(entry)
     return {"model": model, "skipped": skipped,
+            "quota_exhausted": quota_gone,
             "seconds": round(time.monotonic() - started_all, 1),
             "results": results}
 
@@ -368,6 +453,11 @@ def main() -> None:
         lines = ["## Gemini sub-agent", ""]
         if result["skipped"]:
             lines.append(f"- No `{API_KEY_ENV}` secret configured, so delegated tasks were skipped.")
+        if result.get("quota_exhausted"):
+            lines.append("- **The free Gemini key is out of quota for today**, so every "
+                         "remaining sub-agent task was skipped and the run continued with "
+                         "the AI's own work. Add quota or a fresh `GEMINI_API_KEY` to use "
+                         "the sub-agent again.")
         for entry in result["results"]:
             if entry.get("ok"):
                 text = " ".join(str(entry.get("text", "")).split())[:300]
