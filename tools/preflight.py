@@ -39,6 +39,11 @@ def ok(message: str) -> None:
 def fail(message: str) -> None:
     FAILURES.append(message)
     print(f"  FAIL {message}", flush=True)
+    # A GitHub runner shows this on the run page as an annotation, and the
+    # annotations API can read it back - the only way to see why a job failed
+    # when the raw job log sits behind a storage URL that will not open.
+    summary = " ".join(message.split())
+    print(f"::error title=Preflight failed::{summary[:900]}", flush=True)
 
 
 def check(label: str, fn) -> None:

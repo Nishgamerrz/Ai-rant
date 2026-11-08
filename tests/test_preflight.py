@@ -139,6 +139,26 @@ class DefaultTopicTests(unittest.TestCase):
         self.assertIn(default, topics)
 
 
+class FailureIsVisibleWithoutTheJobLog(unittest.TestCase):
+    """A failed job's raw log sits behind a storage URL that often will not open.
+
+    GitHub still exposes annotations through the API, so every failed check has to
+    emit one, and the renderer has to report its frame numbers the same way.
+    """
+
+    def test_every_preflight_failure_becomes_an_annotation(self):
+        source = (ROOT / "tools/preflight.py").read_text(encoding="utf-8")
+        self.assertIn("::error title=Preflight failed::", source)
+        # The annotation is emitted inside fail(), so it cannot be forgotten at a
+        # new call site.
+        body = source.split("def fail(message: str) -> None:", 1)[1].split("def check(", 1)[0]
+        self.assertIn("::error title=Preflight failed::", body)
+
+    def test_the_renderer_reports_its_picture_numbers_as_an_annotation(self):
+        renderer = (ROOT / "tools/video_renderer/render_short.mjs").read_text(encoding="utf-8")
+        self.assertIn("::notice title=Render preflight picture::", renderer)
+
+
 if __name__ == "__main__":
     unittest.main()
 

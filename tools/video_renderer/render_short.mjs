@@ -891,6 +891,11 @@ async function preflight(plan) {
     // Catch a stretching or black world at the start of the run, not after it.
     stage = 'measure the picture';
     const health = await page.evaluate(() => ({ projection: window.probeProjection(), ...window.measureFrame() }));
+    // The runner turns this into an annotation, so the numbers survive even when
+    // the raw job log cannot be opened.
+    console.log(`::notice title=Render preflight picture::${health.projection.canvas[0]}x${health.projection.canvas[1]} canvas, `
+      + `stretch ${health.projection.stretch}, mean luminance ${health.meanLuminance}/255, `
+      + `${(health.blackFraction * 100).toFixed(1)}% near-black, ${(health.colourFraction * 100).toFixed(1)}% colourful.`);
     console.log(`Render preflight picture: ${health.projection.canvas[0]}x${health.projection.canvas[1]} canvas, `
       + `stretch ${health.projection.stretch}, mean luminance ${health.meanLuminance}/255, `
       + `${(health.blackFraction * 100).toFixed(1)}% near-black, ${(health.colourFraction * 100).toFixed(1)}% colourful.`);
