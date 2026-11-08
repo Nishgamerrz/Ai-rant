@@ -63,160 +63,150 @@ export function buildAvatarRig(THREE, model) {
   const centerX = (bounds.min.x + bounds.max.x) / 2;
   const centerY = bounds.min.y;
 
-  function candidatesFor(x, y) {
+  // Bone regions. A vertex belongs to a region of the body chosen by height and
+  // side, which is how a Roblox avatar is actually built: the upper arm is a solid
+  // part, the forearm is another solid part, and they meet at the elbow.
+  //
+  // Distance to a bone was tried first and does not work: on a limb, every point
+  // is nearly the same distance from two consecutive bones, so most of the mesh
+  // ended up blended and the limb bent like rubber. A region has an exact owner,
+  // and only the few centimetres either side of a region border blend into the
+  // neighbouring bone that is jointed to it.
+  const fractionY = (value) => (value - centerY) / height;
+  const chains = {
+    body: [
+      { bone: 'Head', low: 0.76, high: 2 },
+      { bone: 'Neck', low: 0.70, high: 0.76 },
+      { bone: 'Chest', low: 0.56, high: 0.70 },
+      { bone: 'Spine', low: 0.44, high: 0.56 },
+      { bone: 'Hips', low: -2, high: 0.44 },
+    ],
+    arm: [
+      { bone: 'UpperArm', low: 0.60, high: 2 },
+      { bone: 'LowerArm', low: 0.44, high: 0.60 },
+      { bone: 'Hand', low: -2, high: 0.44 },
+    ],
+    leg: [
+      { bone: 'UpperLeg', low: 0.26, high: 2 },
+      { bone: 'LowerLeg', low: 0.10, high: 0.26 },
+      { bone: 'Foot', low: -2, high: 0.10 },
+    ],
+  };
+  // Where the legs begin, measured from the hips rather than from the full width of
+  // the avatar: including the arms made this boundary land in the middle of a shoe,
+  // which split the foot between the Hips and the Foot bone and tore it by 1144%.
+  const legThreshold = Math.max(0.04, Math.min(shoulderX, hipX) * 0.35);
+
+  function armReachAt(fraction) {
+    // A hand hangs as low as a knee, so it is separated from the legs by REACH:
+    // below the hip line a limb is an arm only if it is further out than any leg
+    // can be.
+    return fraction < 0.45 ? Math.max(shoulderX * 1.2, height * 0.16) : shoulderX * 0.62;
+  }
+
+  function chainFor(x, y) {
     const localX = x - centerX;
-    const fractionY = (y - centerY) / height;
     const absX = Math.abs(localX);
-    if (fractionY > 0.78) return ['Head', 'Neck', 'Chest'];
-    if (fractionY > 0.34 && fractionY < 0.81 && absX > shoulderX * 0.72) {
-      const side = localX < 0 ? 'Left' : 'Right';
-      return [`${side}UpperArm`, `${side}LowerArm`, `${side}Hand`, 'Chest'];
+    const fraction = fractionY(y);
+    const side = localX < 0 ? 'Left' : 'Right';
+    const reach = armReachAt(fraction);
+    // Arms first: far out from the body, between a hanging hand and the head.
+    if (fraction > 0.24 && fraction < 0.76 && absX > reach) {
+      return { name: 'arm', side, regions: chains.arm, fraction };
     }
-    if (fractionY < 0.49 && absX > hipX * 0.40) {
-      const side = localX < 0 ? 'Left' : 'Right';
-      return [`${side}UpperLeg`, `${side}LowerLeg`, `${side}Foot`, 'Hips'];
+    // Legs: below the hip line, away from the centre line, and never as far out as
+    // an arm. Everything else is the body, which keeps a hat on the head and a
+    // hanging hand off the thigh.
+    if (fraction < 0.42 && absX > legThreshold && absX <= reach) {
+      return { name: 'leg', side, regions: chains.leg, fraction };
     }
-    if (fractionY < 0.47) return ['Hips', 'Spine', 'Chest'];
-    return ['Hips', 'Spine', 'Chest', 'Neck'];
+    return { name: 'body', side, regions: chains.body, fraction };
   }
 
-  // Roblox avatars are made of rigid parts, so skinning must be rigid too.
-  // Blending one vertex across two bones (the previous behaviour) is what made
-  // arms and legs visibly stretch like rubber when a joint rotated. Every
-  // vertex now follows exactly one bone at full weight, and the bone is chosen
-  // by distance to that bone's *segment* (origin -> child), which keeps the
-  // forearm/hand/calf bindings anatomically correct.
-  const boneSegments = bones.map((bone) => {
-    const start = bone.getWorldPosition(new THREE.Vector3());
-    const child = bone.children.find((item) => item.isBone);
-    const end = child ? child.getWorldPosition(new THREE.Vector3()) : start.clone();
-    return { name: bone.name, start, end };
-  });
-  const segmentsByName = new Map(boneSegments.map((segment) => [segment.name, segment]));
-
-  function distanceToSegment(point, segment) {
-    const ax = segment.start.x, ay = segment.start.y, az = segment.start.z;
-    const bx = segment.end.x - ax, by = segment.end.y - ay, bz = segment.end.z - az;
-    const lengthSq = bx * bx + by * by + bz * bz;
-    const t = lengthSq > 1e-9
-      ? Math.max(0, Math.min(1, ((point.x - ax) * bx + (point.y - ay) * by + (point.z - az) * bz) / lengthSq))
-      : 0;
-    const dx = point.x - (ax + bx * t), dy = point.y - (ay + by * t), dz = point.z - (az + bz * t);
-    return Math.sqrt(dx * dx + dy * dy + dz * dz);
+  function boneFor(x, y) {
+    const chain = chainFor(x, y);
+    const region = chain.regions.find((item) => chain.fraction >= item.low && chain.fraction <= item.high)
+      || chain.regions[chain.regions.length - 1];
+    const name = chain.name === 'body' ? region.bone : `${chain.side}${region.bone}`;
+    return { chain, region, name };
   }
 
-  // Roblox avatars are built from rigid parts bolted to rigid joints, so the mesh
-  // has to be skinned the same way: an entire connected piece (a hand, a shoe, a
-  // torso) follows ONE bone. Assigning each vertex to its own nearest bone - which
-  // is what this used to do - splits a single triangle across two joints, and when
-  // those joints rotate apart the triangle is dragged with both: the mesh tears
-  // into the folded, spiky shape that made the finished MP4 look broken.
-  function connectedParts(geometry) {
-    const position = geometry.getAttribute('position');
-    const count = position.count;
-    const parent = new Int32Array(count);
-    for (let vertex = 0; vertex < count; vertex += 1) parent[vertex] = vertex;
-    const find = (vertex) => {
-      let root = vertex;
-      while (parent[root] !== root) root = parent[root];
-      while (parent[vertex] !== root) {
-        const next = parent[vertex];
-        parent[vertex] = root;
-        vertex = next;
-      }
-      return root;
-    };
-    const union = (a, b) => {
-      const rootA = find(a);
-      const rootB = find(b);
-      if (rootA !== rootB) parent[rootB] = rootA;
-    };
-    // Weld by position first: an OBJ splits vertices per face, so two triangles in
-    // the same solid usually do not share a vertex index at all.
-    const byPosition = new Map();
-    const precision = 1e4;
-    for (let vertex = 0; vertex < count; vertex += 1) {
-      const key = `${Math.round(position.getX(vertex) * precision)},`
-        + `${Math.round(position.getY(vertex) * precision)},`
-        + `${Math.round(position.getZ(vertex) * precision)}`;
-      const seen = byPosition.get(key);
-      if (seen === undefined) byPosition.set(key, vertex);
-      else union(seen, vertex);
-    }
-    const index = geometry.getIndex();
-    if (index) {
-      for (let triangle = 0; triangle < index.count; triangle += 3) {
-        union(index.getX(triangle), index.getX(triangle + 1));
-        union(index.getX(triangle + 1), index.getX(triangle + 2));
-      }
-    } else {
-      for (let triangle = 0; triangle + 2 < count; triangle += 3) {
-        union(triangle, triangle + 1);
-        union(triangle + 1, triangle + 2);
-      }
-    }
-    const parts = new Map();
-    for (let vertex = 0; vertex < count; vertex += 1) {
-      const root = find(vertex);
-      if (!parts.has(root)) parts.set(root, []);
-      parts.get(root).push(vertex);
-    }
-    return [...parts.values()];
-  }
-
-  function boneForCentroid(centroid) {
-    let bestIndex = 0;
-    let bestDistance = Infinity;
-    for (const name of candidatesFor(centroid.x, centroid.y)) {
-      const segment = segmentsByName.get(name);
-      if (!segment) continue;
-      const distance = distanceToSegment(centroid, segment);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        bestIndex = boneIndices.get(name);
-      }
-    }
-    return bestIndex;
+  // A vertex inside `blendBand` of a region border eases into the neighbouring
+  // region's bone, and only into that one: both are always jointed together, so a
+  // vertex is never dragged between unrelated limbs.
+  // The bone a point belongs to. One answer, no blending: a body part is a solid
+  // piece of a Roblox avatar, so it follows exactly one joint.
+  function boneFor(x, y) {
+    const chain = chainFor(x, y);
+    const region = chain.regions.find((item) => chain.fraction >= item.low && chain.fraction <= item.high)
+      || chain.regions[chain.regions.length - 1];
+    return chain.name === 'body' ? region.bone : `${chain.side}${region.bone}`;
   }
 
   function addSkinWeights(geometry) {
     const position = geometry.getAttribute('position');
     if (!position?.count) throw new Error('Avatar OBJ contains an empty mesh.');
-    const indices = new Uint16Array(position.count * 4);
-    const weights = new Float32Array(position.count * 4);
-    const point = new THREE.Vector3();
-    const parts = connectedParts(geometry);
-    // One bone for the whole piece, chosen from the piece's own centre. Small
-    // pieces (an eye, a button) are given to their own nearest bone; the point is
-    // that no piece is ever split between two bones, so nothing can tear.
-    const partBones = parts.map((vertices) => {
-      point.set(0, 0, 0);
-      for (const vertex of vertices) {
-        point.x += position.getX(vertex);
-        point.y += position.getY(vertex);
-        point.z += position.getZ(vertex);
-      }
-      point.multiplyScalar(1 / vertices.length);
-      return { vertices, bone: boneForCentroid(point) };
+    const count = position.count;
+    const index = geometry.getIndex();
+    // The mesh may be indexed or not; both become a list of triangles.
+    const triangles = index
+      ? Array.from({ length: Math.floor(index.count / 3) }, (_, step) => [
+        index.getX(step * 3), index.getX(step * 3 + 1), index.getX(step * 3 + 2)])
+      : Array.from({ length: Math.floor(count / 3) }, (_, step) => [step * 3, step * 3 + 1, step * 3 + 2]);
+
+    // ONE WEIGHT VECTOR PER TRIANGLE, shared by its three corners. This is the rule
+    // that makes an exploded avatar impossible: a triangle whose corners carry the
+    // same weights is an affine transform of itself, so it can rotate and slide but
+    // can never be stretched into a spike. Per-vertex weights cannot promise that -
+    // two corners 3 cm apart following the hip and the foot at once is exactly the
+    // 1144%-stretched triangle measured on the real avatar.
+    const weightsPerTriangle = triangles.map((triangle) => {
+      const localXs = triangle.map((vertex) => position.getX(vertex) - centerX);
+      const centroidY = (position.getY(triangle[0]) + position.getY(triangle[1]) + position.getY(triangle[2])) / 3;
+      // A triangle that spans the centre line belongs to the pelvis, not to one leg:
+      // sending it to the left leg while its neighbour goes to the right one tears
+      // the crotch open (measured: a 1.2-stud hole) the moment the legs move apart.
+      const straddlesCentre = Math.min(...localXs) <= 0 && Math.max(...localXs) >= 0
+        || Math.min(...localXs.map((value) => Math.abs(value))) < legThreshold;
+      const centroidX = (position.getX(triangle[0]) + position.getX(triangle[1]) + position.getX(triangle[2])) / 3;
+      const name = boneFor(centroidX, centroidY);
+      const bone = straddlesCentre && /(UpperLeg|LowerLeg|Foot)$/.test(name) ? 'Hips' : name;
+      return new Map([[boneIndices.get(bone) ?? 0, 1]]);
     });
-    for (const { vertices, bone } of partBones) {
-      for (const vertex of vertices) {
-        const offset = vertex * 4;
-        indices[offset] = bone;
-        weights[offset] = 1;
+
+    // Write at most four influences per vertex (the shader limit).
+    const indices = new Uint16Array(count * 4);
+    const weights = new Float32Array(count * 4);
+    let blended = 0;
+    triangles.forEach((triangle, triangleIndex) => {
+      const ranked = [...weightsPerTriangle[triangleIndex].entries()]
+        .filter(([, weight]) => weight > 1e-4)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 4);
+      const total = ranked.reduce((sum, [, weight]) => sum + weight, 0) || 1;
+      if (ranked.length > 1) blended += 1;
+      for (const vertex of triangle) {
+        ranked.forEach(([bone, weight], slot) => {
+          indices[vertex * 4 + slot] = bone;
+          weights[vertex * 4 + slot] = weight / total;
+        });
       }
-    }
-    const rigStats = { parts: partBones.length, mixedParts: 0 };
+    });
     geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(indices, 4));
     geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(weights, 4));
-    return rigStats;
+    return { vertices: count, triangles: triangles.length, multiBone: blended };
   }
 
   const meshes = [];
   model.traverse((object) => {
     if (!object.isMesh || !object.geometry?.getAttribute('position')) return;
-    const geometry = object.geometry.clone();
+    let geometry = object.geometry.clone();
     geometry.applyMatrix4(object.matrixWorld);
+    // One owner per triangle only works if each triangle owns its corners. An
+    // indexed mesh shares a corner between several triangles, so the last triangle
+    // to write would win and the others would straddle two joints. Splitting the
+    // index makes the rule exact (the supplied Roblox OBJ is already split this way).
+    if (geometry.getIndex()) geometry = geometry.toNonIndexed();
     addSkinWeights(geometry);
     geometry.computeBoundingBox();
     geometry.computeBoundingSphere();

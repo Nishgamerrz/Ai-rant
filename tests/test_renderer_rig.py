@@ -125,41 +125,69 @@ class MeshTearTests(unittest.TestCase):
                               capture_output=True, text=True, timeout=300)
 
     def test_skinning_keeps_every_triangle_rigid(self):
+        """Every triangle must carry ONE weight vector, or it can be torn apart.
+
+        The shipped MP4 exploded because two corners of a triangle 3 cm apart
+        followed the hip and the foot at once (measured: an edge stretched by
+        1144%). A triangle whose corners share their weights is an affine copy of
+        itself, so it can rotate and slide but never spike.
+        """
         script = """
 import * as THREE from 'three';
 import { animateAvatarRig, buildAvatarRig } from './avatar_rig.mjs';
 const material = new THREE.MeshStandardMaterial();
 const group = new THREE.Group();
+// A cylinder is INDEXED: shared corners would let triangles disagree, so the rig
+// must split the index before weighting anything.
 const body = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.72, 5.2, 10, 14), material);
 body.name = 'Body'; body.position.set(0, 3.1, 0); group.add(body);
 const rig = buildAvatarRig(THREE, group);
 const skin = rig.root.children.find((c) => c.isSkinnedMesh && c.name === 'Body');
-const index = skin.geometry.getIndex();
-const bones = skin.geometry.getAttribute('skinIndex');
-const tris = [];
-for (let i = 0; i < index.count; i += 3) tris.push([index.getX(i), index.getX(i + 1), index.getX(i + 2)]);
-const straddling = tris.filter((t) => new Set(t.map((v) => bones.getX(v))).size > 1).length;
-const rest = new Map();
-for (const t of tris) for (const v of t) rest.set(v, skin.getVertexPosition(v, new THREE.Vector3()).clone());
+const geometry = skin.geometry;
+const count = geometry.getAttribute('position').count;
+const weights = geometry.getAttribute('skinWeight');
+const boneIndex = geometry.getAttribute('skinIndex');
+const key = (v) => [0, 1, 2, 3].map((s) => boneIndex.getComponent(v, s) + ':' + weights.getComponent(v, s).toFixed(4)).join('|');
+const unnormalised = [];
+for (let v = 0; v < count; v += 1) {
+  const sum = weights.getX(v) + weights.getY(v) + weights.getZ(v) + weights.getW(v);
+  if (Math.abs(sum - 1) > 1e-5) unnormalised.push([v, sum]);
+}
+let straddling = 0;
+const triangles = Math.floor(count / 3);
+for (let t = 0; t < triangles; t += 1) {
+  const a = t * 3;
+  if (key(a) !== key(a + 1) || key(a + 1) !== key(a + 2)) straddling += 1;
+}
+const rest = [];
+const v3 = new THREE.Vector3();
+for (let v = 0; v < count; v += 1) { skin.getVertexPosition(v, v3); rest.push([v3.x, v3.y, v3.z]); }
 let worst = 0;
 for (const time of [0.2, 0.55, 0.9, 1.4]) {
   animateAvatarRig(rig.bones, time, 0.5, 0.3);
   rig.root.updateMatrixWorld(true);
   rig.skeleton.update();
-  for (const t of tris) for (const [a, b] of [[t[0], t[1]], [t[1], t[2]], [t[2], t[0]]]) {
-    const now = skin.getVertexPosition(a, new THREE.Vector3()).distanceTo(skin.getVertexPosition(b, new THREE.Vector3()));
-    worst = Math.max(worst, Math.abs(now - rest.get(a).distanceTo(rest.get(b))));
+  for (let t = 0; t < triangles; t += 1) {
+    const a = t * 3;
+    for (const [x, y] of [[a, a + 1], [a + 1, a + 2], [a + 2, a]]) {
+      const length = Math.hypot(rest[x][0] - rest[y][0], rest[x][1] - rest[y][1], rest[x][2] - rest[y][2]);
+      if (length < 1e-5) continue;
+      skin.getVertexPosition(x, v3); const px = v3.x, py = v3.y, pz = v3.z;
+      skin.getVertexPosition(y, v3);
+      worst = Math.max(worst, Math.abs(Math.hypot(px - v3.x, py - v3.y, pz - v3.z) - length) / length);
+    }
   }
 }
-console.log(JSON.stringify({ triangles: tris.length, straddling, worst }));
+console.log(JSON.stringify({ triangles, straddling, unnormalised: unnormalised.slice(0, 3), worst }));
 """
         result = self._node(script)
         self.assertEqual(result.returncode, 0, msg=result.stderr[-1500:])
         data = json.loads(result.stdout.strip().splitlines()[-1])
         self.assertGreater(data["triangles"], 100)
+        self.assertEqual(data["unnormalised"], [], "every vertex must be fully weighted")
         self.assertEqual(data["straddling"], 0,
                          "a triangle spanning two joints is torn apart when they rotate")
-        self.assertLess(data["worst"], 1e-4, "animated mesh edges must keep their length")
+        self.assertLess(data["worst"], 1e-4, "a rigidly weighted triangle cannot stretch")
 
 
 class CameraFramingTests(unittest.TestCase):
