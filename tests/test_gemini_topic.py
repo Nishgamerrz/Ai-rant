@@ -137,6 +137,12 @@ class _Stub(BaseHTTPRequestHandler):
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
+        # A quota marker left in the repository would switch these calls off.
+        marker = tempfile.NamedTemporaryFile(prefix="quota-", delete=False)
+        marker.close()
+        Path(marker.name).unlink()
+        os.environ["GEMINI_QUOTA_MARKER"] = marker.name
+        self.addCleanup(os.environ.pop, "GEMINI_QUOTA_MARKER", None)
         handler = type("Handler", (_Stub,), {"calls": [], "status": 200, "reply": GOOD})
         self.server = HTTPServer(("127.0.0.1", 0), handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()

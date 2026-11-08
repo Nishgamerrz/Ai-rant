@@ -763,7 +763,11 @@ jobs:
           # mangled must never replace a draft that was already complete.
           path = Path('dist/narration_gemini.txt')
           if not path.is_file():
-              print("Gemini left no edited file.")
+              if Path('dist/gemini_quota_exhausted').is_file():
+                  print("Gemini is out of quota, so it did not edit the narration; "
+                        "the AI's own draft (and its own repair) stands.")
+              else:
+                  print("Gemini left no edited file.")
               sys.exit(1)
           words = re.findall(r"\b[\w\u2019'-]+\b", path.read_text(encoding='utf-8'))
           low, high = int(os.environ['MIN_WORDS']), int(os.environ['MAX_WORDS'])
@@ -1003,6 +1007,13 @@ jobs:
               marker.write_text('sent', encoding='utf-8')
               print('The AI delegated nothing for the models, so the workflow sent the '
                     'required 1-2 finished model designs to the sub-agent itself.')
+          # Out of quota: sending the tasks would fail every one of them and then buy a
+          # fresh ten-minute re-plan for nothing. Keep the draft plan and let the AI ask
+          # for web research only.
+          if tasks and Path('dist/gemini_quota_exhausted').is_file():
+              print('Gemini is out of quota for this run, so the delegated tasks are '
+                    'skipped and the plan you already wrote stands.')
+              tasks = []
           # Never let the cap of three steal the required jobs: the mandated tasks go
           # first, then whichever of the AI's own tasks still fit.
           if len(tasks) > 3:
@@ -1098,6 +1109,10 @@ jobs:
                 break
               fi
             done
+            if [ ! -f map_subagent_review.done ] && [ -f dist/gemini_quota_exhausted ]; then
+              python tools/say.py warning "Gemini is out of quota, so the required map/camera review could not run; the AI's own plan is used as-is and the run continues."
+              touch map_subagent_review.done
+            fi
             if [ ! -f map_subagent_review.done ]; then
               python tools/say.py warning "The required map/camera sub-agent review did not run; sending it once from the draft plan so a map is never shipped unreviewed."
               python - <<'PYR'
