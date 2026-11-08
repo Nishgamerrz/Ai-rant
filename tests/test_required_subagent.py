@@ -73,6 +73,11 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("Never let the cap of three steal", self.text)
         self.assertIn("tasks = required[:3] + others[:max(0, 3 - len(required[:3]))]", self.text)
 
+    def test_the_map_step_cannot_loop_on_required_tasks(self) -> None:
+        self.assertIn("SUBA_ROUNDS=0", self.text)
+        self.assertIn('if [ "$SUBA_ROUNDS" -ge 2 ]; then', self.text)
+        self.assertIn("the world plan is final and the run moves on", self.text)
+
     def test_the_helper_loop_cannot_skip_the_review(self) -> None:
         self.assertIn('if [ -z "$QUERIES" ] && [ "$TASKS" = "[]" ] '
                       '&& [ -f map_subagent_review.done ]; then break; fi', self.text)

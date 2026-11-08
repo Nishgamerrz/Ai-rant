@@ -916,6 +916,11 @@ jobs:
             # place, verify a fact). Both are executed and fed back, up to four
             # rounds; asking for the identical thing twice ends the loop.
             PREVIOUS_HELP=""
+            # At most two sub-agent rounds for the map step: the first designs or
+            # reviews the world and the cameras, the second is the AI's confirmation
+            # (with one fix if it needs it). Without this cap the required task would
+            # make every round ask for another one and the plan would never end.
+            SUBA_ROUNDS=0
             for helper_round in 1 2 3 4; do
               python - <<'PYQ'
           import json
@@ -1028,6 +1033,7 @@ jobs:
                 printf '\nExtra web research the AI requested and the workflow fetched live:\n%s\nUse it if helpful and return the complete JSON again, with "search_queries":[] when you need nothing else.\n' "$WEB_RESEARCH" >> map_prompt.txt
               fi
               if [ "$TASKS" != "[]" ]; then
+                SUBA_ROUNDS=$(( SUBA_ROUNDS + 1 ))
                 python tools/gemini_subagent.py \
                   --request subagent_tasks.json --output subagent_results.json --stdout
                 # What the sub-agent did, task by task: the answer, how long it took,
@@ -1070,6 +1076,10 @@ jobs:
                 --stall-seconds "${AI_STALL:-900}" \
             --projected-seconds "${AI_PROJECTED_SECONDS:-1500}" \
                 --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}" || break
+              if [ "$SUBA_ROUNDS" -ge 2 ]; then
+                python tools/say.py success "The sub-agent has had its two rounds on the map and the cameras and the AI has confirmed them, so the world plan is final and the run moves on to the next step."
+                break
+              fi
             done
             if [ ! -f map_subagent_review.done ]; then
               python tools/say.py warning "The required map/camera sub-agent review did not run; sending it once from the draft plan so a map is never shipped unreviewed."
