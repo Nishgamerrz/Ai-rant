@@ -194,6 +194,7 @@ class LiveStreamingTests(unittest.TestCase):
                 [sys.executable, "tools/ollama_stream.py",
                  "--request", str(request_path), "--output", str(output_path),
                  "--label", "world plan", "--timeout", "30",
+                 "--fallback-model", "qwen3:4b",
                  "--url", f"http://127.0.0.1:{server.server_port}/api/chat"],
                 cwd=ROOT, capture_output=True, text=True,
             )
@@ -746,3 +747,156 @@ class ColourTests(unittest.TestCase):
         helper = (ROOT / "tools" / "gemini_subagent.py").read_text(encoding="utf-8")
         self.assertIn("from console_style import paint", helper)
         self.assertIn('paint(f"[gemini sub-agent] reply', helper)
+
+
+class _AlwaysAnswers(BaseHTTPRequestHandler):
+    """Answers anything, so a call's model name can be inspected."""
+
+    models: list[str] = []
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        payload = json.loads(self.rfile.read(length))
+        type(self).models.append(str(payload.get("model")))
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.end_headers()
+        self.wfile.write((json.dumps({"message": {"content": '{"ok":1}'}, "done": False}) + "\n").encode())
+        self.wfile.write((json.dumps({"done": True, "done_reason": "stop", "eval_count": 3}) + "\n").encode())
+
+
+class _TooSlowPrimary(_AlwaysAnswers):
+    """The primary model cannot run here; the known-good fallback can."""
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        payload = json.loads(self.rfile.read(length))
+        type(self).models.append(str(payload.get("model")))
+        if str(payload.get("model")) != "qwen3:4b":
+            body = b'{"error":"model requires more system memory than is available"}'
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.end_headers()
+        self.wfile.write((json.dumps({"message": {"content": '{"ok":"fallback"}'}, "done": False}) + "\n").encode())
+        self.wfile.write((json.dumps({"done": True, "done_reason": "stop", "eval_count": 5}) + "\n").encode())
+
+
+class ModelResidencyTests(unittest.TestCase):
+    """No reload between steps: one load, then every step thinks on warm weights.
+
+    Run #90 (smart_11b, qwen3:14b) reloaded the model before several steps: the
+    fallback hand-over swapped in qwen3:4b, the next step asked for qwen3:14b
+    again, and each swap costs minutes on a free CPU runner.
+    """
+
+    def test_a_hand_over_is_remembered_for_the_rest_of_the_run(self):
+        import tempfile
+
+        handler = type("Handler", (_TooSlowPrimary,), {"models": []})
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            github_env = workdir / "github_env"
+            github_env.touch()
+            first = workdir / "first.json"
+            first.write_text(json.dumps({
+                "model": "qwen3:14b",
+                "messages": [{"role": "user", "content": "plan the world"}],
+                "think": True, "stream": False,
+                "options": {"num_predict": 200},
+            }), encoding="utf-8")
+            environment = {**os.environ, "GITHUB_ENV": str(github_env), "AI_COLOR": "0"}
+            result = subprocess.run(
+                [sys.executable, "tools/ollama_stream.py",
+                 "--request", str(first), "--output", str(workdir / "first_out.json"),
+                 "--label", "world plan", "--timeout", "30",
+                 "--fallback-model", "qwen3:4b",
+                 "--url", f"http://127.0.0.1:{server.server_port}/api/chat"],
+                cwd=ROOT, capture_output=True, text=True, env=environment,
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr[-2000:])
+            self.assertIn("switching to the known-good fallback model", result.stdout)
+
+            # The rest of the workflow is told to stop asking for the slow model.
+            exported = github_env.read_text(encoding="utf-8")
+            self.assertIn("AI_MODEL=qwen3:4b", exported)
+            self.assertIn("AI_MODEL_STICKY=1", exported)
+            # And the next call inside the SAME step, which cannot see GITHUB_ENV,
+            # still uses the warm model instead of reloading the slow one.
+            second = workdir / "second.json"
+            second.write_text(json.dumps({
+                "model": "qwen3:14b",
+                "messages": [{"role": "user", "content": "and the cameras"}],
+                "think": True, "stream": False,
+                "options": {"num_predict": 200},
+            }), encoding="utf-8")
+            again = subprocess.run(
+                [sys.executable, "tools/ollama_stream.py",
+                 "--request", str(second), "--output", str(workdir / "second_out.json"),
+                 "--label", "world plan retry", "--timeout", "30",
+                 "--fallback-model", "qwen3:4b",
+                 "--url", f"http://127.0.0.1:{server.server_port}/api/chat"],
+                cwd=ROOT, capture_output=True, text=True, env=environment,
+            )
+            self.assertEqual(again.returncode, 0, msg=again.stderr[-2000:])
+            self.assertIn("already loaded for this run", again.stdout)
+            self.assertIn("qwen3:4b", again.stdout)
+        self.assertEqual(handler.models[-1], "qwen3:4b", "the retry must reuse the warm model")
+
+    def test_the_workflow_checks_that_the_model_is_still_resident(self):
+        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+        for label in ('"model warm-up"', '"story"', '"world plan"', '"creation summary"'):
+            self.assertIn(f'python tools/model_residency.py --check --model "$AI_MODEL" --label {label}'
+                          if label != '"model warm-up"'
+                          else 'python tools/model_residency.py --check --model "$SELECTED_MODEL" --label "model warm-up"',
+                          workflow, label)
+        self.assertIn("python tools/model_residency.py --summary", workflow)
+
+    def test_the_summary_is_written_before_the_model_is_unloaded(self):
+        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+        summary = workflow.index("Write the AI creation summary while the model is still in memory")
+        unload = workflow.index("Free model RAM for the physics renderer")
+        render = workflow.index("Render the complete vertical MP4 without Roblox Studio or Blender")
+        self.assertLess(summary, unload,
+                        "the last AI call must happen while the model is still warm")
+        self.assertLess(unload, render)
+        # Nothing may call the model after it was evicted for the render.
+        after = workflow[unload:render]
+        self.assertNotIn("ollama_stream.py", after)
+
+    def test_the_model_is_warmed_once_on_purpose(self):
+        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+        self.assertIn("/api/generate", workflow)
+        self.assertIn("is resident after", workflow)
+        self.assertIn("OLLAMA_KEEP_ALIVE=60m", workflow)
+
+    def test_the_residency_report_names_cold_loads(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "residency.log"
+            log.write_text("\n".join([
+                json.dumps({"label": "story", "model": "qwen3:8b", "resident": True, "loaded": ["qwen3:8b"]}),
+                json.dumps({"label": "world plan", "model": "qwen3:8b", "resident": False, "loaded": []}),
+            ]) + "\n", encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, "tools/model_residency.py", "--summary", "--log", str(log)],
+                cwd=ROOT, capture_output=True, text=True,
+                env={k: v for k, v in os.environ.items() if k != "GITHUB_STEP_SUMMARY"},
+            )
+        self.assertEqual(result.returncode, 1, "a cold load must be visible, not silent")
+        self.assertIn("1 of 2 AI steps ran on weights already in RAM", result.stdout)
+        self.assertIn("world plan: qwen3:8b -> COLD LOAD", result.stdout)

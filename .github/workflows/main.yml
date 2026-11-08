@@ -441,6 +441,18 @@ jobs:
             ollama pull "$AI_FALLBACK_MODEL"
           fi
           ollama show "$SELECTED_MODEL" >/dev/null
+          # Warm the model once, on purpose, so the load happens here - outside the
+          # per-call stall/watchdog window - and every later step (story, world
+          # plan, re-alignment, summary) just thinks on weights that are already in
+          # RAM. The tiny prediction also proves the model answers before the first
+          # real prompt is spent on it.
+          python tools/say.py plan "Loading $SELECTED_MODEL into memory once; every later step reuses it instead of reloading."
+          WARM_START=$(date +%s)
+          curl -fsS http://127.0.0.1:11434/api/generate \
+            -d "$(jq -nc --arg model "$SELECTED_MODEL" '{model:$model, prompt:"ok", stream:false, keep_alive:"60m", think:false, options:{num_predict:1, num_ctx:1024}}')" \
+            >/dev/null
+          python tools/say.py success "$SELECTED_MODEL is resident after $(( $(date +%s) - WARM_START ))s of one-time loading."
+          python tools/model_residency.py --check --model "$SELECTED_MODEL" --label "model warm-up"
           {
             echo "## Selected generation model"
             echo "- Preset: $MODEL_QUALITY"
@@ -539,6 +551,8 @@ jobs:
           # actually speaks about 2.45 (run #82: 262 words became 106 s of a 164 s
           # video and left 58 seconds of dead air). These numbers are the measured
           # rate at +4%, so the voice fills the length it was written for.
+          # Prove the story step will not start with a reload of the model.
+          python tools/model_residency.py --check --model "$AI_MODEL" --label "story"
           MIN_WORDS=$((DURATION_SECONDS * 22 / 10))
           TARGET_WORDS=$((DURATION_SECONDS * 245 / 100))
           MAX_WORDS=$((DURATION_SECONDS * 27 / 10))
@@ -739,6 +753,9 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
         run: |
+          # The world plan reuses the same resident model as the story: no reload,
+          # so it starts thinking immediately.
+          python tools/model_residency.py --check --model "$AI_MODEL" --label "world plan"
           NARRATION=$(cat dist/narration.txt)
           FIRST_CAST=$(jq -r '.[0] // "Lead"' dist/characters.json)
           SECOND_CAST=$(jq -r '.[1] // (.[0] // "Friend")' dist/characters.json)
@@ -1158,12 +1175,72 @@ jobs:
             echo "- Small PNG stills of that same footage are in the \`short-preview-stills-${MODEL_QUALITY}\` artifact, and on the [media-preview-${MODEL_QUALITY} branch](https://github.com/$GITHUB_REPOSITORY/tree/media-preview-${MODEL_QUALITY}), so the look can be checked without downloading the MP4."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Write the AI creation summary while the model is still in memory
+        env:
+          VOICE_STYLE: ${{ inputs.voice_style }}
+        run: |
+          # Last AI call of the run, and it happens while the story/plan model is
+          # still warm. It used to run after the render, i.e. after the model had
+          # been unloaded for RAM, which bought a full reload for 150 words.
+          python tools/model_residency.py --check --model "$AI_MODEL" --label "creation summary"
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          plan = json.loads(Path('dist/Roblox_Story_Map.json').read_text(encoding='utf-8'))
+          cast = json.loads(Path('dist/characters.json').read_text(encoding='utf-8'))
+          narration = Path('dist/narration.txt').read_text(encoding='utf-8')
+          context = {
+              'story': narration,
+              'world_name': plan.get('name'),
+              'user_theme': plan.get('theme'),
+              'world_part_count': len(plan.get('props', [])),
+              'world_plan_source': Path('dist/map_source.txt').read_text(encoding='utf-8').strip(),
+              'representative_part_names': [p.get('name') for p in plan.get('props', [])[:60]],
+              'camera_shot_count': len(plan.get('camera_shots', [])),
+              'face_expression_beats': len(plan.get('face_expressions', [])),
+              'face_closeup_shots': sum(1 for shot in plan.get('camera_shots', []) if str(shot.get('framing', '')).lower() == 'face'),
+              'cast_usernames': cast,
+              'duration_seconds': int(__import__('os').environ['DURATION_SECONDS']),
+              'rendered_video': 'Roblox_2K_YouTube_Short.mp4',
+              'video_resolution': '1440x2560 at 30 fps',
+              'rendering_requires_local_studio': False,
+          }
+          prompt = (
+              'Write a concise, friendly 100–160 word final creation summary for the user. '
+              'Summarize only the completed story, world theme, furnishing, real Roblox avatars, AI-timed animated faces and face close-up cameras, narration audio, the on-screen narration captions and the rendered MP4 deliverables in this data. '
+              'Do not reveal or imitate private chain-of-thought. Do not claim Roblox Studio runtime testing. '
+              'Do not invent features not present in the data. Return only JSON with a summary string.\nDATA: '
+              + json.dumps(context, ensure_ascii=False)
+          )
+          Path('creation_summary_prompt.txt').write_text(prompt, encoding='utf-8')
+          PY
+          jq -n --arg model "$AI_MODEL" --argjson think "$OLLAMA_THINKING" --rawfile prompt creation_summary_prompt.txt \
+            '{model:$model, messages:[{role:"user",content:$prompt}], format:{type:"object",properties:{summary:{type:"string"}},required:["summary"],additionalProperties:false}, think:$think, stream:false, keep_alive:"60m", options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:900}}' > creation_summary_request.json
+          python tools/ollama_stream.py --request creation_summary_request.json \
+            --output creation_summary_response.json --label "creation summary" \
+            --timeout 3600 --stall-seconds "${AI_STALL:-900}" \
+            --projected-seconds "${AI_PROJECTED_SECONDS:-1500}" \
+            --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}"
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          payload = json.loads(Path('creation_summary_response.json').read_text(encoding='utf-8'))
+          try:
+              result = json.loads((payload.get('message') or {}).get('content', payload.get('response', '{}')))
+          except (json.JSONDecodeError, TypeError):
+              result = {}
+          summary = result.get('summary', '') if isinstance(result, dict) else ''
+          if not isinstance(summary, str) or len(summary.split()) < 20:
+              raise SystemExit('The selected AI model did not return a usable creation summary.')
+          Path('dist/AI_Creation_Summary.txt').write_text(summary.strip() + '\n', encoding='utf-8')
+          print(f"AI creation summary generated ({len(summary.split())} words).")
+          PY
       - name: Free model RAM for the physics renderer
         env:
           SELECTED_AI_MODEL: ${{ env.AI_MODEL }}
         run: |
           if ollama stop "$SELECTED_AI_MODEL"; then
-            python tools/say.py plan "Unloaded $SELECTED_AI_MODEL from memory before Chromium/Rapier rendering; cached model files remain on disk for the final summary."
+            python tools/say.py plan "Unloaded $SELECTED_AI_MODEL from memory before Chromium/Rapier rendering. Every AI step has already finished, so this load is never paid for again; the weights stay cached on disk."
           else
             python tools/say.py warning "Ollama could not unload the model cleanly; continuing with the render."
           fi
@@ -1234,62 +1311,10 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Write AI-generated creation summary and bundle the final deliverables
+      - name: Bundle the final deliverables
         env:
           VOICE_STYLE: ${{ inputs.voice_style }}
         run: |
-          python - <<'PY'
-          from pathlib import Path
-          import json
-          plan = json.loads(Path('dist/Roblox_Story_Map.json').read_text(encoding='utf-8'))
-          cast = json.loads(Path('dist/characters.json').read_text(encoding='utf-8'))
-          narration = Path('dist/narration.txt').read_text(encoding='utf-8')
-          context = {
-              'story': narration,
-              'world_name': plan.get('name'),
-              'user_theme': plan.get('theme'),
-              'world_part_count': len(plan.get('props', [])),
-              'world_plan_source': Path('dist/map_source.txt').read_text(encoding='utf-8').strip(),
-              'representative_part_names': [p.get('name') for p in plan.get('props', [])[:60]],
-              'camera_shot_count': len(plan.get('camera_shots', [])),
-              'face_expression_beats': len(plan.get('face_expressions', [])),
-              'face_closeup_shots': sum(1 for shot in plan.get('camera_shots', []) if str(shot.get('framing', '')).lower() == 'face'),
-              'cast_usernames': cast,
-              'duration_seconds': int(__import__('os').environ['DURATION_SECONDS']),
-              'rendered_video': 'Roblox_2K_YouTube_Short.mp4',
-              'video_resolution': '1440x2560 at 30 fps',
-              'rendering_requires_local_studio': False,
-          }
-          prompt = (
-              'Write a concise, friendly 100–160 word final creation summary for the user. '
-              'Summarize only the completed story, world theme, furnishing, real Roblox avatars, AI-timed animated faces and face close-up cameras, narration audio, the on-screen narration captions and the rendered MP4 deliverables in this data. '
-              'Do not reveal or imitate private chain-of-thought. Do not claim Roblox Studio runtime testing. '
-              'Do not invent features not present in the data. Return only JSON with a summary string.\nDATA: '
-              + json.dumps(context, ensure_ascii=False)
-          )
-          Path('creation_summary_prompt.txt').write_text(prompt, encoding='utf-8')
-          PY
-          jq -n --arg model "$AI_MODEL" --argjson think "$OLLAMA_THINKING" --rawfile prompt creation_summary_prompt.txt \
-            '{model:$model, messages:[{role:"user",content:$prompt}], format:{type:"object",properties:{summary:{type:"string"}},required:["summary"],additionalProperties:false}, think:$think, stream:false, keep_alive:"60m", options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:900}}' > creation_summary_request.json
-          python tools/ollama_stream.py --request creation_summary_request.json \
-            --output creation_summary_response.json --label "creation summary" \
-            --timeout 3600 --stall-seconds "${AI_STALL:-900}" \
-            --projected-seconds "${AI_PROJECTED_SECONDS:-1500}" \
-            --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}"
-          python - <<'PY'
-          from pathlib import Path
-          import json
-          payload = json.loads(Path('creation_summary_response.json').read_text(encoding='utf-8'))
-          try:
-              result = json.loads((payload.get('message') or {}).get('content', payload.get('response', '{}')))
-          except (json.JSONDecodeError, TypeError):
-              result = {}
-          summary = result.get('summary', '') if isinstance(result, dict) else ''
-          if not isinstance(summary, str) or len(summary.split()) < 20:
-              raise SystemExit('The selected AI model did not return a usable creation summary.')
-          Path('dist/AI_Creation_Summary.txt').write_text(summary.strip() + '\n', encoding='utf-8')
-          print(f"AI creation summary generated ({len(summary.split())} words).")
-          PY
           mkdir -p dist/Generation_Prompts
           cp narration_prompt.txt map_prompt.txt creation_summary_prompt.txt dist/Generation_Prompts/
           PACKAGE_RATE="${NARRATOR_RATE:-+4%}"
@@ -1311,6 +1336,8 @@ jobs:
             echo "- Includes the rendered vertical MP4, editable place, map/story/cast and real avatar data, narration/audio captions, prompts, AI creation summary, and tools/design PDF."
             echo "- The PDF documents the high-level design and tools (not private chain-of-thought); the video passed the MP4 quality gate."
           } >> "$GITHUB_STEP_SUMMARY"
+          # Say out loud whether the run reloaded the model between steps.
+          python tools/model_residency.py --summary || true
 
       - name: Upload the Roblox Studio project and narration assets
         uses: actions/upload-artifact@v4

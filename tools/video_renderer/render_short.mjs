@@ -726,7 +726,12 @@ function buildHtml(data) {
     for(const cue of captions){if(t>=cue.start&&t<=cue.end){active=cue;break;}}
     if(active!==captionCue){
       captionCue=active;
-      const text=active?String(active.text||'').replace(/\s+/g,' ').trim():'';
+      // The whitespace escape must be written with a DOUBLED backslash: this page
+      // lives inside a template literal, and a template literal eats a backslash it
+      // does not recognise. Written with one, the regex reached Chromium as
+      // "replace every letter s with a space", which deleted the s from every
+      // caption: SKEWED became KEWED and HIS became HI.
+      const text=active?String(active.text||'').replace(/\\s+/g,' ').trim():'';
       if(text!==captionText){
         captionText=text;
         captionEl.textContent=text;

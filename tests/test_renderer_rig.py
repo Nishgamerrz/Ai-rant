@@ -110,5 +110,79 @@ console.log(JSON.stringify({
         self.assertGreater(data["undefinedRig"][1], 0)
 
 
+class MeshTearTests(unittest.TestCase):
+    """The avatar must never explode, which is what the first real MP4 shipped.
+
+    Frames at 28 s and 88 s showed the torso bursting into flat yellow and blue
+    spikes. The cause was per-vertex bone picking: one triangle's three vertices
+    followed three different joints, so the triangle was torn in three directions.
+    These checks fail on that bug and pass on rigid, one-bone-per-piece skinning.
+    """
+
+    @staticmethod
+    def _node(script):
+        return subprocess.run(["node", "--input-type=module", "-e", script], cwd=RENDERER,
+                              capture_output=True, text=True, timeout=300)
+
+    def test_skinning_keeps_every_triangle_rigid(self):
+        script = """
+import * as THREE from 'three';
+import { animateAvatarRig, buildAvatarRig } from './avatar_rig.mjs';
+const material = new THREE.MeshStandardMaterial();
+const group = new THREE.Group();
+const body = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.72, 5.2, 10, 14), material);
+body.name = 'Body'; body.position.set(0, 3.1, 0); group.add(body);
+const rig = buildAvatarRig(THREE, group);
+const skin = rig.root.children.find((c) => c.isSkinnedMesh && c.name === 'Body');
+const index = skin.geometry.getIndex();
+const bones = skin.geometry.getAttribute('skinIndex');
+const tris = [];
+for (let i = 0; i < index.count; i += 3) tris.push([index.getX(i), index.getX(i + 1), index.getX(i + 2)]);
+const straddling = tris.filter((t) => new Set(t.map((v) => bones.getX(v))).size > 1).length;
+const rest = new Map();
+for (const t of tris) for (const v of t) rest.set(v, skin.getVertexPosition(v, new THREE.Vector3()).clone());
+let worst = 0;
+for (const time of [0.2, 0.55, 0.9, 1.4]) {
+  animateAvatarRig(rig.bones, time, 0.5, 0.3);
+  rig.root.updateMatrixWorld(true);
+  rig.skeleton.update();
+  for (const t of tris) for (const [a, b] of [[t[0], t[1]], [t[1], t[2]], [t[2], t[0]]]) {
+    const now = skin.getVertexPosition(a, new THREE.Vector3()).distanceTo(skin.getVertexPosition(b, new THREE.Vector3()));
+    worst = Math.max(worst, Math.abs(now - rest.get(a).distanceTo(rest.get(b))));
+  }
+}
+console.log(JSON.stringify({ triangles: tris.length, straddling, worst }));
+"""
+        result = self._node(script)
+        self.assertEqual(result.returncode, 0, msg=result.stderr[-1500:])
+        data = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertGreater(data["triangles"], 100)
+        self.assertEqual(data["straddling"], 0,
+                         "a triangle spanning two joints is torn apart when they rotate")
+        self.assertLess(data["worst"], 1e-4, "animated mesh edges must keep their length")
+
+
+class CameraFramingTests(unittest.TestCase):
+    """No weird cameras: the shipped MP4 must not look up at its own subject."""
+
+    def test_camera_never_sits_below_its_target(self):
+        script = """
+import { chooseSafeCamera } from './scene_camera.mjs';
+const target = [0, 3.05, 24];
+const low = chooseSafeCamera(target, [0, 0.1, 40], [], 14, 36);
+const porch = [{ position: [0, 9, 30], size: [26, 2, 22] }, { position: [10, 4, 30], size: [2, 10, 2] }];
+const under = chooseSafeCamera(target, [0, 4, 36], porch, 14, 36);
+console.log(JSON.stringify({ low, under }));
+"""
+        result = subprocess.run(["node", "--input-type=module", "-e", script], cwd=RENDERER,
+                                capture_output=True, text=True, timeout=300)
+        self.assertEqual(result.returncode, 0, msg=result.stderr[-1500:])
+        data = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertGreater(data["low"][1] - 3.05, 0.9, "the camera must look down, not up")
+        under = data["under"]
+        inside_roof = abs(under[0]) <= 13 + 0.6 and abs(under[2] - 30) <= 11 + 0.6 and under[1] < 8
+        self.assertFalse(inside_roof, "the camera must not be placed underneath a roof slab")
+
+
 if __name__ == "__main__":
     unittest.main()

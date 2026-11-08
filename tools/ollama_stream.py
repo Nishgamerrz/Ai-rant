@@ -449,6 +449,37 @@ def next_token_budget(current: int) -> int:
     return min(MAX_PREDICT_CEILING, max(int(current) * 2, 4096))
 
 
+def stick_to_fallback(model: str, label: str, state_path: Path | None = None) -> None:
+    """Tell the rest of the workflow to keep using `model` from now on.
+
+    Written through GITHUB_ENV so later steps see it, and applied to this process
+    too. Every later call in the run names the run's primary model, so without
+    this the next call reloads the slow model (minutes), finds it slow again, then
+    reloads the fallback: a reload before every step. Nothing happens when
+    GITHUB_ENV is absent, which keeps local runs unchanged.
+    """
+    os.environ["AI_MODEL"] = model
+    os.environ["AI_MODEL_STICKY"] = "1"
+    if state_path is not None:
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(model + "\n", encoding="utf-8")
+        except OSError:
+            pass
+    target = os.environ.get("GITHUB_ENV")
+    print(paint(f"[{label}] {model} is now this run's model, so the remaining steps "
+                "think on the weights already in memory instead of reloading "
+                "between steps.", "plan"), flush=True)
+    if not target:
+        return
+    try:
+        with Path(target).open("a", encoding="utf-8") as out:
+            out.write(f"AI_MODEL={model}\n")
+            out.write("AI_MODEL_STICKY=1\n")
+    except OSError:
+        return
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--request", required=True, type=Path, help="Ollama chat request JSON")
@@ -494,6 +525,18 @@ def main() -> None:
     args = parser.parse_args()
 
     request = json.loads(args.request.read_text(encoding="utf-8"))
+    # One model resident for the whole run. The state file sits next to the output
+    # so every call in this run - including a second attempt inside the same step,
+    # where GITHUB_ENV has already been read for the last time - is rewritten to the
+    # model that is actually loaded. That is what stops the reload-per-step cycle.
+    state_path = args.output.parent / ".ai_model"
+    if state_path.is_file():
+        resident = state_path.read_text(encoding="utf-8").strip()
+        if resident and resident != request.get("model"):
+            print(paint(f"[{args.label}] {resident} is already loaded for this run, so this "
+                        f"call uses it instead of reloading {request.get('model')}.",
+                        "notice"), flush=True)
+            request["model"] = resident
     model = request.get("model", "model")
     thinking_on = bool(request.get("think"))
     print(paint(f"[{args.label}] sending {model} request "
@@ -599,6 +642,12 @@ def main() -> None:
             result = attempt(fallback, f" (fallback {args.fallback_model})")
             if result is not None:
                 result["fallback_model"] = args.fallback_model
+                # Sticky hand-over. Every later call in the run names the run's
+                # primary model, so without this the next step would reload the
+                # slow model (minutes), find it slow again, and reload the
+                # fallback: a reload before every single step.
+                stick_to_fallback(args.fallback_model, args.label,
+                                  args.output.parent / ".ai_model")
         if result is None:
             raise SystemExit(1)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
