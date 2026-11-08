@@ -114,9 +114,11 @@ class BlueprintRepairTests(unittest.TestCase):
 
 class SubAgentInvitationTests(unittest.TestCase):
     def test_the_prompts_invite_one_or_two_uses_at_any_time(self):
+        # Only the story prompt keeps the open invitation; the map prompt replaced
+        # it with the REQUIRED map/camera/models tasks (and dropped the duplicate).
         self.assertEqual(WORKFLOW.count(
-            "YOU CAN USE IT ONE OR TWO TIMES, OR AS MANY TIMES AS YOU LIKE, AT ANY POINT"), 2)
-        self.assertIn("asking is never compulsory, only useful", WORKFLOW)
+            "YOU CAN USE IT ONE OR TWO TIMES, OR AS MANY TIMES AS YOU LIKE, AT ANY POINT"), 1)
+        self.assertIn("There is no quota and no rule that you must ask", WORKFLOW)
 
     def test_the_map_prompt_names_the_required_keys(self):
         self.assertIn('REQUIRED TOP-LEVEL KEYS, every one of them present and non-empty', WORKFLOW)

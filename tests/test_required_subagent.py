@@ -50,7 +50,13 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('"topic":"models"', self.text)
 
     def test_story_prompt_keeps_delegation_optional(self) -> None:
-        self.assertIn("for the STORY, asking is never compulsory", self.text)
+        # The story prompt still offers the helper without demanding it; only the
+        # map/camera step is compulsory (the map prompt now says so explicitly and
+        # no longer carries the old "for the STORY" aside).
+        self.assertIn("There is no quota and no rule that you must ask", self.text)
+        self.assertIn('if you can write the story yourself, just write it and return '
+                      '"subagent_tasks":[]', self.text)
+        self.assertIn("THE GEMINI SUB-AGENT IS NOT OPTIONAL FOR THIS STEP", self.text)
 
     def test_workflow_sends_the_review_itself_when_nothing_was_delegated(self) -> None:
         self.assertIn("MAP_TOPICS = {'map', 'cameras', 'faces'}", self.text)

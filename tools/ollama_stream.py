@@ -218,9 +218,13 @@ class Heartbeat(threading.Thread):
     """
 
     def __init__(self, label: str, interval: float, console: TypedConsole,
-                 limit: int = HEARTBEAT_NOTES):
+                 limit: int = HEARTBEAT_NOTES, resident: bool | None = None,
+                 prompt_chars: int = 0):
         super().__init__(daemon=True)
         self.label = label
+        # True/False when /api/ps answered, None when it could not be asked.
+        self.resident = resident
+        self.prompt_chars = prompt_chars
         self.interval = max(2.0, float(interval))
         self.console = console
         self.limit = max(1, int(limit))
@@ -247,8 +251,17 @@ class Heartbeat(threading.Thread):
             if idle < self.interval:
                 continue
             if self.state == "waiting for the first token":
-                text = (f"[{self.label}] still loading the model: "
-                        f"{time.time() - self.started:.0f}s so far")
+                waited = time.time() - self.started
+                if self.resident:
+                    # The weights are already in RAM: this is prefill, not a load.
+                    text = (f"[{self.label}] {waited:.0f}s reading the "
+                            f"{self.prompt_chars:,}-character plan prompt "
+                            f"(model already in memory, no reload)")
+                elif self.resident is False:
+                    text = (f"[{self.label}] still loading the model into memory: "
+                            f"{waited:.0f}s so far (one-time load)")
+                else:
+                    text = (f"[{self.label}] no first token yet: {waited:.0f}s so far")
             else:
                 text = f"[{self.label}] nothing new for {idle:.0f}s, still working"
             self.console.note(f"{text} (quiet note {self.messages + 1}/{self.limit})")
@@ -288,6 +301,37 @@ def installed_models(url: str, timeout: float = 30) -> set[str]:
     return names
 
 
+def resident_models(url: str, timeout: float = 10) -> set[str]:
+    """Names Ollama currently holds IN MEMORY (/api/ps), as 'name:tag'.
+
+    This answers the question the console used to guess at: a long silence before
+    the first token is NOT always a load. When the model is already resident the
+    wait is prompt prefill (a 6,000-token blueprint prompt takes minutes on a CPU
+    runner), and saying "still loading the model" made a normal step look like a
+    reload.
+    """
+    base = url.split("/api/")[0]
+    try:
+        with urllib.request.urlopen(f"{base}/api/ps", timeout=timeout) as handle:
+            payload = json.loads(handle.read().decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 - a probe must never break a call
+        return set()
+    names = set()
+    for entry in payload.get("models") or []:
+        name = str(entry.get("name") or entry.get("model") or "")
+        if name:
+            names.add(name)
+            if ":" not in name:
+                names.add(f"{name}:latest")
+    return names
+
+
+def is_resident(model: str, url: str) -> bool:
+    wanted = model.strip()
+    wanted = wanted if ":" in wanted else f"{wanted}:latest"
+    return wanted in resident_models(url)
+
+
 class ModelUnusable(Exception):
     """Raised when Ollama fails (5xx) to load or run the selected model."""
 
@@ -312,11 +356,29 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
     content: list[str] = []
     thinking: list[str] = []
     console = TypedConsole(type_delay, type_budget)
-    beat = None if quiet or heartbeat_seconds <= 0 else Heartbeat(label, heartbeat_seconds, console)
+    # Ask Ollama whether these weights are already in RAM, so a long wait is
+    # described correctly: a real load, or prompt prefill on a resident model.
+    model_name = str(request.get("model") or "")
+    resident = is_resident(model_name, url) if model_name else None
+    prompt_chars = sum(len(str(message.get("content") or ""))
+                       for message in (request.get("messages") or []))
+    if not quiet and model_name:
+        if resident:
+            print(paint(f"[{label}] {model_name} is already in memory, so this call does "
+                        f"not reload it; it starts by reading its "
+                        f"{prompt_chars:,}-character prompt.", "notice"), flush=True)
+        elif resident is False:
+            print(paint(f"[{label}] {model_name} is not in memory right now, so this call "
+                        f"loads it once (the last step should not have evicted it).",
+                        "warning"), flush=True)
+    beat = None if quiet or heartbeat_seconds <= 0 else Heartbeat(
+        label, heartbeat_seconds, console, resident=resident, prompt_chars=prompt_chars)
     if beat:
         beat.start()
     started = time.time()
     tokens = 0
+    prompt_tokens = 0
+    prompt_ns = 0
     done_reason = ""
     # Live console: every streamed piece is printed verbatim the moment it
     # arrives, so the log fills in letter by letter. The old code reprinted a
@@ -443,6 +505,8 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
             if event.get("done"):
                 tokens = int(event.get("eval_count") or 0)
                 done_reason = str(event.get("done_reason") or "")
+                prompt_tokens = int(event.get("prompt_eval_count") or 0)
+                prompt_ns = int(event.get("prompt_eval_duration") or 0)
     if beat:
         beat.stop()
     answer = "".join(content)
@@ -462,14 +526,21 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
     if not quiet:
         console.close_box()
         rate = f", {tokens / elapsed:.1f} tok/s" if elapsed >= 1 and tokens else ""
+        prefill = (f", it read {prompt_tokens:,} prompt tokens in "
+                   f"{prompt_ns / 1e9:.0f}s first" if prompt_tokens and prompt_ns else "")
         if first_char_seconds is not None:
-            if first_char_seconds >= 15:
-                console.line(f"[{label}] the first word took {first_char_seconds:.0f}s - that is a "
-                             f"model LOAD, not thinking. If this is not the first call of the "
-                             f"run, the weights were not in memory.", kind="warning")
+            if first_char_seconds >= 15 and not resident:
+                console.line(f"[{label}] the first word took {first_char_seconds:.0f}s: the "
+                             f"weights were NOT in memory, so this call loaded "
+                             f"{model_name} first{prefill}.", kind="warning")
+            elif first_char_seconds >= 15:
+                console.line(f"[{label}] first word after {first_char_seconds:.0f}s - no "
+                             f"reload: {model_name} was already in memory, that was prompt "
+                             f"reading{prefill}.", kind="success")
             else:
                 console.line(f"[{label}] first word after {first_char_seconds:.0f}s "
-                             f"(weights already in memory).", kind="success")
+                             f"(no reload: the weights were already in memory){prefill}.",
+                             kind="success")
         console.line(f"[{label}] \u2713 finished in {elapsed:.0f}s: {len(answer):,} answer chars, "
                      f"{len(reasoning):,} reasoning chars, {tokens} tokens{rate}"
                      f"{', CUT OFF at the token ceiling' if done_reason == 'length' else ''}.",
@@ -478,6 +549,9 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
         "message": {"role": "assistant", "content": answer, "thinking": reasoning},
         "response": answer,
         "thinking": reasoning,
+        "prompt_eval_count": prompt_tokens,
+        "prompt_eval_seconds": round(prompt_ns / 1e9, 1) if prompt_ns else None,
+        "model_was_resident": resident,
         "done": True,
         "eval_count": tokens,
         "done_reason": done_reason,
@@ -773,7 +847,13 @@ def main() -> None:
             "tokens": result["eval_count"],
             "tokens_per_second": round(result["eval_count"] / result["elapsed_seconds"], 2)
             if result["elapsed_seconds"] else None,
-            "loaded_here": first_word is None or first_word >= 15,
+            # A load is only a load when the weights were genuinely not in RAM.
+            "loaded_here": (result.get("model_was_resident") is False
+                            or (result.get("model_was_resident") is None
+                                and (first_word is None or first_word >= 15))),
+            "model_was_resident": result.get("model_was_resident"),
+            "prompt_tokens": result.get("prompt_eval_count"),
+            "prompt_seconds": result.get("prompt_eval_seconds"),
             "fallback": bool(result.get("fallback_model")),
         }, ensure_ascii=False) + "\n")
 
