@@ -209,6 +209,18 @@ def main() -> None:
         fail("MP4 must contain both video and audio streams")
     if (video.get("width"), video.get("height")) != (1440, 2560):
         fail(f"expected vertical 1440x2560 video, got {video.get('width')}x{video.get('height')}")
+    # Correct dimensions are not enough: a non-square sample aspect ratio, or a
+    # rotation flag, makes players stretch the picture even though it is 9:16.
+    sar = str(video.get("sample_aspect_ratio") or "1:1")
+    try:
+        sar_numerator, sar_denominator = (int(part) for part in sar.split(":", 1))
+    except ValueError:
+        fail(f"unreadable sample aspect ratio {sar!r}")
+    if sar_numerator and sar_denominator and abs(sar_numerator / sar_denominator - 1) > 0.001:
+        fail(f"pixels are not square (sample aspect ratio {sar}); players will stretch this 9:16 short")
+    rotation = (video.get("side_data_list") or [{}])[0].get("rotation") or video.get("tags", {}).get("rotate")
+    if rotation and abs(float(rotation)) % 360:
+        fail(f"the video carries a {rotation} degree rotation flag, so players will stretch it")
     if video.get("codec_name") != "h264" or audio.get("codec_name") != "aac":
         fail(f"expected H.264/AAC streams, got {video.get('codec_name')}/{audio.get('codec_name')}")
     try:

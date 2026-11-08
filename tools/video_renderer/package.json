@@ -13,6 +13,7 @@
     "test:avatar-glb": "node avatar_glb_smoke_test.mjs",
     "test:caption-overlay": "node caption_smoke_test.mjs",
     "test:page-template": "node template_check.mjs",
+    "test:projection": "node projection_smoke_test.mjs",
     "test:map-features": "node map_features_smoke_test.mjs"
   },
   "dependencies": {
