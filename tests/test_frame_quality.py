@@ -126,6 +126,26 @@ class FrameAuditTests(unittest.TestCase):
         self.assertIn("args.preview", RENDERER)
         self.assertIn("frame_${previewFrame.get(frame)}", RENDERER)
 
+    def test_a_rejected_preflight_frame_is_kept_for_inspection(self):
+        preflight = RENDERER.split("async function preflight(")[1]
+        # Saved before the checks run, so a rejected frame still reaches the run's
+        # artifacts and the preview branch: looking at the picture is how you fix it.
+        self.assertIn("preflight-frame.jpg", preflight)
+        save = preflight.index("preflight-frame.jpg")
+        self.assertLess(save, preflight.index("the frame is blown out"))
+        self.assertIn("preflight-frame.jpg", WORKFLOW)
+
+    def test_over_exposure_is_named_as_such(self):
+        self.assertIn("the frame is blown out", RENDERER)
+        self.assertIn("the lighting is over-exposed", RENDERER)
+
+    def test_the_renderer_uses_a_film_curve_instead_of_clipping(self):
+        # NoToneMapping clipped every lit surface to white and destroyed the
+        # colour, which measured as 251/255 luminance with 0.2% colour.
+        self.assertIn("THREE.ACESFilmicToneMapping", RENDERER)
+        self.assertNotIn("THREE.NoToneMapping", RENDERER)
+        self.assertIn("toneMappingExposure", RENDERER)
+
     def test_the_workflow_asks_for_previews_and_uploads_them(self):
         self.assertIn("--preview dist/preview", WORKFLOW)
         self.assertIn("short-preview-stills", WORKFLOW)

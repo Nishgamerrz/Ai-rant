@@ -1347,7 +1347,7 @@ jobs:
             echo "Frames written by the renderer for [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
             echo "These are the same frames the colour audit measured, so they show what the MP4 shows."
             echo
-            for file in frame_*.png; do
+            for file in frame_*.png preflight-frame.jpg; do
               [ -e "$file" ] || continue
               echo "## $file"
               echo

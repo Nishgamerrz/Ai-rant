@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /** Headless Three.js renderer: theme-furnished Roblox-style Parts + authentic Roblox avatar OBJ meshes. */
-import { createReadStream, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -139,14 +139,21 @@ function buildHtml(data) {
   const scene=new THREE.Scene(); scene.background=skyColor;
   const renderer=new THREE.WebGLRenderer({antialias:true,alpha:false,powerPreference:'high-performance'});
   renderer.setPixelRatio(1); renderer.setSize(${WIDTH},${HEIGHT},false); renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFSoftShadowMap;
-  renderer.outputColorSpace=THREE.SRGBColorSpace; renderer.toneMapping=THREE.NoToneMapping;
+  // Filmic tone mapping, not raw linear output. With no tone curve every channel
+  // above 1.0 clipped, so a lit Roblox-style Part turned flat white and lost its
+  // colour entirely: a measured frame came out at mean luminance 251/255 with
+  // 0.2% coloured pixels. ACES rolls the highlights off instead of clipping them.
+  renderer.outputColorSpace=THREE.SRGBColorSpace; renderer.toneMapping=THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure=1.0;
   document.getElementById('frame').prepend(renderer.domElement);
   const camera=new THREE.PerspectiveCamera(42,${WIDTH}/${HEIGHT},0.4,1600);
-  scene.add(new THREE.HemisphereLight(0xf2f9ff,0x9aa88f,2.9));
-  scene.add(new THREE.AmbientLight(0xffffff,0.75));
-  const sun=new THREE.DirectionalLight(0xfff4dc,2.5); sun.position.set(-150,260,150); sun.castShadow=true; sun.shadow.mapSize.set(2048,2048); sun.shadow.camera.left=-320; sun.shadow.camera.right=320; sun.shadow.camera.top=320; sun.shadow.camera.bottom=-320; sun.shadow.camera.near=10; sun.shadow.camera.far=900; sun.shadow.bias=-0.0006; sun.shadow.normalBias=0.45; scene.add(sun);
-  const fill=new THREE.DirectionalLight(0xcfe4ff,1.05); fill.position.set(160,120,-160); scene.add(fill);
-  const rim=new THREE.DirectionalLight(0xffffff,0.6); rim.position.set(0,60,220); scene.add(rim);
+  // Bright daylight, but inside a range that tone mapping can hold: the sum of
+  // these used to sit near 6x, which put every lit surface over the clip point.
+  scene.add(new THREE.HemisphereLight(0xf2f9ff,0x9aa88f,1.1));
+  scene.add(new THREE.AmbientLight(0xffffff,0.35));
+  const sun=new THREE.DirectionalLight(0xfff4dc,2.9); sun.position.set(-150,260,150); sun.castShadow=true; sun.shadow.mapSize.set(2048,2048); sun.shadow.camera.left=-320; sun.shadow.camera.right=320; sun.shadow.camera.top=320; sun.shadow.camera.bottom=-320; sun.shadow.camera.near=10; sun.shadow.camera.far=900; sun.shadow.bias=-0.0006; sun.shadow.normalBias=0.45; scene.add(sun);
+  const fill=new THREE.DirectionalLight(0xcfe4ff,0.6); fill.position.set(160,120,-160); scene.add(fill);
+  const rim=new THREE.DirectionalLight(0xffffff,0.4); rim.position.set(0,60,220); scene.add(rim);
   const groundRgb=sanitize(DATA.plan.ground_color||[126,182,120],118);
   const floor=new THREE.Mesh(new THREE.PlaneGeometry(760,760),new THREE.MeshStandardMaterial({color:new THREE.Color(...groundRgb.map(v=>v/255)),roughness:0.95}));
   floor.rotation.x=-Math.PI/2; floor.position.y=-0.06; floor.receiveShadow=true; scene.add(floor);
@@ -901,6 +908,17 @@ async function preflight(plan) {
     await page.evaluate(() => window.renderAt(0.1));
     const shot = await page.screenshot({ type: 'jpeg', quality: 80, timeout: 30000 });
 
+    // Keep the frame even if a check below rejects it: the fastest way to see what
+    // is wrong with a picture is to look at the picture, and the workflow uploads
+    // dist/preview on failure too.
+    try {
+      const keep = resolve('dist/preview');
+      mkdirSync(keep, { recursive: true });
+      writeFileSync(join(keep, 'preflight-frame.jpg'), shot);
+    } catch (error) {
+      console.log(`Could not keep the preflight frame: ${error.message}`);
+    }
+
     stage = 'check the frame';
     if (pageErrors.length) throw new Error('the page threw: ' + pageErrors.slice(0, 3).join(' | '));
     if (shot.length < 4096) throw new Error(`the rendered frame is only ${shot.length} bytes; the scene is blank`);
@@ -911,10 +929,12 @@ async function preflight(plan) {
     // the raw job log cannot be opened.
     console.log(`::notice title=Render preflight picture::${health.projection.canvas[0]}x${health.projection.canvas[1]} canvas, `
       + `stretch ${health.projection.stretch}, mean luminance ${health.meanLuminance}/255, `
-      + `${(health.blackFraction * 100).toFixed(1)}% near-black, ${(health.colourFraction * 100).toFixed(1)}% colourful.`);
+      + `${(health.blackFraction * 100).toFixed(1)}% near-black, ${(health.brightFraction * 100).toFixed(1)}% near-white, `
+      + `${(health.colourFraction * 100).toFixed(1)}% colourful.`);
     console.log(`Render preflight picture: ${health.projection.canvas[0]}x${health.projection.canvas[1]} canvas, `
       + `stretch ${health.projection.stretch}, mean luminance ${health.meanLuminance}/255, `
-      + `${(health.blackFraction * 100).toFixed(1)}% near-black, ${(health.colourFraction * 100).toFixed(1)}% colourful.`);
+      + `${(health.blackFraction * 100).toFixed(1)}% near-black, ${(health.brightFraction * 100).toFixed(1)}% near-white, `
+      + `${(health.colourFraction * 100).toFixed(1)}% colourful.`);
     if (health.projection.canvas[0] !== WIDTH || health.projection.canvas[1] !== HEIGHT) {
       throw new Error(`the browser drew a ${health.projection.canvas[0]}x${health.projection.canvas[1]} canvas instead of ${WIDTH}x${HEIGHT}, so the picture would be rescaled and stretched`);
     }
@@ -924,8 +944,13 @@ async function preflight(plan) {
     if (health.blackFraction > 0.55) {
       throw new Error(`the frame is ${(health.blackFraction * 100).toFixed(0)}% pure black; a material is missing its colour`);
     }
+    if (health.brightFraction > 0.55) {
+      throw new Error(`the frame is blown out: ${(health.brightFraction * 100).toFixed(0)}% of it is near-white `
+        + `(mean luminance ${health.meanLuminance}/255), so the lighting is over-exposed`);
+    }
     if (health.colourFraction < 0.05) {
-      throw new Error(`the frame is colourless (${(health.colourFraction * 100).toFixed(1)}% coloured pixels)`);
+      throw new Error(`the frame is colourless (${(health.colourFraction * 100).toFixed(1)}% coloured pixels, `
+        + `${(health.brightFraction * 100).toFixed(1)}% near-white)`);
     }
     const props = await page.evaluate(() => (window.physicsSummary || {}).staticProps || 0);
     console.log(`Render preflight passed: page built, WebGL scene ready, ${props} collider(s), `
