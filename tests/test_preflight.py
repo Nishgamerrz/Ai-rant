@@ -8,6 +8,7 @@ step and the blueprint repair below are what stop that.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -157,6 +158,22 @@ class FailureIsVisibleWithoutTheJobLog(unittest.TestCase):
     def test_the_renderer_reports_its_picture_numbers_as_an_annotation(self):
         renderer = (ROOT / "tools/video_renderer/render_short.mjs").read_text(encoding="utf-8")
         self.assertIn("::notice title=Render preflight picture::", renderer)
+
+
+class PreflightWorldIsRepresentativeTests(unittest.TestCase):
+    """The colour audit measures the preflight frame, so that frame has to look
+    like a real world. A single grey hall measured 4.8% colour and failed a
+    renderer that was in fact working."""
+
+    def test_the_sample_world_actually_has_a_palette(self):
+        source = (ROOT / "tools/preflight.py").read_text(encoding="utf-8")
+        plan = source.split("plan = {", 1)[1].split("with tempfile", 1)[0]
+        colours = re.findall(r'"color": \[([^\]]+)\]', plan)
+        self.assertGreaterEqual(len(colours), 5, "the preflight world needs a real palette")
+        distinct = {tuple(int(part) for part in colour.split(",")) for colour in colours}
+        self.assertGreaterEqual(len(distinct), 5, "the preflight colours must differ from each other")
+        # And at least one prop must be a light, so lighting is exercised too.
+        self.assertIn('"light":', plan)
 
 
 if __name__ == "__main__":

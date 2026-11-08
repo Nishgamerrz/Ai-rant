@@ -145,12 +145,36 @@ def render_frame():
     """Start Chromium, load the real page and capture one frame."""
     node = shutil.which("node")
     assert node, "node is not installed"
+    # A representative world, not a single grey box. The colour audit measures
+    # this frame and refuses a colourless world, so the sample it measures has to
+    # look like the thing it is standing in for: grass, a painted hall, a
+    # terracotta roof, a lamp and a bright prop.
     plan = {
         "name": "Preflight World",
-        "theme": "A plain preflight scene.",
-        "props": [{"name": "Preflight Hall", "model": "hall", "shape": "Block", "material": "Brick",
-                   "position": [0, 0, 0], "size": [20, 12, 16], "color": [150, 160, 175],
-                   "physics": "static"}],
+        "theme": "A small sunlit town square: grass, a painted hall, a tiled roof and a lamp.",
+        "ground_color": [126, 182, 120],
+        "ambient_color": [186, 210, 238],
+        "props": [
+            {"name": "Preflight Ground", "model": "ground", "shape": "Block", "material": "Grass",
+             "position": [0, -0.5, 0], "size": [120, 1, 120], "color": [126, 182, 120],
+             "physics": "static"},
+            {"name": "Preflight Hall", "model": "hall", "shape": "Block", "material": "Brick",
+             "position": [0, 6, 0], "size": [26, 12, 18], "color": [186, 150, 120],
+             "physics": "static"},
+            {"name": "Preflight Roof", "model": "roof", "shape": "Wedge", "material": "Slate",
+             "position": [0, 14, 0], "size": [28, 5, 20], "color": [196, 104, 74],
+             "physics": "static"},
+            {"name": "Preflight Tree", "model": "tree", "shape": "Ball", "material": "Grass",
+             "position": [-16, 8, 6], "size": [9, 9, 9], "color": [74, 148, 66],
+             "physics": "static"},
+            {"name": "Preflight Lamp", "model": "lamp", "shape": "Cylinder", "material": "Neon",
+             "position": [12, 6, 6], "size": [1, 12, 1], "color": [255, 226, 156],
+             "light": {"color": [255, 226, 156], "brightness": 2.0, "range": 30},
+             "physics": "static"},
+            {"name": "Preflight Bench", "model": "bench", "shape": "Block", "material": "Wood",
+             "position": [8, 2, 10], "size": [6, 2, 2], "color": [120, 82, 50],
+             "physics": "static"},
+        ],
         "character_placements": [], "camera_shots": [], "face_expressions": [],
     }
     with tempfile.TemporaryDirectory() as tmp:
