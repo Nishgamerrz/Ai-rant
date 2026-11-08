@@ -33,6 +33,11 @@ from gemini_topic import (  # noqa: E402
 
 WORKFLOW = ROOT / ".github" / "workflows" / "main.yml"
 
+# Hermetic marker path: a real quota hit in an earlier workflow step must never
+# change what these stub-API tests see (see tests/test_gemini_subagent.py).
+os.environ.setdefault("GEMINI_QUOTA_MARKER",
+                      str(Path(tempfile.mkdtemp(prefix="quota-marker-")) / "gemini_quota_exhausted"))
+
 GOOD = ("A nervous student finds a lost wallet on the way to school and has to decide "
         "what to do before the first bell rings.")
 
