@@ -279,7 +279,7 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
            max_seconds: float = 0.0, stall_seconds: float = 0.0,
            type_delay: float = 0.002, type_budget: float = 120.0,
            heartbeat_seconds: float = 15.0, min_tps: float = 0.0,
-           tps_window: float = 90.0) -> dict:
+           tps_window: float = 90.0, projected_seconds: float = 0.0) -> dict:
     request = {**request, "stream": True}
     payload = json.dumps(request).encode("utf-8")
     http = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
@@ -304,6 +304,11 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
     started_at = last_progress
     first_output = 0.0
     character_count = 0
+    # How many tokens this call was allowed to write. With the rate that is
+    # actually arriving, that is enough to project when it would finish - the
+    # honest way to catch "stuck for an hour" without imposing a wall clock on a
+    # model that is merely thinking hard.
+    target_tokens = float((request.get("options") or {}).get("num_predict") or 0)
     try:
         handle = urllib.request.urlopen(http, timeout=timeout)
     except urllib.error.HTTPError as exc:
@@ -377,13 +382,27 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
             # either: one blueprint took 48 minutes that way, and the run was over
             # before the render started. Judge the *rate*, not the wall clock, so a
             # slow-but-steady preset is still allowed to finish on its own terms.
-            if min_tps and first_output and now - first_output > tps_window:
+            rate = 0.0
+            if first_output and now - first_output > tps_window:
                 rate = character_count / max(1e-6, now - first_output)
+            if min_tps and rate:
                 if rate < min_tps:
                     console.close_box()
                     raise ModelTooSlow(
                         f"streaming at {rate:.2f} tokens/s, below the {min_tps:.1f} tokens/s "
                         f"floor; handing this call to a smaller model")
+            # A trickle that technically never stalls can still take an hour: a 14B
+            # model on a CPU runner writing 2 tokens/s needs 50 minutes for a
+            # 6000-token world plan. Project the finish time from the measured rate
+            # and hand over early, so the run still has time to render.
+            if projected_seconds and target_tokens and rate:
+                projected = target_tokens / rate
+                if projected > projected_seconds:
+                    console.close_box()
+                    raise ModelTooSlow(
+                        f"projected {projected / 60:.0f} min for {target_tokens:.0f} tokens at "
+                        f"{rate:.2f} tokens/s (budget {projected_seconds / 60:.0f} min); "
+                        f"handing this call to a faster model")
             if stall_seconds and now - last_progress > stall_seconds:
                 console.close_box()
                 raise ModelTooSlow(
@@ -466,6 +485,10 @@ def main() -> None:
     parser.add_argument("--tps-window", type=float,
                         default=float(os.environ.get("AI_TPS_WINDOW", "90")),
                         help="seconds of streaming before the rate is judged")
+    parser.add_argument("--projected-seconds", type=float,
+                        default=float(os.environ.get("AI_PROJECTED_SECONDS", "0") or 0),
+                        help="hand a call to the fallback model when its measured rate "
+                             "projects a finish later than this many seconds")
     parser.add_argument("--keep-stream-flag", action="store_true",
                         help="keep stream:true in the written request file for debugging")
     args = parser.parse_args()
@@ -486,6 +509,7 @@ def main() -> None:
 
     limits = {"max_seconds": args.max_seconds, "stall_seconds": args.stall_seconds,
               "min_tps": args.min_tps, "tps_window": args.tps_window,
+              "projected_seconds": args.projected_seconds,
               "type_delay": args.type_delay, "type_budget": args.type_budget,
               "heartbeat_seconds": args.heartbeat_seconds}
 
