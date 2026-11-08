@@ -24,21 +24,31 @@ THREE = ROOT / "tools/video_renderer/node_modules/three"
 
 
 class BlackWorldTests(unittest.TestCase):
-    def test_the_instanced_material_does_not_ask_for_vertex_colours(self):
-        # The exact line that made every Part black.
+    def test_the_instanced_material_asks_for_vertex_colours(self):
+        # Without vertexColors, three r170 computes instanceColor in the vertex
+        # shader and then drops it: every Part rendered white.
         material = re.search(r"new THREE\.MeshStandardMaterial\(\{color:0xffffff[^\n]*", RENDERER)
         self.assertIsNotNone(material, "the instanced map material moved; update this test")
-        line = material.group(0)
-        self.assertNotIn("vertexColors:true", line.replace(" ", ""))
+        self.assertIn("vertexColors:true", material.group(0).replace(" ", ""))
+
+    def test_every_shape_supplies_the_white_attribute_that_keeps_it_coloured(self):
+        # ...and with vertexColors on, a missing colour attribute reads as 0.0,
+        # which is the black world. Both halves have to hold at once.
+        shapes = (ROOT / "tools/video_renderer/map_shapes.mjs").read_text(encoding="utf-8")
+        self.assertIn("new Float32Array(vertices * 3).fill(1)", shapes)
+        self.assertIn("getAttribute('color')", shapes)
 
     def test_per_part_colour_still_comes_from_set_color_at(self):
-        # instanceColor is what carries a Part's own colour once vertex colours
-        # are gone, so the two must always be changed together.
         self.assertIn("setColorAt", RENDERER)
-        self.assertNotIn("vertexColors:true", RENDERER.replace(" ", ""))
 
     def test_a_vertex_colour_material_without_colours_is_refused(self):
         self.assertIn("asks for vertex colours the geometry does not have", RENDERER)
+
+    def test_the_shader_arithmetic_is_proved_without_a_gpu(self):
+        test = (ROOT / "tools/video_renderer/part_colour_smoke_test.mjs").read_text(encoding="utf-8")
+        self.assertIn("would render it black", test)
+        self.assertIn("instanceColor", test)
+        self.assertIn('"test:part-colour"', (ROOT / "tools/video_renderer/package.json").read_text(encoding="utf-8"))
 
     def test_three_really_multiplies_by_the_unbound_attribute(self):
         # Explains the bug, and fails loudly if three ever changes the rule.

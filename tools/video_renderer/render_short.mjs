@@ -162,6 +162,8 @@ function buildHtml(data) {
   // single instanced draw call still covers the whole map. The shapes themselves
   // live in map_shapes.mjs, which a Node smoke test builds for real.
   const geometry=buildShapeGeometry();
+  // Every shape already carries the white colour attribute the shader needs (see
+  // map_shapes.mjs); the per-Part colours arrive through setColorAt below.
   const settings={Plastic:[0,.78],SmoothPlastic:[0,.38],Concrete:[0,.93],Grass:[0,1],Slate:[0,.91],Wood:[0,.8],Metal:[.62,.38],Neon:[0,.25],Glass:[.08,.13],Brick:[0,.93],Asphalt:[0,1]};
   const buckets=new Map();
   function addPart(part){
@@ -259,7 +261,9 @@ function buildHtml(data) {
     // USE_COLOR, which multiplies vColor by a per-vertex colour attribute these
     // geometries do not have - so every Part in the map rendered pure black.
     // That was the "black boxes all over the world" artefact.
-    const material=new THREE.MeshStandardMaterial({color:0xffffff,roughness,metalness,transparent:group.mat==='Glass',opacity:group.mat==='Glass'?.48:1,depthWrite:group.mat!=='Glass',emissive:group.mat==='Neon'?0x15202b:0,emissiveIntensity:group.mat==='Neon'?.8:0});
+    // vertexColors is required for the per-Part colours below to reach the GPU;
+    // every shape now supplies the white colour attribute that makes it safe.
+    const material=new THREE.MeshStandardMaterial({color:0xffffff,vertexColors:true,roughness,metalness,transparent:group.mat==='Glass',opacity:group.mat==='Glass'?.48:1,depthWrite:group.mat!=='Glass',emissive:group.mat==='Neon'?0x15202b:0,emissiveIntensity:group.mat==='Neon'?.8:0});
     const instanced=new THREE.InstancedMesh(geometry[group.shape],material,group.parts.length); instanced.castShadow=group.mat!=='Glass'; instanced.receiveShadow=true;
     group.parts.forEach((part,index)=>{
       position.set(Number(part.position[0]),Number(part.position[1]),Number(part.position[2]));
