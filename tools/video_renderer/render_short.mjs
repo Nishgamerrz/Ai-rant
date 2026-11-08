@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /** Headless Three.js renderer: theme-furnished Roblox-style Parts + authentic Roblox avatar OBJ meshes. */
-import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,6 +23,7 @@ function argumentsFromProcess(argv) {
     i += 1;
   }
   args.preflight = argv.includes('--preflight');
+  args.preview = args.preview || '';
   const required = args.preflight ? ['map'] : ['map', 'characters', 'profiles', 'duration', 'output'];
   for (const key of required) {
     if (!args[key]) throw new Error(`Missing --${key.replaceAll('_', '-')}`);
@@ -246,7 +247,12 @@ function buildHtml(data) {
   const dynamicPropInstances=[];
   for(const group of buckets.values()){
     const [metalness,roughness]=settings[group.mat]||[0,.8];
-    const material=new THREE.MeshStandardMaterial({color:0xffffff,vertexColors:true,roughness,metalness,transparent:group.mat==='Glass',opacity:group.mat==='Glass'?.48:1,depthWrite:group.mat!=='Glass',emissive:group.mat==='Neon'?0x15202b:0,emissiveIntensity:group.mat==='Neon'?.8:0});
+    // Per-part colour comes from setColorAt(), which three multiplies into the
+    // shader through instanceColor. It must NOT set vertexColors: that defines
+    // USE_COLOR, which multiplies vColor by a per-vertex colour attribute these
+    // geometries do not have - so every Part in the map rendered pure black.
+    // That was the "black boxes all over the world" artefact.
+    const material=new THREE.MeshStandardMaterial({color:0xffffff,roughness,metalness,transparent:group.mat==='Glass',opacity:group.mat==='Glass'?.48:1,depthWrite:group.mat!=='Glass',emissive:group.mat==='Neon'?0x15202b:0,emissiveIntensity:group.mat==='Neon'?.8:0});
     const instanced=new THREE.InstancedMesh(geometry[group.shape],material,group.parts.length); instanced.castShadow=group.mat!=='Glass'; instanced.receiveShadow=true;
     group.parts.forEach((part,index)=>{
       position.set(Number(part.position[0]),Number(part.position[1]),Number(part.position[2]));
@@ -258,6 +264,11 @@ function buildHtml(data) {
       const body=dynamicPropBodies.get(part);if(body)dynamicPropInstances.push({part,body,mesh:instanced,index});
     });
     instanced.instanceMatrix.needsUpdate=true; scene.add(instanced);
+    // A vertex-colour material without a colour attribute silently renders
+    // black, so the two are checked together rather than trusted.
+    if(material.vertexColors&&!geometry[group.shape]?.getAttribute?.('color')){
+      throw new Error('Instanced map material asks for vertex colours the geometry does not have; every Part would render black.');
+    }
   }
   // LIGHTS. A Part with a light is a lamp: it keeps its own colour and casts a
   // pool of light that the AI can make bigger, brighter or darker by number.
@@ -644,9 +655,67 @@ function buildHtml(data) {
       captions:captions.length};
     renderer.compile(scene,camera);return true;
   });
+  // Measure the frame that was just drawn: how bright it is, how much of it is
+  // pure black, how colourful it is, and how black the middle of the shot is.
+  // A world whose materials silently failed renders as black silhouettes, and
+  // that used to be discovered only by watching the finished MP4.
+  window.measureFrame=()=>{
+    const probe=document.createElement('canvas');
+    probe.width=180;probe.height=320;
+    const ctx=probe.getContext('2d',{willReadFrequently:true});
+    ctx.drawImage(renderer.domElement,0,0,probe.width,probe.height);
+    const {data}=ctx.getImageData(0,0,probe.width,probe.height);
+    let sum=0,black=0,bright=0,colourful=0,centreDark=0,centreCount=0;
+    const pixels=probe.width*probe.height;
+    const centreColumn=probe.width/2;
+    for(let i=0;i<data.length;i+=4){
+      const r=data[i],g=data[i+1],b=data[i+2];
+      const l=.2126*r+.7152*g+.0722*b;
+      sum+=l;
+      if(l<26)black+=1;
+      if(l>232)bright+=1;
+      if(Math.max(r,g,b)-Math.min(r,g,b)>42)colourful+=1;
+      const column=(i/4)%probe.width;
+      if(Math.abs(column-centreColumn)<=45){centreCount+=1;if(l<26)centreDark+=1;}
+    }
+    return {
+      meanLuminance:Number((sum/pixels).toFixed(1)),
+      blackFraction:Number((black/pixels).toFixed(3)),
+      brightFraction:Number((bright/pixels).toFixed(3)),
+      colourFraction:Number((colourful/pixels).toFixed(3)),
+      centreBlackFraction:Number((centreDark/Math.max(1,centreCount)).toFixed(3))
+    };
+  };
   // Captions follow the narration's own SRT cues: the line on screen is the line
   // being spoken. A cue pops in slightly small and settles within a tenth of a
   // second, the way story shorts animate their text.
+  // Square-pixel probe. A stretched MP4 never has the wrong frame size; it has a
+  // projection that is wider in one axis than the other, which happens when the
+  // camera aspect and the canvas the browser really drew disagree. Measure it in
+  // pixels against the live drawing buffer instead of trusting the constants.
+  window.probeProjection=()=>{
+    const size=renderer.getDrawingBufferSize(new THREE.Vector2());
+    camera.aspect=size.x/size.y;camera.updateProjectionMatrix();camera.updateMatrixWorld(true);
+    const forward=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+    const right=new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion);
+    const up=new THREE.Vector3(0,1,0).applyQuaternion(camera.quaternion);
+    const anchorPoint=camera.position.clone().addScaledVector(forward,12);
+    const project=(point)=>{
+      const ndc=point.clone().project(camera);
+      return {x:(ndc.x*0.5+0.5)*size.x,y:(ndc.y*0.5+0.5)*size.y};
+    };
+    const centre=project(anchorPoint);
+    const across=project(anchorPoint.clone().add(right));
+    const tall=project(anchorPoint.clone().add(up));
+    const pixelX=Math.abs(across.x-centre.x),pixelY=Math.abs(tall.y-centre.y);
+    return {
+      canvas:[Math.round(size.x),Math.round(size.y)],
+      cameraAspect:Number(camera.aspect.toFixed(4)),
+      pixelsPerUnitX:Number(pixelX.toFixed(2)),
+      pixelsPerUnitY:Number(pixelY.toFixed(2)),
+      stretch:Number((pixelX/Math.max(pixelY,1e-6)).toFixed(4))
+    };
+  };
   const captionEl=document.getElementById('caption');
   let captionCue=null,captionText='';
   function captionAt(t){
@@ -819,6 +888,24 @@ async function preflight(plan) {
     stage = 'check the frame';
     if (pageErrors.length) throw new Error('the page threw: ' + pageErrors.slice(0, 3).join(' | '));
     if (shot.length < 4096) throw new Error(`the rendered frame is only ${shot.length} bytes; the scene is blank`);
+    // Catch a stretching or black world at the start of the run, not after it.
+    stage = 'measure the picture';
+    const health = await page.evaluate(() => ({ projection: window.probeProjection(), ...window.measureFrame() }));
+    console.log(`Render preflight picture: ${health.projection.canvas[0]}x${health.projection.canvas[1]} canvas, `
+      + `stretch ${health.projection.stretch}, mean luminance ${health.meanLuminance}/255, `
+      + `${(health.blackFraction * 100).toFixed(1)}% near-black, ${(health.colourFraction * 100).toFixed(1)}% colourful.`);
+    if (health.projection.canvas[0] !== WIDTH || health.projection.canvas[1] !== HEIGHT) {
+      throw new Error(`the browser drew a ${health.projection.canvas[0]}x${health.projection.canvas[1]} canvas instead of ${WIDTH}x${HEIGHT}, so the picture would be rescaled and stretched`);
+    }
+    if (Math.abs(health.projection.stretch - 1) > 0.02) {
+      throw new Error(`the picture is stretched (ratio ${health.projection.stretch}); the camera aspect does not match the canvas`);
+    }
+    if (health.blackFraction > 0.55) {
+      throw new Error(`the frame is ${(health.blackFraction * 100).toFixed(0)}% pure black; a material is missing its colour`);
+    }
+    if (health.colourFraction < 0.05) {
+      throw new Error(`the frame is colourless (${(health.colourFraction * 100).toFixed(1)}% coloured pixels)`);
+    }
     const props = await page.evaluate(() => (window.physicsSummary || {}).staticProps || 0);
     console.log(`Render preflight passed: page built, WebGL scene ready, ${props} collider(s), `
       + `frame captured (${shot.length.toLocaleString()} bytes).`);
@@ -878,6 +965,16 @@ async function main() {
     if(!ready)throw new Error('3D map and actual Roblox avatars failed to load.');
     const simulation=await page.evaluate(()=>window.physicsSummary);
     const avatarRigging=await page.evaluate(()=>window.avatarRigSummary);
+    // Fail before a single frame is encoded if the picture itself is distorted.
+    const projection=await page.evaluate(()=>window.probeProjection());
+    console.log(`Projection probe: canvas ${projection.canvas[0]}x${projection.canvas[1]}, camera aspect ${projection.cameraAspect}, `
+      + `${projection.pixelsPerUnitX}px across vs ${projection.pixelsPerUnitY}px tall per world unit (stretch ${projection.stretch}).`);
+    if(projection.canvas[0]!==WIDTH||projection.canvas[1]!==HEIGHT){
+      throw new Error(`The renderer drew a ${projection.canvas[0]}x${projection.canvas[1]} frame instead of ${WIDTH}x${HEIGHT}; the MP4 would be scaled off-ratio and look stretched.`);
+    }
+    if(Math.abs(projection.stretch-1)>0.02){
+      throw new Error(`The picture is stretched: one world unit covers ${projection.pixelsPerUnitX}px horizontally but ${projection.pixelsPerUnitY}px vertically (ratio ${projection.stretch}, expected 1). The camera aspect has drifted away from the canvas size.`);
+    }
     const faces=await page.evaluate(()=>window.faceRigSummary);
     console.log(`Animated faces: ${faces.faces}/${avatarRigging.total} avatar(s), ${faces.expressionSwitches} AI-scheduled expression switch(es) (${faces.expressionSource}), ${faces.faceShots} face close-up shot(s), ${faces.captions} caption cue(s) driving mouth movement.`);
     console.log(`Rapier simulation ready for ${simulation.dynamicProps} dynamic AI prop(s) and ${simulation.staticProps} static world collider(s); ${orderedProfiles.length} authentic avatar(s) use collision-free scripted paths.`);
@@ -891,21 +988,62 @@ async function main() {
       throw new Error(`Moving-limb MP4 blocked: only ${avatarRigging.rigged}/${avatarRigging.total} avatars loaded as 3D meshes. A 2D thumbnail cannot animate limbs. Make the username-matched RBXM MeshParts or an authorized Roblox 3D avatar mesh accessible, then rerun; no static-limb MP4 will be packaged.`);
     }
     const frameStartedAt = Date.now();
-    ffmpeg=spawn('ffmpeg',['-y','-hide_banner','-loglevel','warning','-f','image2pipe','-vcodec','mjpeg','-framerate',String(FPS),'-i','pipe:0','-an','-c:v','libx264','-preset','veryfast','-crf','19','-pix_fmt','yuv420p','-vf','scale=1440:2560:flags=lanczos','-r',String(FPS),'-t',String(args.duration),'-movflags','+faststart',args.output],{stdio:['pipe','ignore','inherit']});
+    ffmpeg=spawn('ffmpeg',['-y','-hide_banner','-loglevel','warning','-f','image2pipe','-vcodec','mjpeg','-framerate',String(FPS),'-i','pipe:0','-an','-c:v','libx264','-preset','veryfast','-crf','19','-pix_fmt','yuv420p','-vf','scale=1440:2560:flags=lanczos,setsar=1','-r',String(FPS),'-t',String(args.duration),'-movflags','+faststart',args.output],{stdio:['pipe','ignore','inherit']});
     const ffmpegExit=once(ffmpeg,'close');
     const totalFrames=args.duration*FPS;
     console.log(`Rendering ${totalFrames} headless 3D frames with Rapier gravity/collisions and ${orderedProfiles.length} genuine Roblox avatar(s) (mesh or account-thumbnail source).`);
+    // Still previews: a handful of frames written as PNG next to the video, so
+    // the look of a run can be checked in seconds instead of downloading and
+    // watching a hundred-megabyte MP4. They are also the frames the colour audit
+    // measures, so a black or blown-out world is caught during the render.
+    const previewDir = args.preview ? resolve(args.preview) : '';
+    if (previewDir) mkdirSync(previewDir, { recursive: true });
+    const previewTimes = new Set([0, Math.round(args.duration * 0.12), Math.round(args.duration * 0.3),
+      Math.round(args.duration * 0.5), Math.round(args.duration * 0.7), Math.round(args.duration * 0.9),
+      Math.round(args.duration) - 1].filter(value => value >= 0 && value < args.duration));
+    const previewFrame = new Map([...previewTimes].map((second, index) => [second * FPS, index + 1]));
+    const measured = [];
     for(let frame=0;frame<totalFrames;frame++){
       const time=frame/FPS;
       await page.evaluate(t=>window.renderAt(t),time);
       const jpeg=await page.screenshot({type:'jpeg',quality:92,timeout:30000});
       await writeFrame(ffmpeg.stdin,jpeg);
+      if(previewFrame.has(frame)||frame%Math.round(FPS*15)===0){
+        const stats=await page.evaluate(()=>window.measureFrame());
+        const shotProjection=await page.evaluate(()=>window.probeProjection());
+        if(Math.abs(shotProjection.stretch-1)>0.02){
+          throw new Error(`Shot at t=${time.toFixed(1)}s is stretched: ${shotProjection.pixelsPerUnitX}px across vs ${shotProjection.pixelsPerUnitY}px tall per world unit (ratio ${shotProjection.stretch}, expected 1).`);
+        }
+        measured.push({time:Number(time.toFixed(1)),...stats});
+        if(previewDir&&previewFrame.has(frame)){
+          const label=String(Math.round(time)).padStart(3,'0');
+          await page.screenshot({path:join(previewDir,`frame_${previewFrame.get(frame)}_t${label}s.png`),type:'png',timeout:30000});
+        }
+      }
       const completed=frame+1;
       if(frame===0||completed%30===0||completed===totalFrames){
         const elapsed=(Date.now()-frameStartedAt)/1000;
         const rate=completed/Math.max(elapsed,0.001);
         const remaining=(totalFrames-completed)/Math.max(rate,0.001);
         console.log(`Rendered ${completed}/${totalFrames} frames (${time.toFixed(1)}s video); elapsed ${elapsed.toFixed(0)}s, estimated ${remaining.toFixed(0)}s remaining.`);
+      }
+    }
+    if(measured.length){
+      const mean=(key)=>measured.reduce((total,item)=>total+item[key],0)/measured.length;
+      const worst=measured.reduce((low,item)=>item.blackFraction>low.blackFraction?item:low,measured[0]);
+      console.log(`Frame audit over ${measured.length} sampled frame(s): mean luminance ${mean('meanLuminance').toFixed(0)}/255, `
+        + `${(mean('blackFraction')*100).toFixed(1)}% near-black, ${(mean('colourFraction')*100).toFixed(1)}% colourful, `
+        + `darkest sample t=${worst.time}s at ${(worst.blackFraction*100).toFixed(1)}% black.`);
+      if(previewDir) console.log(`Wrote ${Math.min(measured.length,previewFrame.size)} still preview(s) to ${previewDir}`);
+      // A world of black silhouettes is a bug, not a style: stop before shipping it.
+      const blackFrames=measured.filter(item=>item.blackFraction>0.55);
+      if(blackFrames.length&&blackFrames.length>=Math.ceil(measured.length*0.6)){
+        throw new Error(`The world renders black: ${blackFrames.length}/${measured.length} sampled frames are more than 55% pure black `
+          + `(worst t=${worst.time}s at ${(worst.blackFraction*100).toFixed(0)}%). A material is missing its colour - `
+          + 'check that instanced parts use instanceColor and not vertex colors.');
+      }
+      if(mean('colourFraction')<0.05){
+        throw new Error(`The world renders colourless: only ${(mean('colourFraction')*100).toFixed(1)}% of the frame carries any colour.`);
       }
     }
     ffmpeg.stdin.end();

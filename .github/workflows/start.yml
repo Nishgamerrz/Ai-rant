@@ -70,7 +70,9 @@ on:
         type: string
 
 permissions:
-  contents: read
+  # The generator publishes the still previews to the media-preview branch, so the
+  # caller has to allow that too: a called workflow can never exceed its caller.
+  contents: write
 
 jobs:
   short:

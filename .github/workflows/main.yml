@@ -1159,11 +1159,12 @@ jobs:
             --duration "$DURATION_SECONDS" \
             --captions dist/narration.srt \
             --face-animation always \
+            --preview dist/preview \
             --output dist/short_silent.mp4
           test -s dist/short_silent.mp4
           ffmpeg -hide_banner -y -i dist/short_silent.mp4 -i dist/narration.mp3 \
             -filter_complex "[1:a]apad=whole_dur=${DURATION_SECONDS},atrim=duration=${DURATION_SECONDS},loudnorm=I=-16:TP=-1.5:LRA=11[a]" \
-            -map 0:v:0 -map '[a]' -c:v copy -c:a aac -b:a 192k -t "$DURATION_SECONDS" \
+            -map 0:v:0 -map '[a]' -c:v copy -aspect 9:16 -c:a aac -b:a 192k -t "$DURATION_SECONDS" \
             -movflags +faststart dist/Roblox_2K_YouTube_Short.mp4
           python tools/validate_short.py \
             --video dist/Roblox_2K_YouTube_Short.mp4 \
@@ -1174,6 +1175,16 @@ jobs:
             --profiles dist/avatar_profiles.json \
             --map-plan dist/Roblox_Story_Map.json \
             --duration "$DURATION_SECONDS"
+
+      - name: Upload the still previews so the look can be checked in seconds
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: short-preview-stills
+          path: dist/preview/
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload native Studio project even if the MP4 cannot use a protected mesh
         if: failure() && steps.studio-experience.outcome == 'success'
@@ -1284,3 +1295,56 @@ jobs:
             echo '- Review the first failed step above, fix that issue, then rerun this workflow.'
             echo "- Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # The finished MP4 is ~150 MB, and GitHub's artifact download refuses to open in
+  # some browsers. This job copies the small still previews the renderer already
+  # wrote onto a standing `media-preview` branch, so the look of a run can be
+  # checked (and shared) in one click instead of downloading a whole video.
+  # It never affects the result of the run: every step is allowed to fail.
+  publish_preview:
+    needs: generate_roblox_short
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download the still previews
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: short-preview-stills
+          path: preview
+
+      - name: Publish them to the media-preview branch
+        continue-on-error: true
+        run: |
+          if [ ! -d preview ]; then
+            echo "No still previews were produced, so there is nothing to publish."
+            exit 0
+          fi
+          ls -la preview
+          WORK=$(mktemp -d)
+          cd "$WORK"
+          git init -q -b media-preview .
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          cp "$GITHUB_WORKSPACE"/preview/*.png . 2>/dev/null || true
+          {
+            echo "# Still previews"
+            echo
+            echo "Frames written by the renderer for [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
+            echo "These are the same frames the colour audit measured, so they show what the MP4 shows."
+            echo
+            for file in frame_*.png; do
+              [ -e "$file" ] || continue
+              echo "## $file"
+              echo
+              echo "![${file}](${file})"
+              echo
+            done
+          } > README.md
+          git add -A
+          git commit -q -m "Still previews for run $GITHUB_RUN_ID" || exit 0
+          git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" media-preview
+          echo "Published the stills to the media-preview branch."
