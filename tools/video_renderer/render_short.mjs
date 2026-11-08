@@ -132,9 +132,24 @@ function buildHtml(data) {
     if(luminance>=floor)return c;
     const blend=Math.min(1,(floor-luminance)/Math.max(1,floor));
     const target=[168,180,196];
-    return c.map((channel,i)=>Math.round(channel*(1-blend*0.86)+target[i]*(blend*0.86)));
+    // Keep most of the hue: pulling a dark Part all the way to grey was part of
+    // why a colourful world read as a washed-out one.
+    return c.map((channel,i)=>Math.round(channel*(1-blend*0.55)+target[i]*(blend*0.55)));
   };
-  const rgb=(value)=>new THREE.Color(...sanitize(value).map(v=>v/255));
+  // The AI writes colours as sRGB bytes, so they must be declared as sRGB.
+  // new THREE.Color(r,g,b) treats its arguments as already-linear working values,
+  // which brightened and desaturated every Part: a green ground came out as a
+  // near-white tile. setRGB with SRGBColorSpace converts exactly once.
+  const rgb=(value)=>{
+    // A little vibrance, because tone mapping desaturates: the AI's pastel greens
+    // and blues arrived at 0.07 saturation and read as grey on screen. Pushing
+    // each colour away from its own grey by 18% keeps the world colourful without
+    // inventing hues the AI did not ask for.
+    const [r,g,b]=sanitize(value);
+    const grey=.2126*r+.7152*g+.0722*b;
+    const boost=(channel)=>Math.max(0,Math.min(255,Math.round(grey+(channel-grey)*1.18)));
+    const c=new THREE.Color();c.setRGB(boost(r)/255,boost(g)/255,boost(b)/255,THREE.SRGBColorSpace);return c;
+  };
   const skyColor=rgb(DATA.plan.ambient_color||[186,210,238]).lerp(new THREE.Color(0x9fd0f4),.5);
   const scene=new THREE.Scene(); scene.background=skyColor;
   const renderer=new THREE.WebGLRenderer({antialias:true,alpha:false,powerPreference:'high-performance'});
@@ -143,17 +158,22 @@ function buildHtml(data) {
   // above 1.0 clipped, so a lit Roblox-style Part turned flat white and lost its
   // colour entirely: a measured frame came out at mean luminance 251/255 with
   // 0.2% coloured pixels. ACES rolls the highlights off instead of clipping them.
-  renderer.outputColorSpace=THREE.SRGBColorSpace; renderer.toneMapping=THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure=1.0;
+  // AgX keeps hue and saturation as highlights roll off; ACES pushed bright
+  // surfaces towards white, which is the washed-out look this replaced.
+  renderer.outputColorSpace=THREE.SRGBColorSpace; renderer.toneMapping=THREE.AgXToneMapping;
+  renderer.toneMappingExposure=1.1;
   document.getElementById('frame').prepend(renderer.domElement);
   const camera=new THREE.PerspectiveCamera(42,${WIDTH}/${HEIGHT},0.4,1600);
   // Bright daylight, but inside a range that tone mapping can hold: the sum of
   // these used to sit near 6x, which put every lit surface over the clip point.
-  scene.add(new THREE.HemisphereLight(0xf2f9ff,0x9aa88f,1.1));
-  scene.add(new THREE.AmbientLight(0xffffff,0.35));
-  const sun=new THREE.DirectionalLight(0xfff4dc,2.9); sun.position.set(-150,260,150); sun.castShadow=true; sun.shadow.mapSize.set(2048,2048); sun.shadow.camera.left=-320; sun.shadow.camera.right=320; sun.shadow.camera.top=320; sun.shadow.camera.bottom=-320; sun.shadow.camera.near=10; sun.shadow.camera.far=900; sun.shadow.bias=-0.0006; sun.shadow.normalBias=0.45; scene.add(sun);
-  const fill=new THREE.DirectionalLight(0xcfe4ff,0.6); fill.position.set(160,120,-160); scene.add(fill);
-  const rim=new THREE.DirectionalLight(0xffffff,0.4); rim.position.set(0,60,220); scene.add(rim);
+  // A daylight budget that fits inside the tone curve. The old sum (hemisphere
+  // 2.9 + ambient 0.75 + sun 2.5 + fill 1.05 + rim 0.6, roughly 6x) pushed every
+  // lit surface past white, so the frame measured 219/255 with no colour in it.
+  scene.add(new THREE.HemisphereLight(0xf2f9ff,0x9aa88f,0.5));
+  scene.add(new THREE.AmbientLight(0xffffff,0.15));
+  const sun=new THREE.DirectionalLight(0xfff4dc,1.35); sun.position.set(-150,260,150); sun.castShadow=true; sun.shadow.mapSize.set(2048,2048); sun.shadow.camera.left=-320; sun.shadow.camera.right=320; sun.shadow.camera.top=320; sun.shadow.camera.bottom=-320; sun.shadow.camera.near=10; sun.shadow.camera.far=900; sun.shadow.bias=-0.0006; sun.shadow.normalBias=0.45; scene.add(sun);
+  const fill=new THREE.DirectionalLight(0xcfe4ff,0.3); fill.position.set(160,120,-160); scene.add(fill);
+  const rim=new THREE.DirectionalLight(0xffffff,0.2); rim.position.set(0,60,220); scene.add(rim);
   const groundRgb=sanitize(DATA.plan.ground_color||[126,182,120],118);
   const floor=new THREE.Mesh(new THREE.PlaneGeometry(760,760),new THREE.MeshStandardMaterial({color:new THREE.Color(...groundRgb.map(v=>v/255)),roughness:0.95}));
   floor.rotation.x=-Math.PI/2; floor.position.y=-0.06; floor.receiveShadow=true; scene.add(floor);
@@ -816,7 +836,11 @@ async function measureJpeg(jpeg) {
     sum += l;
     if (l < 26) black += 1;
     if (l > 232) bright += 1;
-    if (Math.max(r, g, b) - Math.min(r, g, b) > 42) colourful += 1;
+    // "Colourful" is saturation, not raw channel spread: a pastel Roblox green
+    // and a pale sky differ by a few dozen levels but are clearly coloured, while
+    // grey concrete is not. Spread alone called a correctly lit world colourless.
+    const high = Math.max(r, g, b), low = Math.min(r, g, b);
+    if (high > 24 && (high - low) / high > 0.12) colourful += 1;
     if (Math.abs((pixel % PROBE_WIDTH) - centreColumn) <= 45) {
       centreCount += 1;
       if (l < 26) centreDark += 1;
@@ -959,7 +983,7 @@ async function preflight(plan) {
       throw new Error(`the frame is blown out: ${(health.brightFraction * 100).toFixed(0)}% of it is near-white `
         + `(mean luminance ${health.meanLuminance}/255), so the lighting is over-exposed`);
     }
-    if (health.colourFraction < 0.05) {
+    if (health.colourFraction < 0.25) {
       throw new Error(`the frame is colourless (${(health.colourFraction * 100).toFixed(1)}% coloured pixels, `
         + `${(health.brightFraction * 100).toFixed(1)}% near-white)`);
     }
@@ -1099,7 +1123,7 @@ async function main() {
           + `(worst t=${worst.time}s at ${(worst.blackFraction*100).toFixed(0)}%). A material is missing its colour - `
           + 'check that instanced parts use instanceColor and not vertex colors.');
       }
-      if(mean('colourFraction')<0.05){
+      if(mean('colourFraction')<0.25){
         throw new Error(`The world renders colourless: only ${(mean('colourFraction')*100).toFixed(1)}% of the frame carries any colour.`);
       }
     }

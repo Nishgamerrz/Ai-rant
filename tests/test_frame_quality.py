@@ -98,7 +98,8 @@ class NoStretchTests(unittest.TestCase):
         self.assertIn("await measureJpeg(shot)", preflight)
         # The same thresholds as the sampled audit, so the two cannot disagree.
         self.assertIn("health.blackFraction > 0.55", preflight)
-        self.assertIn("health.colourFraction < 0.05", preflight)
+        self.assertIn("health.colourFraction < 0.25", preflight)
+        self.assertIn("health.brightFraction > 0.55", preflight)
 
     def test_the_projection_maths_is_proved_without_a_gpu(self):
         test = (ROOT / "tools/video_renderer/projection_smoke_test.mjs").read_text(encoding="utf-8")
@@ -149,12 +150,30 @@ class FrameAuditTests(unittest.TestCase):
         self.assertIn("the frame is blown out", RENDERER)
         self.assertIn("the lighting is over-exposed", RENDERER)
 
+    def test_colour_is_measured_as_saturation_not_channel_spread(self):
+        body = RENDERER.split("async function measureJpeg(jpeg)", 1)[1].split("const BASE_ARGS", 1)[0]
+        self.assertIn("(high - low) / high > 0.12", body)
+
     def test_the_renderer_uses_a_film_curve_instead_of_clipping(self):
         # NoToneMapping clipped every lit surface to white and destroyed the
         # colour, which measured as 251/255 luminance with 0.2% colour.
-        self.assertIn("THREE.ACESFilmicToneMapping", RENDERER)
+        self.assertIn("THREE.AgXToneMapping", RENDERER)
         self.assertNotIn("THREE.NoToneMapping", RENDERER)
+        self.assertNotIn("THREE.ACESFilmicToneMapping", RENDERER)
         self.assertIn("toneMappingExposure", RENDERER)
+
+    def test_the_ai_colours_are_read_as_srgb(self):
+        # new THREE.Color(r,g,b) treats its arguments as linear working values,
+        # which brightened and desaturated every Part.
+        body = RENDERER.split("const rgb=(value)=>{", 1)[1].split("const skyColor", 1)[0]
+        self.assertIn("THREE.SRGBColorSpace", body)
+        self.assertNotIn("new THREE.Color(...", body)
+
+    def test_the_light_budget_is_proved_against_the_tone_curve(self):
+        test = (ROOT / "tools/video_renderer/lighting_balance_smoke_test.mjs").read_text(encoding="utf-8")
+        self.assertIn("simulated frame", test)
+        self.assertIn("Lighting balance smoke test passed", test)
+        self.assertIn('"test:lighting"', (ROOT / "tools/video_renderer/package.json").read_text(encoding="utf-8"))
 
     def test_the_workflow_asks_for_previews_and_uploads_them(self):
         self.assertIn("--preview dist/preview", WORKFLOW)
