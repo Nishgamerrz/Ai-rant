@@ -30,6 +30,13 @@ from gemini_subagent import (  # noqa: E402
 
 WORKFLOW = ROOT / ".github" / "workflows" / "main.yml"
 
+# The suite must not care what the run has already written into dist/: a real
+# 429 in an earlier workflow step leaves dist/gemini_quota_exhausted behind, and
+# every stub-API test here would then short-circuit before reaching its server.
+# Point the marker at a private temp path for the whole module.
+_MODULE_MARKER_DIR = tempfile.mkdtemp(prefix="quota-marker-")
+os.environ["GEMINI_QUOTA_MARKER"] = str(Path(_MODULE_MARKER_DIR) / "gemini_quota_exhausted")
+
 
 class _StubGemini(BaseHTTPRequestHandler):
     calls: list[dict] = []

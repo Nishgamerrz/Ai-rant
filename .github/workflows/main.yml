@@ -317,6 +317,9 @@ jobs:
           # world plan and the render. It also means the repository needs only this
           # one workflow: nothing is validated anywhere else.
           set -o pipefail
+          # Per-run state, never test input: an earlier step may have recorded a
+          # Gemini quota hit here, and the suite must run the same either way.
+          rm -f dist/gemini_quota_exhausted
           python -m pip install --quiet PyYAML reportlab
           python -m py_compile tools/*.py tests/*.py
           python tools/say.py plan "Running every tool and renderer test now, before the AI starts."
