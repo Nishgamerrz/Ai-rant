@@ -779,6 +779,52 @@ class _AlwaysAnswers(BaseHTTPRequestHandler):
         self.wfile.write((json.dumps({"done": True, "done_reason": "stop", "eval_count": 3}) + "\n").encode())
 
 
+class _SlowPrimaryNoFallback(BaseHTTPRequestHandler):
+    """Run #93: the primary is projected too slow and the fallback is absent.
+
+    The first request is answered in slow dribbles so the projection fires; the
+    retry (which runs without a projection) gets a normal answer. ``/api/tags``
+    reports only the primary, which is what makes the fallback genuinely missing.
+    """
+
+    models: list[str] = []
+    calls = 0
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        body = json.dumps({"models": [{"name": "qwen3:8b"}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        import time as _time
+
+        length = int(self.headers.get("Content-Length", 0))
+        payload = json.loads(self.rfile.read(length))
+        type(self).models.append(str(payload.get("model")))
+        type(self).calls += 1
+        first = type(self).calls == 1
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.end_headers()
+        if first:
+            # Two words, slowly: a measurable rate, a huge ceiling, so the finish is
+            # projected far into the future and the call is handed over.
+            for piece in ("{\"ok\":", "1}"):
+                self.wfile.write((json.dumps({"message": {"content": piece}, "done": False}) + "\n").encode())
+                self.wfile.flush()
+                _time.sleep(1.2)
+            self.wfile.write((json.dumps({"done": True, "done_reason": "stop", "eval_count": 8}) + "\n").encode())
+            return
+        self.wfile.write((json.dumps({"message": {"content": '{"ok":"retry"}'}, "done": False}) + "\n").encode())
+        self.wfile.write((json.dumps({"done": True, "done_reason": "stop", "eval_count": 5}) + "\n").encode())
+
+
 class _TooSlowPrimary(_AlwaysAnswers):
     """The primary model cannot run here; the known-good fallback can."""
 
@@ -911,3 +957,84 @@ class ModelResidencyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, "a cold load must be visible, not silent")
         self.assertIn("1 of 2 AI steps ran on weights already in RAM", result.stdout)
         self.assertIn("world plan: qwen3:8b -> COLD LOAD", result.stdout)
+
+
+class MissingFallbackTests(unittest.TestCase):
+    """A hand-over to a model that is not installed used to kill the call.
+
+    Reproduced from run #93: the world plan was projected too slow, the helper
+    switched to qwen3:4b, Ollama answered 404 because that model had never been
+    pulled, the 404 escaped as a bare HTTPError, and the whole map plan was lost.
+    The run then silently shipped a procedural world instead of the AI's.
+    """
+
+    def _run(self, handler, extra_args=()):
+        import tempfile
+
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            request = workdir / "request.json"
+            request.write_text(json.dumps({
+                "model": "qwen3:8b",
+                "messages": [{"role": "user", "content": "plan the world"}],
+                "think": True, "stream": False,
+                "options": {"num_predict": 200},
+            }), encoding="utf-8")
+            environment = {**os.environ, "AI_COLOR": "0"}
+            result = subprocess.run(
+                [sys.executable, "tools/ollama_stream.py",
+                 "--request", str(request), "--output", str(workdir / "out.json"),
+                 "--label", "world plan", "--timeout", "30",
+                 "--url", f"http://127.0.0.1:{server.server_port}/api/chat", *extra_args],
+                cwd=ROOT, capture_output=True, text=True, env=environment,
+            )
+            output = workdir / "out.json"
+            return result, (output.read_text(encoding="utf-8") if output.is_file() else None)
+
+    def test_a_fallback_that_is_not_installed_is_never_used(self):
+        handler = type("Handler", (_SlowPrimaryNoFallback,), {"models": [], "calls": 0})
+        result, output = self._run(
+            handler, ("--fallback-model", "qwen3:4b", "--projected-seconds", "1",
+                      "--tps-window", "0"))
+        # The call still succeeds, on the primary, with no speed projection left to
+        # kill it, and it says exactly why it did not hand over.
+        self.assertEqual(result.returncode, 0, msg=result.stdout[-2000:] + result.stderr[-1000:])
+        self.assertIn("is NOT installed", result.stdout)
+        self.assertIn("speed projection switched off", result.stdout)
+        # The primary was asked twice and answered the second time, so no work was
+        # lost just because the escape hatch was missing.
+        self.assertIn("retry", output or "")
+        self.assertIn("never pulled", result.stdout)
+
+    def test_a_404_is_reported_as_a_missing_model(self):
+        class Handler(HTTPServer.__mro__[0] if False else object):
+            pass
+
+        # Directly: a 404 from /api/chat must raise ModelMissing, not HTTPError.
+        sys.path.insert(0, str(ROOT / "tools"))
+        import ollama_stream
+
+        class FakeResponse:
+            def read(self):
+                return b'{"error":"model \\"qwen3:4b\\" not found"}'
+
+            def close(self):
+                return None
+
+        original = ollama_stream.urllib.request.urlopen
+
+        def fake_urlopen(request, timeout=None):
+            raise ollama_stream.urllib.error.HTTPError(
+                "http://127.0.0.1:1/api/chat", 404, "Not Found", {}, FakeResponse())
+
+        ollama_stream.urllib.request.urlopen = fake_urlopen
+        try:
+            with self.assertRaises(ollama_stream.ModelMissing):
+                ollama_stream.stream({"model": "qwen3:4b", "messages": []},
+                                     "http://127.0.0.1:1/api/chat", "test", 10, True)
+        finally:
+            ollama_stream.urllib.request.urlopen = original
