@@ -1063,6 +1063,9 @@ jobs:
                 SUBA_ROUNDS=$(( SUBA_ROUNDS + 1 ))
                 python tools/gemini_subagent.py \
                   --request subagent_tasks.json --output subagent_results.json --stdout
+                # The sub-agent has now seen the map and the cameras, so the
+                # belt-and-braces review at the end of this step is not needed.
+                touch map_subagent_review.done
                 # What the sub-agent did, task by task: the answer, how long it took,
                 # and which file it edited. The local AI reads this and confirms before
                 # the workflow moves on to the next step.
@@ -1094,7 +1097,92 @@ jobs:
                 )
                 python tools/say.py success "The Gemini sub-agent finished. The local AI is being told what it did, how long it took and which file it edited."
                 printf '\nWhat the Gemini sub-agent did with the tasks you delegated:\n%s\n\nRead it task by task: it tells you how long each job took and whether it edited a file.\nCONFIRM BEFORE YOU CONTINUE: if a result is good, keep it; if it is wrong or half-finished, fix it yourself or ask once more (one new task, never the same one twice). Say what you decided in "subagent_review": {"accepted":["<task ids you kept>"], "note":"one line on what you kept, fixed, or asked for"}. Then return the complete corrected JSON, with "subagent_tasks":[] when you need nothing else.\n' "$SUBAGENT_ANSWERS" >> map_prompt.txt
+                export SUBAGENT_ANSWERS
+                # A SHORT CONFIRMATION, not another ten-minute world plan: the AI is
+                # shown what the sub-agent did (with its seconds and the file it
+                # edited) and answers with a few dozen tokens. The plan it already
+                # wrote stands unless the AI itself asks for changes.
+                python - <<'PYCONF'
+          import json
+          import os
+          from pathlib import Path
+          try:
+              envelope = json.loads(Path('map_response.json').read_text(encoding='utf-8'))
+              plan = json.loads((envelope.get('message') or {}).get('content', envelope.get('response', '{}')))
+          except Exception:
+              plan = {}
+          plan = plan if isinstance(plan, dict) else {}
+          answers = os.environ.get('SUBAGENT_ANSWERS', '')[:4000]
+          digest = {
+              'name': plan.get('name'),
+              'theme': plan.get('theme'),
+              'props': len(plan.get('props') or []),
+              'camera_shots': len(plan.get('camera_shots') or []),
+              'face_expressions': len(plan.get('face_expressions') or []),
+          }
+          prompt = (
+              'You are the director of this Roblox short and you just asked the Gemini '
+              'sub-agent to do work on your map and cameras.\n'
+              'Your plan: ' + json.dumps(digest, ensure_ascii=False) + '\n'
+              'What the sub-agent did (each task, how long it took, whether it edited a '
+              'file):\n' + answers + '\n\n'
+              'Confirm it now in ONE short answer. If the results are good, accept them '
+              'and say so. If they are wrong or half-finished, say what you will fix '
+              'yourself or ask for, and set "changes_needed" to true only when the world '
+              'plan itself must be rewritten. Reply with JSON only: '
+              '{"accepted":["task ids you kept"], "note":"one line", '
+              '"changes_needed":false}'
+          )
+          Path('confirm_prompt.txt').write_text(prompt, encoding='utf-8')
+          request = {
+              'model': os.environ['AI_MODEL'],
+              'messages': [{'role': 'user', 'content': prompt}],
+              'format': {
+                  'type': 'object',
+                  'properties': {
+                      'accepted': {'type': 'array', 'items': {'type': 'string'}},
+                      'note': {'type': 'string'},
+                      'changes_needed': {'type': 'boolean'},
+                  },
+                  'required': ['accepted', 'note', 'changes_needed'],
+              },
+              'think': os.environ.get('OLLAMA_THINKING', 'true').lower() in ('1', 'true', 'yes'),
+              'stream': False,
+              'keep_alive': '60m',
+              'options': {'temperature': 0.4, 'num_ctx': int(os.environ['AI_NUM_CTX']),
+                          'num_predict': 220},
+          }
+          Path('confirm_request.json').write_text(json.dumps(request), encoding='utf-8')
+          PYCONF
+                python tools/ollama_stream.py --request confirm_request.json \
+                  --output confirm_response.json --label "AI confirms the sub-agent's work" \
+                  --timeout 300 --stall-seconds 240 --projected-seconds 0 \
+                  --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}" || true
+                NEED_REPLAN=$(python - <<'PYCN'
+          import json
+          from pathlib import Path
+          try:
+              envelope = json.loads(Path('confirm_response.json').read_text(encoding='utf-8'))
+              reply = json.loads((envelope.get('message') or {}).get('content', envelope.get('response', '{}')))
+          except Exception:
+              reply = {}
+          reply = reply if isinstance(reply, dict) else {}
+          accepted = ', '.join(str(item)[:40] for item in (reply.get('accepted') or [])) or 'none listed'
+          note = ' '.join(str(reply.get('note') or '').split())[:300]
+          print('[sub agent confirmed] kept: ' + accepted + (' - ' + note if note else ''))
+          print('1' if reply.get('changes_needed') is True else '0')
+          PYCN
+                )
+                CHANGES_NEEDED=$(printf '%s\n' "$NEED_REPLAN" | tail -n 1)
+                printf '%s\n' "$NEED_REPLAN" | sed '$d'
+                if [ "$CHANGES_NEEDED" != "1" ]; then
+                  python tools/say.py success "The AI confirmed the sub-agent's map, camera and model work, so the world plan is final and the run moves on to the next step."
+                  CONFIRMED_PLAN=1
+                  break
+                fi
+                python tools/say.py notice "The AI asked for changes, so it gets one more world plan round (round ${helper_round})."
               fi
+              # Only reached for web research or when the AI asked for changes.
               jq -n --argjson ctx "$AI_NUM_CTX" --arg model "$AI_MODEL" --argjson think "$OLLAMA_THINKING" --rawfile prompt map_prompt.txt --argjson tokens "$MAP_TOKENS" --slurpfile schema map_schema.json \
                 '{model:$model, messages:[{role:"user",content:$prompt}], format:$schema[0], think:$think, stream:false, keep_alive:"60m", options:{temperature:2.0, top_p:0.99, num_ctx:$ctx, num_predict:$tokens}}' > map_request.json
               python tools/ollama_stream.py --request map_request.json --output map_response.json \
