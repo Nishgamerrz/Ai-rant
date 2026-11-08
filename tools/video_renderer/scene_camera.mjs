@@ -32,12 +32,29 @@ function segmentHitsBox(start, end, box, padding = 0.35) {
 
 const MIN_CAMERA_HEIGHT = 3.4;
 const SOLID_PADDING = 2.6;
+// A story short looks down at its character, never up its nose. The first real
+// MP4 had a shot from ankle height looking up at a roofline with the subject
+// buried in the bottom corner, so every wide shot must now sit at least this far
+// ABOVE the point it is looking at.
+const MIN_ELEVATION_ABOVE_TARGET = 1.1;
+
+/** True when the camera would be sitting underneath a roof or ceiling. */
+function underOverhang(position, blockers) {
+  return blockers.some((box) => {
+    const bottom = box.position[1] - box.size[1] / 2;
+    if (bottom <= position[1] + 0.4) return false;
+    return Math.abs(position[0] - box.position[0]) <= box.size[0] / 2 + 0.6
+      && Math.abs(position[2] - box.position[2]) <= box.size[2] / 2 + 0.6;
+  });
+}
 
 function clearView(target, position, blockers) {
   // Keep a generous safety margin: a camera merely grazing a wall used to fill
   // the frame with an unexplained dark slab instead of the character.
   if (position[1] < MIN_CAMERA_HEIGHT) return false;
+  if (position[1] < target[1] + MIN_ELEVATION_ABOVE_TARGET) return false;
   if (blockers.some((box) => inside(position, box, SOLID_PADDING))) return false;
+  if (underOverhang(position, blockers)) return false;
   return !blockers.some((box) => segmentHitsBox(target, position, box, 0.9));
 }
 
@@ -47,7 +64,9 @@ export function chooseSafeCamera(target, desired, blockers, minDistance = 14, ma
   const rawDistance = Math.hypot(...raw) || 1;
   const distance = clamp(rawDistance, minDistance, maxDistance);
   const yaw = Math.atan2(raw[2], raw[0]);
-  const pitch = Math.asin(clamp(raw[1] / rawDistance, -0.65, 0.78));
+  // Never below the subject: a tiny negative is allowed for a level feel, but the
+  // camera is not permitted to look up from under the character's feet.
+  const pitch = Math.asin(clamp(raw[1] / rawDistance, -0.02, 0.78));
   const makeCandidate = (angle, elevation, radius) => [
     target[0] + Math.cos(elevation) * Math.cos(angle) * radius,
     target[1] + Math.sin(elevation) * radius,
@@ -60,11 +79,15 @@ export function chooseSafeCamera(target, desired, blockers, minDistance = 14, ma
   let best = null;
   let bestCost = Infinity;
   const angles = [0, 35, -35, 70, -70, 105, -105, 140, -140, 180];
-  const elevations = [pitch, 0.28, 0.48, 0.66];
+  const elevations = [pitch, 0.22, 0.34, 0.48, 0.66];
+  // Keep a floor under the elevation search so a fallback can never end up under
+  // the target either: 0.10 rad is a barely-below-eye-level shot.
+  const MIN_ELEVATION = 0.10;
   const radii = [distance, clamp(distance * 0.82, minDistance, maxDistance),
     clamp(distance * 1.12, minDistance, maxDistance), minDistance];
   for (const radius of radii) {
     for (const elevation of elevations) {
+      if (elevation < MIN_ELEVATION) continue;
       for (const degrees of angles) {
         const candidate = makeCandidate(yaw + degrees * Math.PI / 180, elevation, radius);
         if (!clearView(target, candidate, blockers)) continue;
@@ -82,6 +105,8 @@ export function chooseSafeCamera(target, desired, blockers, minDistance = 14, ma
   // The map can contain a closed/tall cluster; rise above it rather than place
   // the camera inside a wall or leave the avatar completely occluded.
   const roofline = blockers.reduce((max, box) => Math.max(max, box.position[1] + box.size[1] / 2), 8);
+  // This last-resort over-the-roof shot is the only place allowed to leave the
+  // elevation floor, because it is still better than a wall in the lens.
   return [target[0] + minDistance * 0.72, Math.max(target[1] + 14, roofline + 8), target[2] + minDistance * 0.72];
 }
 

@@ -89,6 +89,31 @@ const checks = [
   ['leaves no stray template delimiter', !page.includes('`')],
 ];
 
+/* --- escapes that the outer template literal silently eats ------------- */
+// The page is one big template literal, and a template literal only understands
+// a small set of escapes. Anything else loses its backslash without a word, so
+// `/\s+/g` (written with one backslash) reached Chromium as `/s+/g` and deleted
+// every letter s from every caption. Scan the literal's own source and refuse any
+// backslash that is not a real escape: a regex escape must be written doubled.
+const TEMPLATE_ESCAPES = new Set(['n', 't', 'r', 'b', 'f', 'v', '0', "'", '"', '\\', '`', '$', '\n']);
+const literalStart = body.indexOf('return `') + 'return `'.length;
+const templateText = body.slice(literalStart);
+const eaten = [];
+for (let index = 0; index < templateText.length; index += 1) {
+  if (templateText[index] !== '\\') continue;
+  const next = templateText[index + 1];
+  // \x, \u and line continuations are real escapes; everything else must be doubled.
+  if (TEMPLATE_ESCAPES.has(next) || next === 'x' || next === 'u') { index += 1; continue; }
+  const line = templateText.slice(0, index).split('\n').length;
+  eaten.push(`line ${line}: \\${next} (write \\\\${next} if a regex escape was meant)`);
+}
+if (eaten.length) {
+  console.error('The page template contains escapes a template literal silently eats:');
+  for (const item of eaten.slice(0, 10)) console.error(`  ${item}`);
+  process.exit(1);
+}
+checks.push(['every backslash in the page template is a real escape', true]);
+
 const failed = checks.filter(([, ok]) => !ok).map(([name]) => name);
 if (failed.length) {
   console.error(`buildHtml() produced a broken page: ${failed.join(', ')}`);

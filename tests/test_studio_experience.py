@@ -65,7 +65,14 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("OLLAMA_THINKING=$MODEL_THINKING", workflow)
         self.assertIn("ollama_stream.py", workflow)
         self.assertIn("/api/chat", (ROOT / "tools/ollama_stream.py").read_text(encoding="utf-8"))
-        self.assertNotIn("/api/generate", workflow)
+        # No AI generation may bypass the streaming helper. The single exception is
+        # the one-token warm-up, whose whole point is to load the weights before the
+        # first real prompt and to prove the model answers without spending a call.
+        self.assertEqual(workflow.count("/api/generate"), 1,
+                         "only the warm-up may call Ollama directly; every real AI call "
+                         "must go through ollama_stream.py")
+        warmup = workflow[workflow.index("/api/generate") - 400:workflow.index("/api/generate") + 400]
+        self.assertIn("num_predict:1", warmup)
         self.assertIn("128K-context, text-only DeepSeek-R1 reasoning model for world/shot planning", workflow)
         marker = workflow.index("case \"$MODEL_QUALITY\" in", workflow.index("ollama serve"))
         case_block = workflow[marker:]
@@ -531,6 +538,25 @@ class PageTemplateTests(unittest.TestCase):
         start = renderer.index("return `<!doctype")
         body = renderer[start:renderer.index("function serveFile", start)]
         self.assertEqual(body.count("`"), 2, "a backtick inside the page template ends it early")
+
+    def test_caption_whitespace_regex_reaches_the_browser_intact(self):
+        """A single backslash in the page template silently became "delete every s".
+
+        The caption code collapses runs of whitespace with a regex written inside
+        the page template. Written with ONE backslash, the template literal ate it
+        and Chromium received `/s+/g` - "replace every letter s with a space" - so
+        the shipped MP4 read "WHI TLE" and "HI FACE OFTENING" instead of "WHISTLE"
+        and "HIS FACE SOFTENING".
+        """
+        renderer = (ROOT / "tools/video_renderer/render_short.mjs").read_text(encoding="utf-8")
+        self.assertIn(r"replace(/\\s+/g,' ')", renderer,
+                      "the caption regex needs a doubled backslash inside the page template")
+
+    def test_the_template_check_rejects_eaten_escapes(self):
+        script = (ROOT / "tools/video_renderer/template_check.mjs").read_text(encoding="utf-8")
+        self.assertIn("TEMPLATE_ESCAPES", script,
+                      "the template check must scan for escapes a template literal eats")
+        self.assertIn("silently eats", script)
 
     def test_the_template_check_runs_the_builder(self):
         script = ROOT / "tools/video_renderer/template_check.mjs"

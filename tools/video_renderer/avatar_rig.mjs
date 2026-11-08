@@ -105,31 +105,111 @@ export function buildAvatarRig(THREE, model) {
     return Math.sqrt(dx * dx + dy * dy + dz * dz);
   }
 
+  // Roblox avatars are built from rigid parts bolted to rigid joints, so the mesh
+  // has to be skinned the same way: an entire connected piece (a hand, a shoe, a
+  // torso) follows ONE bone. Assigning each vertex to its own nearest bone - which
+  // is what this used to do - splits a single triangle across two joints, and when
+  // those joints rotate apart the triangle is dragged with both: the mesh tears
+  // into the folded, spiky shape that made the finished MP4 look broken.
+  function connectedParts(geometry) {
+    const position = geometry.getAttribute('position');
+    const count = position.count;
+    const parent = new Int32Array(count);
+    for (let vertex = 0; vertex < count; vertex += 1) parent[vertex] = vertex;
+    const find = (vertex) => {
+      let root = vertex;
+      while (parent[root] !== root) root = parent[root];
+      while (parent[vertex] !== root) {
+        const next = parent[vertex];
+        parent[vertex] = root;
+        vertex = next;
+      }
+      return root;
+    };
+    const union = (a, b) => {
+      const rootA = find(a);
+      const rootB = find(b);
+      if (rootA !== rootB) parent[rootB] = rootA;
+    };
+    // Weld by position first: an OBJ splits vertices per face, so two triangles in
+    // the same solid usually do not share a vertex index at all.
+    const byPosition = new Map();
+    const precision = 1e4;
+    for (let vertex = 0; vertex < count; vertex += 1) {
+      const key = `${Math.round(position.getX(vertex) * precision)},`
+        + `${Math.round(position.getY(vertex) * precision)},`
+        + `${Math.round(position.getZ(vertex) * precision)}`;
+      const seen = byPosition.get(key);
+      if (seen === undefined) byPosition.set(key, vertex);
+      else union(seen, vertex);
+    }
+    const index = geometry.getIndex();
+    if (index) {
+      for (let triangle = 0; triangle < index.count; triangle += 3) {
+        union(index.getX(triangle), index.getX(triangle + 1));
+        union(index.getX(triangle + 1), index.getX(triangle + 2));
+      }
+    } else {
+      for (let triangle = 0; triangle + 2 < count; triangle += 3) {
+        union(triangle, triangle + 1);
+        union(triangle + 1, triangle + 2);
+      }
+    }
+    const parts = new Map();
+    for (let vertex = 0; vertex < count; vertex += 1) {
+      const root = find(vertex);
+      if (!parts.has(root)) parts.set(root, []);
+      parts.get(root).push(vertex);
+    }
+    return [...parts.values()];
+  }
+
+  function boneForCentroid(centroid) {
+    let bestIndex = 0;
+    let bestDistance = Infinity;
+    for (const name of candidatesFor(centroid.x, centroid.y)) {
+      const segment = segmentsByName.get(name);
+      if (!segment) continue;
+      const distance = distanceToSegment(centroid, segment);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = boneIndices.get(name);
+      }
+    }
+    return bestIndex;
+  }
+
   function addSkinWeights(geometry) {
     const position = geometry.getAttribute('position');
     if (!position?.count) throw new Error('Avatar OBJ contains an empty mesh.');
     const indices = new Uint16Array(position.count * 4);
     const weights = new Float32Array(position.count * 4);
     const point = new THREE.Vector3();
-    for (let vertex = 0; vertex < position.count; vertex += 1) {
-      point.set(position.getX(vertex), position.getY(vertex), position.getZ(vertex));
-      let bestIndex = 0;
-      let bestDistance = Infinity;
-      for (const name of candidatesFor(point.x, point.y)) {
-        const segment = segmentsByName.get(name);
-        if (!segment) continue;
-        const distance = distanceToSegment(point, segment);
-        if (distance < bestDistance) {
-          bestDistance = distance;
-          bestIndex = boneIndices.get(name);
-        }
+    const parts = connectedParts(geometry);
+    // One bone for the whole piece, chosen from the piece's own centre. Small
+    // pieces (an eye, a button) are given to their own nearest bone; the point is
+    // that no piece is ever split between two bones, so nothing can tear.
+    const partBones = parts.map((vertices) => {
+      point.set(0, 0, 0);
+      for (const vertex of vertices) {
+        point.x += position.getX(vertex);
+        point.y += position.getY(vertex);
+        point.z += position.getZ(vertex);
       }
-      const offset = vertex * 4;
-      indices[offset] = bestIndex;
-      weights[offset] = 1;
+      point.multiplyScalar(1 / vertices.length);
+      return { vertices, bone: boneForCentroid(point) };
+    });
+    for (const { vertices, bone } of partBones) {
+      for (const vertex of vertices) {
+        const offset = vertex * 4;
+        indices[offset] = bone;
+        weights[offset] = 1;
+      }
     }
+    const rigStats = { parts: partBones.length, mixedParts: 0 };
     geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(indices, 4));
     geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(weights, 4));
+    return rigStats;
   }
 
   const meshes = [];

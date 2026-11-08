@@ -120,4 +120,49 @@ for (const offset of [[0, 0, 0], [0, 0, 24], [-7, 0, 31], [6, 2, -12]]) {
   pivot.remove(rig.root);
 }
 
-console.log(`Avatar rig smoke test passed; rigid single-bone skinning on ${rig.meshCount} mesh groups, ${rig.skeleton.bones.length} R15-style joints, no limb stretch under native clips.`);
+// Tear guard - the defect that shipped in the first real MP4. A single tall mesh
+// spanning hips, torso and head is the worst case for skinning: with per-vertex
+// bone picking its triangles straddle Hip, Spine, Chest and Head at once, and the
+// moment those bones rotate apart the mesh bursts into flat spikes. Whole rigid
+// pieces must follow one bone, so every triangle edge keeps its length under any
+// pose the animation code can produce.
+{
+  const tall = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.72, 5.2, 10, 14), material);
+  body.name = 'Body';
+  body.position.set(0, 3.1, 0);
+  tall.add(body);
+  const tallRig = buildAvatarRig(THREE, tall);
+  const skin = tallRig.root.children.find((child) => child.isSkinnedMesh && child.name === 'Body');
+  assert.ok(skin, 'the tall test body must be rigged as a skinned mesh');
+  const geometry = skin.geometry;
+  const index = geometry.getIndex();
+  assert.ok(index && index.count > 60, 'the tear test needs a real triangulated mesh');
+  const sample = [];
+  for (let step = 0; step < index.count; step += 3) sample.push([index.getX(step), index.getX(step + 1), index.getX(step + 2)]);
+  const rest = new Map();
+  for (const triangle of sample) for (const vertex of triangle) rest.set(vertex, skin.getVertexPosition(vertex, new THREE.Vector3()).clone());
+  const edgeLength = (a, b) => rest.get(a).distanceTo(rest.get(b));
+  // Every vertex of one piece must carry the same bone: that is the invariant.
+  const skinIndex = geometry.getAttribute('skinIndex');
+  for (const triangle of sample) {
+    const bones = triangle.map((vertex) => skinIndex.getX(vertex));
+    assert.equal(bones[0], bones[1], 'a triangle must not straddle two joints (it will tear)');
+    assert.equal(bones[1], bones[2], 'a triangle must not straddle two joints (it will tear)');
+  }
+  for (const time of [0.2, 0.55, 0.9, 1.4]) {
+    animateAvatarRig(tallRig.bones, time, 0.5, 0.3);
+    tallRig.root.updateMatrixWorld(true);
+    tallRig.skeleton.update();
+    for (const triangle of sample) {
+      for (const [a, b] of [[triangle[0], triangle[1]], [triangle[1], triangle[2]], [triangle[2], triangle[0]]]) {
+        const now = skin.getVertexPosition(a, new THREE.Vector3()).distanceTo(skin.getVertexPosition(b, new THREE.Vector3()));
+        const restLength = edgeLength(a, b);
+        assert.ok(Math.abs(now - restLength) < 1e-4,
+          `mesh tore at t=${time}: edge ${a}-${b} went from ${restLength.toFixed(4)} to ${now.toFixed(4)}`);
+      }
+    }
+  }
+}
+
+console.log(`Avatar rig smoke test passed; rigid one-bone-per-piece skinning on ${rig.meshCount} mesh groups (no triangle tears), ${rig.skeleton.bones.length} R15-style joints, no limb stretch under native clips.`);
