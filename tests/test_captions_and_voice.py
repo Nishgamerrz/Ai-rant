@@ -105,10 +105,10 @@ class CaptionSmokeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr[-1500:])
         self.assertIn("On-screen caption check passed", result.stdout)
 
-    def test_it_runs_in_the_validate_workflow(self):
+    def test_it_runs_at_the_start_of_the_one_workflow(self):
         data = json.loads((RENDERER / "package.json").read_text())
         self.assertEqual(data["scripts"]["test:caption-overlay"], "node caption_smoke_test.mjs")
-        ci = (ROOT / ".github" / "workflows" / "studio-experience-tests.yml").read_text()
+        ci = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
         self.assertIn("npm run test:caption-overlay", ci)
 
 

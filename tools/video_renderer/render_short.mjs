@@ -435,9 +435,12 @@ function buildHtml(data) {
       const [px,py,pz]=p.position,[sx,sy,sz]=p.size;
       if(py-sy/2>8||py+sy/2<.3)continue;
       const dx=Math.max(Math.abs(x-px)-sx/2,0),dz=Math.max(Math.abs(z-pz)-sz/2,0);
-      if(dx*dx+dz*dz<4.2*4.2)return false;
+      if(dx*dx+dz*dz<5.5*5.5)return false;
     }
-    return occupied.every(q=>Math.hypot(x-q[0],z-q[2])>=4.2);
+    // Two avatars closer than this overlap on screen and one of them ends up
+    // standing inside the other (the shipped frame had a second avatar's blocks
+    // filling the lens in front of the character being filmed).
+    return occupied.every(q=>Math.hypot(x-q[0],z-q[2])>=7);
   }
   function resolveActorPoint(point){
     const occupied=actors.map(a=>[a.baseX,a.baseY,a.baseZ]);
@@ -628,7 +631,15 @@ function buildHtml(data) {
       :new THREE.Vector3(...shot.target);
     const targetA=focusPoint(actorFor(a,index),a);
     const targetB=focusPoint(actorFor(b,Math.min(index+1,shots.length-1)),b);
-    const target=targetA.lerp(targetB,alpha).lerp(planned,0.2);
+    // Where the actor actually is beats what the plan guessed. A quarter-weighted
+    // blend with the planned point used to drag the aim several studs off the
+    // character, which is how the subject ended up half out of frame while the
+    // camera stared at a wall. The plan may nudge the framing, never move it.
+    const actingTarget=targetA.lerp(targetB,alpha);
+    const plannedOffset=planned.clone().sub(actingTarget);
+    const PLAN_MAX_OFFSET=3;
+    if(plannedOffset.length()>PLAN_MAX_OFFSET)plannedOffset.setLength(PLAN_MAX_OFFSET);
+    const target=actingTarget.clone().addScaledVector(plannedOffset,0.35);
     const desired=mix('position');
     // Roblox story shorts cut to the character's face for the emotional beat.
     // The AI sets framing:"face" on those shots and the camera closes right in.

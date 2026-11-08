@@ -39,10 +39,13 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("ROBLOX_OPEN_CLOUD_API_KEY is {key_state}", workflow)
         self.assertIn("Upload native Studio project even if the MP4 cannot use a protected mesh", workflow)
         self.assertIn("steps.studio-experience.outcome == 'success'", workflow)
-        renderer_tests = (ROOT / ".github/workflows/studio-experience-tests.yml").read_text(encoding="utf-8")
-        self.assertIn("npm run test:avatar-rig", renderer_tests)
-        self.assertIn("npm run test:avatar-obj", renderer_tests)
-        self.assertIn("npm run test:module-resolution", renderer_tests)
+        # There is exactly ONE workflow, and it runs every renderer test itself
+        # before the model is downloaded, so a broken tool fails in minutes.
+        workflows = sorted(path.name for path in (ROOT / ".github/workflows").iterdir())
+        self.assertEqual(workflows, ["main.yml"], "the repository must ship one workflow")
+        self.assertIn("npm run test:avatar-rig", workflow)
+        self.assertIn("npm run test:avatar-obj", workflow)
+        self.assertIn("npm run test:module-resolution", workflow)
         self.assertIn("uses: actions/cache/restore@v4", workflow)
         disk_cleanup_step = workflow.index("- name: Reclaim runner disk space for the selected model")
         cache_restore_step = workflow.index("- name: Restore cached selected Ollama model")
@@ -121,10 +124,10 @@ class StudioExperienceTests(unittest.TestCase):
         # Narration and repair budgets scale with the story length so a thinking
         # model cannot spend the whole ceiling reasoning and cut the answer off;
         # the map plan and the summary keep their own generous budgets.
-        self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:$tokens}}' > narration_request.json", workflow)
-        self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:$tokens}, messages:", workflow)
-        self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:$tokens}}' > map_request.json", workflow)
-        self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:8192, num_predict:900}}' > creation_summary_request.json", workflow)
+        self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:$ctx, num_predict:$tokens}}' > narration_request.json", workflow)
+        self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:$ctx, num_predict:$tokens}, messages:", workflow)
+        self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:$ctx, num_predict:$tokens}}' > map_request.json", workflow)
+        self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:$ctx, num_predict:900}}' > creation_summary_request.json", workflow)
         self.assertIn("NARRATION_TOKENS=$((1200 + DURATION_SECONDS * 8))", workflow)
         for legacy in ("temperature:0.9,", "temperature:1.5,", "temperature:0.45,", "temperature:0.75,", "temperature:0.6,"):
             self.assertNotIn(legacy, workflow)
@@ -569,10 +572,12 @@ class PageTemplateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr[-1500:])
         self.assertIn("Page template check passed", result.stdout)
 
-    def test_both_workflows_run_the_page_template_check(self):
-        for name in ("main.yml", "studio-experience-tests.yml"):
-            text = (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
-            self.assertIn("npm run test:page-template", text, name)
+    def test_the_one_workflow_runs_the_page_template_check(self):
+        text = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+        self.assertIn("npm run test:page-template", text)
+        # ...and it runs it BEFORE the model is downloaded: the check exists to stop
+        # a broken page from being discovered after an hour of AI work.
+        self.assertLess(text.index("test:page-template"), text.index("ollama pull"))
 
 
 class RenderGuardTests(unittest.TestCase):

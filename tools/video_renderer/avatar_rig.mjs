@@ -174,6 +174,64 @@ export function buildAvatarRig(THREE, model) {
       return new Map([[boneIndices.get(bone) ?? 0, 1]]);
     });
 
+    // Smooth the per-triangle weights across neighbouring triangles. The triangle
+    // rule above guarantees a triangle cannot stretch; this second rule keeps
+    // neighbouring triangles from disagreeing so much that the seam between them
+    // opens. Both are needed: rigid-but-unblended cracked the shoulder open by
+    // 1.18 studs, and blended-per-vertex stretched edges by 1144%.
+    const precision = 1e4;
+    const cornerKey = (vertex) => `${Math.round(position.getX(vertex) * precision)},`
+      + `${Math.round(position.getY(vertex) * precision)},`
+      + `${Math.round(position.getZ(vertex) * precision)}`;
+    const cornersPerTriangle = triangles.map((triangle) => new Set(triangle.map(cornerKey)));
+    const byCorner = new Map();
+    cornersPerTriangle.forEach((keys, triangle) => {
+      for (const key of keys) {
+        if (!byCorner.has(key)) byCorner.set(key, []);
+        byCorner.get(key).push(triangle);
+      }
+    });
+    const neighbours = triangles.map(() => new Set());
+    for (const list of byCorner.values()) {
+      for (const first of list) for (const second of list) if (first !== second) neighbours[first].add(second);
+    }
+    const SMOOTHING_PASSES = 14;
+    const ownWeight = 0.5;
+    for (let pass = 0; pass < SMOOTHING_PASSES; pass += 1) {
+      const smoothed = weightsPerTriangle.map((own, triangle) => {
+        const merged = new Map();
+        for (const [bone, weight] of own) merged.set(bone, weight * ownWeight);
+        const list = [...neighbours[triangle]];
+        if (list.length) {
+          const share = (1 - ownWeight) / list.length;
+          for (const neighbour of list) {
+            for (const [bone, weight] of weightsPerTriangle[neighbour]) {
+              merged.set(bone, (merged.get(bone) ?? 0) + weight * share);
+            }
+          }
+        }
+        return merged;
+      });
+      // Never let one side of the body borrow from the other: a stripe of skin
+      // dragged between the left arm and the right hip is the smear this whole
+      // rewrite exists to remove.
+      const guard = Math.max(0.05, Math.max(size.x, size.z) * 0.05);
+      smoothed.forEach((map, triangle) => {
+        const centroidX = triangles[triangle].reduce((sum, vertex) => sum + position.getX(vertex), 0) / 3;
+        const localX = centroidX - centerX;
+        if (Math.abs(localX) <= guard) return;
+        const forbidden = localX < 0 ? 'Right' : 'Left';
+        const fade = clamp((Math.abs(localX) - guard) / guard, 0, 1);
+        for (const bone of [...map.keys()]) {
+          if (!bones[bone]?.name.startsWith(forbidden)) continue;
+          const kept = map.get(bone) * (1 - fade);
+          if (kept > 1e-4) map.set(bone, kept);
+          else map.delete(bone);
+        }
+      });
+      for (let triangle = 0; triangle < smoothed.length; triangle += 1) weightsPerTriangle[triangle] = smoothed[triangle];
+    }
+
     // Write at most four influences per vertex (the shader limit).
     const indices = new Uint16Array(count * 4);
     const weights = new Float32Array(count * 4);
