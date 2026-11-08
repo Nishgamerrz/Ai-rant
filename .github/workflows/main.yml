@@ -1517,6 +1517,11 @@ jobs:
           # Every image, not just the PNG stills: a rejected preflight frame is a
           # JPEG, and it is the most useful picture of a broken run.
           cp "$GITHUB_WORKSPACE"/preview/* . 2>/dev/null || true
+          # The AI timing table and the model-residency log are part of the report:
+          # they answer "did it reload, and how long before it started typing".
+          for extra in ai_calls.jsonl model_residency.log; do
+            [ -f "$GITHUB_WORKSPACE/preview/$extra" ] && cp "$GITHUB_WORKSPACE/preview/$extra" . || true
+          done
           {
             # The MP4 inspection report first: it is the verdict on the shipped
             # file, with its own frames inlined, so this branch answers "does the
@@ -1530,6 +1535,30 @@ jobs:
             echo "Frames written by the renderer for [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
             echo "The frames above are decoded from the finished MP4; the ones below come straight from the renderer."
             echo
+            if [ -f ai_calls.jsonl ]; then
+              # Rendered into its own file first: appending to README.md from inside
+              # the group that is writing README.md would interleave two offsets.
+              python3 - <<'PYEOF' > ai_calls.md
+          import json
+          from pathlib import Path
+          rows = [json.loads(line) for line in Path('ai_calls.jsonl').read_text(encoding='utf-8').splitlines() if line.strip()]
+          for row in rows:
+              first = row.get('first_word_seconds')
+              print(f"| {row['label']} | {row['model']} | {'-' if first is None else f'{first:.0f}s'} | "
+                    f"{row['tokens']} | {row['elapsed_seconds']}s | {'yes' if row.get('loaded_here') else 'no'} |")
+          loaded = sum(1 for row in rows if row.get('loaded_here'))
+          print()
+          print(f"{loaded} of {len(rows)} AI calls paid for a model load. A call that says \"loaded here\" "
+                f"waited for weights that were not in memory.")
+          PYEOF
+              echo "## Every AI call of this run"
+              echo
+              echo '| step | model | first word | tokens | finish | loaded here |'
+              echo '| --- | --- | --- | --- | --- | --- |'
+              echo
+              cat ai_calls.md
+              echo
+            fi
             for file in frame_*.png preflight-frame.jpg; do
               [ -e "$file" ] || continue
               echo "## $file"

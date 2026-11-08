@@ -677,10 +677,28 @@ def main() -> None:
     result["model"] = request.get("model") if "fallback_model" not in result else result["fallback_model"]
     args.output.write_text(json.dumps(result, ensure_ascii=False) + "\n", encoding="utf-8")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    first_word = result.get("first_char_seconds")
+    first_word_text = (f"first word after {first_word:.0f}s" if first_word is not None else "no timing")
     if summary:
         with Path(summary).open("a", encoding="utf-8") as out:
             out.write(f"- **{args.label}:** {result['eval_count']} tokens in {result['elapsed_seconds']}s "
-                      f"({len(result['response']):,} answer chars)\n")
+                      f"({len(result['response']):,} answer chars, {first_word_text})\n")
+    # A machine-readable record of every AI call, next to the model residency log.
+    # It is published with the still previews, so "how fast did the next step start"
+    # can be answered from the run itself instead of guessed at.
+    calls_log = args.output.parent / "ai_calls.jsonl"
+    with calls_log.open("a", encoding="utf-8") as out:
+        out.write(json.dumps({
+            "label": args.label,
+            "model": result.get("model") or request.get("model"),
+            "first_word_seconds": first_word,
+            "elapsed_seconds": result["elapsed_seconds"],
+            "tokens": result["eval_count"],
+            "tokens_per_second": round(result["eval_count"] / result["elapsed_seconds"], 2)
+            if result["elapsed_seconds"] else None,
+            "loaded_here": first_word is None or first_word >= 15,
+            "fallback": bool(result.get("fallback_model")),
+        }, ensure_ascii=False) + "\n")
 
 
 if __name__ == "__main__":
