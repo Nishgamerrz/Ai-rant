@@ -1182,6 +1182,20 @@ jobs:
             --map-plan dist/Roblox_Story_Map.json \
             --duration "$DURATION_SECONDS"
 
+      # Everything above measured the renderer. This measures the file that ships:
+      # its pixel shape, its aspect-ratio and rotation flags, and eight decoded
+      # frames, so a stretched or black picture is caught here instead of by the
+      # viewer. The frames it picks out are published with the stills below.
+      - name: Inspect the finished MP4 and its own frames
+        id: mp4-inspection
+        continue-on-error: true
+        run: |
+          python tools/inspect_short.py \
+            --video dist/Roblox_2K_YouTube_Short.mp4 \
+            --frames-dir dist/preview \
+            --report dist/mp4_inspection.md --samples 8
+          test -s dist/mp4_inspection.md
+
       - name: Upload the still previews so the look can be checked in seconds
         if: always()
         continue-on-error: true
@@ -1293,6 +1307,21 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # The inspection is allowed to fail so the deliverables still upload, but a
+      # picture that would look broken to a viewer must not be reported as a good
+      # run: this closes the loop after the artifacts are safely stored.
+      - name: Fail the run if the finished MP4 does not look right
+        if: steps.mp4-inspection.outcome == 'failure'
+        run: |
+          python tools/say.py error "The finished MP4 failed inspection: see the MP4 inspection lines above and the published mp4_inspection.md report."
+          {
+            echo '## The finished MP4 does not look right'
+            echo
+            echo '- The MP4 was built and uploaded so it can be inspected, but it failed the pixel and aspect-ratio checks.'
+            echo '- See `dist/mp4_inspection.md` in the artifact, or the `media-preview-'"${{ inputs.model_quality || 'default' }}"'` branch, for the frames and the numbers.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
       - name: Record a repair task if short or project validation fails
         if: failure()
         run: |
@@ -1344,10 +1373,17 @@ jobs:
           # JPEG, and it is the most useful picture of a broken run.
           cp "$GITHUB_WORKSPACE"/preview/* . 2>/dev/null || true
           {
+            # The MP4 inspection report first: it is the verdict on the shipped
+            # file, with its own frames inlined, so this branch answers "does the
+            # video look right?" in one page instead of a 150 MB download.
+            if [ -f mp4_inspection.md ]; then
+              cat mp4_inspection.md
+              echo
+            fi
             echo "# Still previews"
             echo
             echo "Frames written by the renderer for [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
-            echo "These are the same frames the colour audit measured, so they show what the MP4 shows."
+            echo "The frames above are decoded from the finished MP4; the ones below come straight from the renderer."
             echo
             for file in frame_*.png preflight-frame.jpg; do
               [ -e "$file" ] || continue
