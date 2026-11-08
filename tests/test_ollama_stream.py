@@ -38,7 +38,7 @@ class TokenBudgetTests(unittest.TestCase):
         self.assertIn("num_predict:$tokens}, messages:", workflow)
         # Every request keeps the model loaded, which removes minute-long reloads.
         self.assertIn('keep_alive:"60m"', workflow)
-        self.assertIn("num_ctx:8192", workflow)
+        self.assertIn("num_ctx:$ctx", workflow)
 
     def test_workflow_asks_for_brief_reasoning(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
@@ -226,7 +226,18 @@ class RuntimeSpeedTests(unittest.TestCase):
                         "OLLAMA_KEEP_ALIVE=60m", "OLLAMA_MAX_LOADED_MODELS=1"):
             self.assertIn(setting, self.workflow)
         self.assertIn('keep_alive:"60m"', self.workflow)
-        self.assertIn("num_ctx:8192", self.workflow)
+        # ONE context size for the whole run. num_ctx is a load-time option, so two
+        # different values would make Ollama unload and reload the model between
+        # steps: that is the "why did it reload again?" minutes.
+        self.assertIn("AI_NUM_CTX=8192", self.workflow)
+        self.assertIn('num_ctx:$ctx', self.workflow)
+        self.assertNotIn("num_ctx:8192", self.workflow)
+        self.assertNotIn("num_ctx:1024", self.workflow)
+        # The warm-up must load with the same context size as the real prompts, or
+        # the first prompt reloads the model it just loaded.
+        warmup = self.workflow[self.workflow.index("/api/generate") - 500:self.workflow.index("/api/generate") + 500]
+        self.assertIn("num_ctx:$ctx", warmup)
+        self.assertIn('--argjson ctx "$AI_NUM_CTX"', warmup)
 
     def test_budgets_are_compact(self):
         self.assertIn("NARRATION_TOKENS=$((1200 + DURATION_SECONDS * 8))", self.workflow)

@@ -1,7 +1,7 @@
 """Nothing half-merged may reach a workflow.
 
 A merge conflict was once resolved by hand in a hurry and the markers in
-`.github/workflows/studio-experience-tests.yml` were committed. GitHub then
+workflow files were committed. GitHub then
 cannot parse the file at all: the whole validation workflow silently stops
 running, and every push looks green because there is no workflow left to fail.
 That is worse than a normal breakage, so it is checked directly.

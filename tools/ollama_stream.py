@@ -420,9 +420,23 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
             print(paint(f"[{label}] the answer itself is repeating and was cut off; "
                   f"it will be finished with a steering instruction.", "warning"), flush=True)
     elapsed = time.time() - started
+    # How long this call waited before it produced its first character. If the model
+    # is already in RAM this is prompt processing only, a second or two; if it had to
+    # be loaded from disk it is tens of seconds. Printing it makes a reload visible
+    # instead of something the user has to guess at, and it is what the next step's
+    # speed depends on.
+    first_char_seconds = round((first_output - started_at), 1) if first_output else None
     if not quiet:
         console.close_box()
         rate = f", {tokens / elapsed:.1f} tok/s" if elapsed >= 1 and tokens else ""
+        if first_char_seconds is not None:
+            if first_char_seconds >= 15:
+                console.line(f"[{label}] the first word took {first_char_seconds:.0f}s - that is a "
+                             f"model LOAD, not thinking. If this is not the first call of the "
+                             f"run, the weights were not in memory.", kind="warning")
+            else:
+                console.line(f"[{label}] first word after {first_char_seconds:.0f}s "
+                             f"(weights already in memory).", kind="success")
         console.line(f"[{label}] \u2713 finished in {elapsed:.0f}s: {len(answer):,} answer chars, "
                      f"{len(reasoning):,} reasoning chars, {tokens} tokens{rate}"
                      f"{', CUT OFF at the token ceiling' if done_reason == 'length' else ''}.",
@@ -438,6 +452,7 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
         "repeated": repeated,
         "label": label,
         "elapsed_seconds": round(elapsed, 1),
+        "first_char_seconds": first_char_seconds,
     }
 
 

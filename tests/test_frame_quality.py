@@ -19,7 +19,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RENDERER = (ROOT / "tools/video_renderer/render_short.mjs").read_text(encoding="utf-8")
 WORKFLOW = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
-START = (ROOT / ".github/workflows/start.yml").read_text(encoding="utf-8")
 THREE = ROOT / "tools/video_renderer/node_modules/three"
 
 
@@ -187,8 +186,10 @@ class FrameAuditTests(unittest.TestCase):
         self.assertIn("publish_preview", WORKFLOW)
         self.assertIn("media-preview", WORKFLOW)
         self.assertIn("permissions:\n      contents: write", WORKFLOW)
-        # A called workflow cannot exceed its caller, so the backup button needs it too.
-        self.assertIn("contents: write", START)
+        # There is only one workflow now, and the branch exists so a run can be
+        # judged from a browser without downloading the video.
+        self.assertEqual(sorted(path.name for path in (ROOT / ".github/workflows").iterdir()),
+                         ["main.yml"])
 
     def test_two_comparison_runs_do_not_overwrite_each_others_stills(self):
         # A hard run and a smart_11b run dispatched from the same workflow used to
