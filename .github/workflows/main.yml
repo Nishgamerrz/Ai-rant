@@ -1076,6 +1076,23 @@ jobs:
                 --stall-seconds "${AI_STALL:-900}" \
             --projected-seconds "${AI_PROJECTED_SECONDS:-1500}" \
                 --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}" || break
+              # The AI confirms the sub-agent's work in "subagent_review": once that is
+              # in the plan the world and the cameras are settled, so the run moves on
+              # to the next step instead of paying for another re-plan.
+              if python - <<'PYC'
+          import json
+          from pathlib import Path
+          try:
+              envelope = json.loads(Path('map_response.json').read_text(encoding='utf-8'))
+              plan = json.loads((envelope.get('message') or {}).get('content', envelope.get('response', '{}')))
+          except Exception:
+              raise SystemExit(1)
+          raise SystemExit(0 if isinstance(plan, dict) and isinstance(plan.get('subagent_review'), dict) else 1)
+          PYC
+              then
+                python tools/say.py success "The AI confirmed the sub-agent's map, camera and model work, so the world plan is final and the run moves on to the next step."
+                break
+              fi
               if [ "$SUBA_ROUNDS" -ge 2 ]; then
                 python tools/say.py success "The sub-agent has had its two rounds on the map and the cameras and the AI has confirmed them, so the world plan is final and the run moves on to the next step."
                 break
