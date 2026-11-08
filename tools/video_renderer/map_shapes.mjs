@@ -85,7 +85,15 @@ const CORNER_VERTICES = [
 const CORNER_FACES = [[0, 1, 2, 3], [0, 4, 1], [1, 4, 2], [2, 4, 3], [3, 4, 0]];
 
 export function buildShapeGeometry() {
-  return {
+  // Every shape carries a white colour attribute.
+  //
+  // The renderer gives each Part its colour through setColorAt()/instanceColor,
+  // and three only forwards that to the fragment shader when the material has
+  // vertexColors on - but vertexColors also multiplies by this per-vertex
+  // attribute, and an attribute that does not exist reads as 0.0. So: no
+  // attribute renders every Part black, no vertexColors renders every Part
+  // white. White values here leave the instance colour exactly as the AI set it.
+  const shapes = {
     Block: new THREE.BoxGeometry(1, 1, 1),
     Ball: new THREE.SphereGeometry(0.5, 16, 12),
     Cylinder: new THREE.CylinderGeometry(0.5, 0.5, 1, 14),
@@ -113,4 +121,10 @@ export function buildShapeGeometry() {
       { size: [0.96, 0.09, 0.09], position: [0, 0, 0] },
     ]),
   };
+  for (const geometry of Object.values(shapes)) {
+    if (geometry.getAttribute('color')) continue;
+    const vertices = geometry.getAttribute('position').count;
+    geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(vertices * 3).fill(1), 3));
+  }
+  return shapes;
 }
