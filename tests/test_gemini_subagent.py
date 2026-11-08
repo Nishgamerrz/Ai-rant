@@ -20,6 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
+import gemini_subagent  # noqa: E402
 from gemini_subagent import (  # noqa: E402
     build_prompt,
     normalize_request,
@@ -255,7 +256,7 @@ class CommandLineTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, msg=result.stderr[-1500:])
             data = json.loads((Path(tmp) / "results.json").read_text(encoding="utf-8"))
             self.assertTrue(data["skipped"])
-            self.assertIn("GEMINI_API_KEY is not configured", result.stdout)
+            self.assertIn("neither GEMINI_API_KEY nor GROQ_API_KEY is configured", result.stdout)
 
     def test_empty_task_list_is_fine(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -559,7 +560,7 @@ class QuotaWorkflowTests(unittest.TestCase):
         self.assertIn("Path('dist/gemini_quota_exhausted').is_file()", text)
         self.assertIn("skipped and the plan you already wrote stands", text)
         self.assertIn("out of quota, so the required map/camera review could not run", text)
-        self.assertIn("Gemini is out of quota, so it did not edit the narration", text)
+        self.assertIn("Neither Gemini nor the Groq fallback edited the narration", text)
 
 
 class StaleMarkerTests(unittest.TestCase):
@@ -582,3 +583,127 @@ class StaleMarkerTests(unittest.TestCase):
                     os.environ.pop(_QUOTA_MARKER_ENV, None)
                 else:
                     os.environ[_QUOTA_MARKER_ENV] = previous
+
+
+class _GroqStub(BaseHTTPRequestHandler):
+    """An OpenAI-compatible Groq endpoint."""
+
+    calls: list[dict] = []
+    text = "GROQ ANSWER"
+    status = 200
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        payload = json.loads(self.rfile.read(length))
+        type(self).calls.append({"model": payload.get("model"),
+                                 "auth": self.headers.get("Authorization"),
+                                 "prompt": payload["messages"][0]["content"]})
+        if type(self).status != 200:
+            body = json.dumps({"error": {"message": "model_not_found"}}).encode()
+            self.send_response(type(self).status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        body = json.dumps({"choices": [{"message": {"content": type(self).text}}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class GroqFallbackTests(unittest.TestCase):
+    """When Gemini is out of quota or broken, Groq does the job - then Gemini returns."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.marker = Path(tmp.name) / "gemini_quota_exhausted"
+        previous = os.environ.get(_QUOTA_MARKER_ENV)
+        os.environ[_QUOTA_MARKER_ENV] = str(self.marker)
+        self.addCleanup(lambda: os.environ.pop(_QUOTA_MARKER_ENV, None) if previous is None
+                        else os.environ.__setitem__(_QUOTA_MARKER_ENV, previous))
+        self.gemini = type("G", (_QuotaGemini,), {"calls": []})
+        self.server = HTTPServer(("127.0.0.1", 0), self.gemini)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.shutdown)
+        self.addCleanup(self.server.server_close)
+        self.groq = type("R", (_GroqStub,), {"calls": [], "status": 200,
+                                             "text": "GROQ ANSWER"})
+        self.groq_server = HTTPServer(("127.0.0.1", 0), self.groq)
+        threading.Thread(target=self.groq_server.serve_forever, daemon=True).start()
+        self.addCleanup(self.groq_server.shutdown)
+        self.addCleanup(self.groq_server.server_close)
+        self.url = f"http://127.0.0.1:{self.server.server_port}/x"
+        self.groq_url = f"http://127.0.0.1:{self.groq_server.server_port}/chat"
+
+    def _run(self, tasks, **kwargs):
+        return run_tasks({"tasks": tasks}, api_key="g", model="m", root=Path("."),
+                         url=self.url, groq_key="groq-secret", groq_url=self.groq_url,
+                         **kwargs)
+
+    def test_a_quota_wall_hands_the_task_to_groq(self):
+        result = self._run([{"id": "t1", "kind": "answer", "instruction": "design a lamp"}])
+        self.assertEqual(result["providers"], ["groq"])
+        self.assertTrue(result["fallback_used"])
+        self.assertEqual(result["results"][0]["text"], "GROQ ANSWER")
+        self.assertEqual(len(self.gemini.calls), 1)
+        self.assertEqual(self.groq.calls[0]["auth"], "Bearer groq-secret")
+
+    def test_the_next_call_asks_gemini_again_without_waiting(self):
+        self._run([{"id": "t1", "kind": "answer", "instruction": "one"}])
+        self.assertEqual(len(self.gemini.calls), 1)
+        # Simulate the retry window passing: Gemini must be tried first again.
+        old = time.time() - (gemini_subagent.QUOTA_RETRY_MINUTES + 1) * 60
+        os.utime(self.marker, (old, old))
+        result = self._run([{"id": "t2", "kind": "answer", "instruction": "two"}])
+        self.assertEqual(len(self.gemini.calls), 2, "Gemini must be asked again")
+        self.assertEqual(result["providers"], ["groq"])
+
+    def test_a_dead_groq_model_moves_to_the_next_free_one(self):
+        # The first Gemini call is the 429 wall; after that the marker holds, and
+        # every configured Groq model name is tried once, in order.
+        self.groq.status = 404
+        self.marker.write_text("x")
+        result = self._run([{"id": "t1", "kind": "answer", "instruction": "one"}])
+        self.assertFalse(result["results"][0]["ok"], "a dead fallback must be reported")
+        self.assertIn("Groq", result["results"][0]["error"])
+        tried = [call["model"] for call in self.groq.calls]
+        self.assertGreaterEqual(len(tried), 2, "a retired model must fall through")
+        self.assertEqual(len(set(tried)), len(tried))
+
+    def test_the_groq_key_is_sent_as_a_bearer_header_not_in_the_url(self):
+        self._run([{"id": "t1", "kind": "answer", "instruction": "one"}])
+        self.assertNotIn("groq-secret", self.groq_url)
+        self.assertEqual(self.groq.calls[0]["auth"], "Bearer groq-secret")
+
+    def test_groq_alone_is_enough_when_there_is_no_gemini_key(self):
+        result = run_tasks({"tasks": [{"kind": "answer", "instruction": "hi"}]},
+                           api_key="", model="m", root=Path("."), groq_key="k",
+                           groq_url=self.groq_url)
+        self.assertFalse(result["skipped"])
+        self.assertEqual(result["results"][0]["text"], "GROQ ANSWER")
+
+    def test_no_keys_at_all_still_skips_quietly(self):
+        result = run_tasks({"tasks": [{"kind": "answer", "instruction": "hi"}]},
+                           api_key="", model="m", root=Path("."), groq_key="",
+                           groq_url=self.groq_url)
+        self.assertTrue(result["skipped"])
+
+
+class GroqWorkflowTests(unittest.TestCase):
+    def test_the_workflow_passes_the_groq_secret_to_every_ai_step(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(text.count("GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}"), 3)
+        self.assertEqual(text.count("GROQ_MODEL: ${{ vars.GROQ_MODEL }}"), 3)
+
+    def test_an_exhausted_quota_only_cancels_tasks_when_there_is_no_fallback(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("and not os.environ.get('GROQ_API_KEY', '').strip()", text)
+        self.assertIn('[ -z "${GROQ_API_KEY:-}" ]', text)
+        self.assertIn('{ [ -n "${GEMINI_API_KEY:-}" ] || [ -n "${GROQ_API_KEY:-}" ]; }', text)

@@ -112,9 +112,12 @@ def marker_path(root: Path | None = None) -> Path:
     return (root or Path.cwd()) / QUOTA_MARKER
 
 
-# The free quota comes back, so a marker is only trusted for the rest of the day
-# it was written in. Without this, one bad run could leave a file behind that
-# silently switched the sub-agent off for every later run.
+# The free quota comes back (it can be per-minute or per-day), so a marker only
+# blocks Gemini for a short retry window: after that the next call tries Gemini
+# again and the helper returns to it as soon as it can answer. A marker older
+# than a day is simply deleted, so one bad run can never switch the sub-agent off
+# for later runs.
+QUOTA_RETRY_MINUTES = 15
 QUOTA_MARKER_HOURS = 12
 
 
@@ -123,11 +126,13 @@ def quota_is_exhausted(root: Path | None = None) -> bool:
         path = marker_path(root)
         if not path.is_file():
             return False
-        age_hours = (time.time() - path.stat().st_mtime) / 3600
-        if age_hours > QUOTA_MARKER_HOURS:
+        age_minutes = (time.time() - path.stat().st_mtime) / 60
+        if age_minutes > QUOTA_MARKER_HOURS * 60:
             path.unlink(missing_ok=True)
-            print(f"[gemini sub-agent] ignoring a {age_hours:.0f}h-old quota marker; "
-                  f"the free quota has reset in the meantime.", flush=True)
+            return False
+        if age_minutes > QUOTA_RETRY_MINUTES:
+            print(f"[gemini sub-agent] the quota hit was {age_minutes:.0f} minutes ago; "
+                  f"trying Gemini again before using the fallback.", flush=True)
             return False
         return True
     except OSError:
@@ -144,10 +149,9 @@ def mark_quota_exhausted(detail: str, root: Path | None = None) -> None:
         pass
     # GitHub renders this with a title, so the reason is visible in the run summary.
     print(f"::warning title=Gemini quota exhausted::The free Gemini key has no quota "
-          f"left ({' '.join(str(detail).split())[:200]}). Every remaining sub-agent "
-          f"call in this run is skipped so the render is not held up; the run "
-          f"continues with the AI's own work. Add quota or a fresh GEMINI_API_KEY to "
-          f"use the sub-agent again.", flush=True)
+          f"left ({' '.join(str(detail).split())[:200]}). The sub-agent switches to the "
+          f"Groq fallback key so no task is lost, and tries Gemini again in "
+          f"{QUOTA_RETRY_MINUTES} minutes.", flush=True)
 
 
 def _clean_task(task, index: int) -> dict | None:
@@ -318,6 +322,129 @@ def call_gemini(prompt: str, *, api_key: str, model: str = DEFAULT_MODEL,
     raise GeminiUnavailable("no answer after retries")
 
 
+GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_KEY_ENV = "GROQ_API_KEY"
+GROQ_MODEL_VAR = "GROQ_MODEL"
+DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+# Free Groq models, best first. If one has been retired the next is tried, so a
+# single deprecation can never leave the run without a helper.
+GROQ_MODEL_CHOICES = ("llama-3.3-70b-versatile", "llama-3.1-8b-instant",
+                      "openai/gpt-oss-20b", "qwen/qwen3-32b")
+
+
+class GroqUnavailable(GeminiUnavailable):
+    """The Groq fallback could not answer (rate limit, bad key, retired model)."""
+
+
+def groq_model(requested: str = "") -> str:
+    return (requested or os.environ.get(GROQ_MODEL_VAR, "").strip()
+            or DEFAULT_GROQ_MODEL)
+
+
+def call_groq(prompt: str, *, api_key: str, model: str = "", timeout: float = 120.0,
+              url: str | None = None) -> str:
+    """One Groq (OpenAI-compatible) chat call - the fallback when Gemini is out.
+
+    A retired model answers 404/decommissioned; that is reported as such so the
+    caller can try the next free model instead of failing the whole task.
+    """
+    if not api_key:
+        raise GroqUnavailable("no Groq API key configured")
+    endpoint = url or GROQ_ENDPOINT
+    model = groq_model(model)
+    body = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.4,
+        "max_tokens": 4096,
+        "stream": False,
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint, data=body,
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {api_key}",
+                 "User-Agent": "Ai-rant-short-render/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:300]
+        raise GroqUnavailable(f"Groq HTTP {exc.code}: {detail}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise GroqUnavailable(f"Groq {type(exc).__name__}: {exc}") from exc
+    try:
+        text = str(payload["choices"][0]["message"]["content"] or "").strip()
+    except (KeyError, IndexError, TypeError):
+        text = ""
+    if not text:
+        raise GroqUnavailable("the Groq reply contained no text")
+    return text
+
+
+def retired_groq_model(exc: Exception) -> bool:
+    detail = str(exc).lower()
+    return any(word in detail for word in (
+        "404", "does not exist", "decommission", "not found", "model_not_found"))
+
+
+def call_any(prompt: str, *, gemini_key: str = "", gemini_model: str = "",
+             groq_key: str = "", groq_model_name: str = "", timeout: float = 120.0,
+             url: str | None = None, groq_url: str | None = None,
+             prefer: str = "gemini") -> tuple[str, str]:
+    """Ask Gemini; when it is out of quota or broken, ask Groq instead.
+
+    Returns (text, provider). Every Gemini failure - a 429, a network error, a
+    dead key - hands the job to the Groq fallback, so a run never loses a task
+    because one free provider ran dry. The next request asks Gemini again (the
+    quota marker only blocks it for a short retry window), so the helper returns
+    to Gemini as soon as it can answer.
+    """
+    failures: list[str] = []
+    order = ("groq", "gemini") if prefer == "groq" else ("gemini", "groq")
+    for provider in order:
+        if provider == "gemini":
+            if not gemini_key:
+                failures.append("Gemini: no API key")
+                continue
+            if quota_is_exhausted():
+                failures.append("Gemini: quota exhausted")
+                continue
+            try:
+                return call_gemini(prompt, api_key=gemini_key, model=gemini_model,
+                                   timeout=timeout, url=url), "gemini"
+            except GeminiUnavailable as exc:
+                failures.append(f"Gemini: {exc}")
+                continue
+        else:
+            if not groq_key:
+                failures.append("Groq: no API key")
+                continue
+            candidates: list[str] = []
+            first = groq_model(groq_model_name)
+            candidates.append(first)
+            for choice in GROQ_MODEL_CHOICES:
+                if choice not in candidates:
+                    candidates.append(choice)
+            for index, candidate in enumerate(candidates):
+                try:
+                    text = call_groq(prompt, api_key=groq_key, model=candidate,
+                                     timeout=timeout, url=groq_url)
+                    if candidate != first:
+                        print(paint(f"[gemini sub-agent] Groq model {first} is not "
+                                    f"available, so {candidate} answered instead.",
+                                    "warning"), flush=True)
+                    return text, "groq"
+                except GroqUnavailable as exc:
+                    failures.append(f"Groq ({candidate}): {exc}")
+                    # A retired model moves on to the next free model; a rate limit
+                    # or a bad key will not be fixed by trying another name.
+                    if not retired_groq_model(exc) or index == len(candidates) - 1:
+                        break
+            continue
+    raise GeminiUnavailable("no provider could answer (" + "; ".join(failures) + ")")
+
+
 def safe_target(path_text: str, root: Path) -> Path | None:
     """Only allow edits inside the workspace: no absolute paths, no '..' escapes."""
     candidate = Path(path_text)
@@ -332,28 +459,30 @@ def safe_target(path_text: str, root: Path) -> Path | None:
 
 
 def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = None,
-              url: str | None = None, timeout: float = 120.0) -> dict:
+              url: str | None = None, timeout: float = 120.0,
+              groq_key: str = "", groq_model_name: str = "",
+              groq_url: str | None = None) -> dict:
     root = root or Path.cwd()
     # Accept an unnormalised request too: ids, kind fallbacks and the three-task
     # cap are all applied here so callers cannot bypass them.
     request = normalize_request(request)
+    groq_key = groq_key or os.environ.get(GROQ_KEY_ENV, "").strip()
     results = []
-    skipped = not api_key
+    skipped = not api_key and not groq_key
     if skipped:
-        print(paint(f"[gemini sub-agent] {API_KEY_ENV} is not configured; "
-                    f"skipping {len(request.get('tasks', []))} delegated task(s) and "
-                    f"continuing.", "warning"), flush=True)
+        print(paint(f"[gemini sub-agent] neither {API_KEY_ENV} nor {GROQ_KEY_ENV} is "
+                    f"configured; skipping {len(request.get('tasks', []))} delegated "
+                    f"task(s) and continuing.", "warning"), flush=True)
     started_all = time.monotonic()
-    quota_gone = quota_is_exhausted(root)
+    providers: list[str] = []
     for task in request.get("tasks", []):
         if skipped:
             results.append({"id": task["id"], "kind": task["kind"], "ok": False,
                             "error": "no API key"})
             continue
-        if quota_gone:
-            # One line for the whole request instead of one failure per task.
+        if not api_key and not groq_key:
             results.append({"id": task["id"], "kind": task["kind"], "ok": False,
-                            "error": "Gemini quota exhausted; skipped"})
+                            "error": "no API key"})
             continue
         print(paint(f"[gemini sub-agent] {task['kind']} task {task['id']} -> {model}: "
                     f"{task['instruction'][:100]}", "tool"), flush=True)
@@ -364,18 +493,12 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
                         f"{', '.join(topics)}.", "tool"), flush=True)
         started = time.monotonic()
         try:
-            text = call_gemini(build_prompt(task, request.get("context", "")),
-                               api_key=api_key, model=model, timeout=timeout, url=url)
-        except QuotaExhausted as exc:
-            print(paint(f"[gemini sub-agent] out of quota ({exc}); skipping the rest "
-                        f"of this request and letting the run continue.", "warning"),
-                  flush=True)
-            results.append({"id": task["id"], "kind": task["kind"], "ok": False,
-                            "seconds": round(time.monotonic() - started, 1),
-                            "error": "Gemini quota exhausted; skipped"})
-            quota_gone = True
-            mark_quota_exhausted(str(exc), root)
-            continue
+            text, provider = call_any(
+                build_prompt(task, request.get("context", "")),
+                gemini_key=api_key, gemini_model=model,
+                groq_key=groq_key, groq_model_name=groq_model_name,
+                timeout=timeout, url=url, groq_url=groq_url,
+                prefer="groq" if quota_is_exhausted(root) else "gemini")
         except GeminiUnavailable as exc:
             print(paint(f"[gemini sub-agent] task {task['id']} failed ({exc}); "
                         f"continuing without it.", "error"), file=sys.stderr, flush=True)
@@ -383,7 +506,12 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
                             "seconds": round(time.monotonic() - started, 1),
                             "error": str(exc)[:300]})
             continue
+        if provider == "groq":
+            print(paint("[gemini sub-agent] Gemini could not answer this one, so the "
+                        "Groq fallback key did the job instead.", "warning"), flush=True)
+        providers.append(provider)
         entry = {"id": task["id"], "kind": task["kind"], "ok": True, "text": text,
+                 "provider": provider,
                  "seconds": round(time.monotonic() - started, 1)}
         if task["kind"] == "edit" and task.get("apply_to"):
             target = safe_target(task["apply_to"], root)
@@ -409,7 +537,9 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
                     f"({touched}).", "success"), flush=True)
         results.append(entry)
     return {"model": model, "skipped": skipped,
-            "quota_exhausted": quota_gone,
+            "quota_exhausted": quota_is_exhausted(root),
+            "fallback_used": "groq" in providers,
+            "providers": providers,
             "seconds": round(time.monotonic() - started_all, 1),
             "results": results}
 
@@ -423,6 +553,10 @@ def main() -> None:
     parser.add_argument("--model", default=os.environ.get(DEFAULT_MODEL_VAR) or DEFAULT_MODEL)
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--url", default="", help="override endpoint (tests)")
+    parser.add_argument("--groq-model", default="",
+                        help=f"Groq fallback model (default: ${GROQ_MODEL_VAR} or "
+                             f"{DEFAULT_GROQ_MODEL})")
+    parser.add_argument("--groq-url", default="", help="override the Groq endpoint (tests)")
     parser.add_argument("--stdout", action="store_true",
                         help="also print the answers, for the live console")
     args = parser.parse_args()
@@ -439,7 +573,10 @@ def main() -> None:
 
     result = run_tasks(request, api_key=os.environ.get(API_KEY_ENV, "").strip(),
                        model=args.model, root=Path.cwd(), url=args.url or None,
-                       timeout=args.timeout)
+                       timeout=args.timeout,
+                       groq_key=os.environ.get(GROQ_KEY_ENV, "").strip(),
+                       groq_model_name=args.groq_model,
+                       groq_url=args.groq_url or None)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n",
                           encoding="utf-8")
@@ -453,11 +590,14 @@ def main() -> None:
         lines = ["## Gemini sub-agent", ""]
         if result["skipped"]:
             lines.append(f"- No `{API_KEY_ENV}` secret configured, so delegated tasks were skipped.")
-        if result.get("quota_exhausted"):
-            lines.append("- **The free Gemini key is out of quota for today**, so every "
-                         "remaining sub-agent task was skipped and the run continued with "
-                         "the AI's own work. Add quota or a fresh `GEMINI_API_KEY` to use "
-                         "the sub-agent again.")
+        if result.get("fallback_used"):
+            lines.append("- **Gemini could not answer, so the Groq fallback key did the "
+                         "work** (free models). No task was lost; Gemini is tried again "
+                         "on the next call.")
+        if result.get("quota_exhausted") and not result.get("fallback_used"):
+            lines.append("- **The free Gemini key is out of quota** and no Groq fallback "
+                         "answered, so the remaining sub-agent tasks were skipped and the "
+                         "run continued with the AI's own work.")
         for entry in result["results"]:
             if entry.get("ok"):
                 text = " ".join(str(entry.get("text", "")).split())[:300]
@@ -473,8 +613,10 @@ def main() -> None:
                 pass
 
     ok = sum(1 for entry in result["results"] if entry.get("ok"))
+    used = sorted({str(entry.get("provider")) for entry in result["results"] if entry.get("ok")})
+    used_note = f" via {', '.join(used)}" if used else ""
     print(f"[gemini sub-agent] {ok}/{len(result['results'])} task(s) completed "
-          f"with {result['model']}.", flush=True)
+          f"with {result['model']}{used_note}.", flush=True)
 
 
 if __name__ == "__main__":

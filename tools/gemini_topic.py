@@ -37,8 +37,9 @@ from gemini_subagent import (  # noqa: E402
     API_KEY_ENV,
     DEFAULT_MODEL,
     DEFAULT_MODEL_VAR,
+    GROQ_KEY_ENV,
     GeminiUnavailable,
-    call_gemini,
+    call_any,
 )
 
 # This parenthetical is the note the workflow promised: Gemini is told that the
@@ -197,18 +198,28 @@ def sanitize(reply: str, raw: str) -> tuple[str | None, str]:
 
 def refine(text: str, *, api_key: str, model: str = DEFAULT_MODEL,
            kind: str = "story", url: str | None = None,
-           timeout: float = 60.0) -> dict:
-    """Clean one prompt. Never raises: falls back to the text as typed."""
+           timeout: float = 60.0, groq_key: str = "",
+           groq_url: str | None = None) -> dict:
+    """Clean one prompt. Never raises: falls back to the text as typed.
+
+    Gemini is asked first; if it is out of quota, unreachable or broken the Groq
+    fallback key cleans the prompt instead, exactly as the sub-agent does.
+    """
     raw = str(text or "").strip()
+    groq_key = groq_key or os.environ.get(GROQ_KEY_ENV, "").strip()
     if not raw:
         return {"ok": False, "skipped": True, "text": "", "reason": "nothing to clean"}
-    if not api_key:
+    if not api_key and not groq_key:
         return {"ok": False, "skipped": True, "text": raw, "reason": "no API key"}
     try:
-        reply = call_gemini(build_prompt(raw, kind), api_key=api_key, model=model,
-                            timeout=timeout, url=url)
+        reply, provider = call_any(build_prompt(raw, kind), gemini_key=api_key,
+                                   gemini_model=model, groq_key=groq_key,
+                                   timeout=timeout, url=url, groq_url=groq_url)
     except GeminiUnavailable as exc:
         return {"ok": False, "skipped": False, "text": raw, "reason": str(exc)[:300]}
+    if provider != "gemini":
+        print(f"The Gemini key could not clean the prompt ({provider} answered instead); "
+              f"using that spelling fix.", flush=True)
     cleaned, reason = sanitize(reply, raw)
     if cleaned is None:
         return {"ok": False, "skipped": False, "text": raw, "reason": reason}
@@ -246,20 +257,21 @@ def main() -> int:
     args = parser.parse_args()
 
     api_key = os.environ.get(API_KEY_ENV, "").strip()
+    groq_key = os.environ.get(GROQ_KEY_ENV, "").strip()
     story_raw = os.environ.get(args.story_env, "")
     theme_raw = os.environ.get(args.theme_env, "")
 
     story = refine(story_raw, api_key=api_key, model=args.model, kind="story",
-                   url=args.url, timeout=args.timeout)
+                   url=args.url, timeout=args.timeout, groq_key=groq_key)
     theme = (refine(theme_raw, api_key=api_key, model=args.model, kind="theme",
-                    url=args.url, timeout=args.timeout)
+                    url=args.url, timeout=args.timeout, groq_key=groq_key)
              if theme_raw.strip() else {"ok": False, "skipped": True, "text": "",
                                         "reason": "no theme typed"})
 
-    if not api_key:
-        print(paint("[gemini topic] GEMINI_API_KEY is not configured; using the prompt "
-                    "exactly as typed. Add the secret to fix spelling automatically.",
-                    "warning"), flush=True)
+    if not api_key and not groq_key:
+        print(paint("[gemini topic] neither GEMINI_API_KEY nor GROQ_API_KEY is "
+                    "configured; using the prompt exactly as typed. Add a secret to fix "
+                    "spelling automatically.", "warning"), flush=True)
     for label, entry, raw in (("story prompt", story, story_raw),
                               ("world theme", theme, theme_raw)):
         if entry["skipped"]:
