@@ -823,7 +823,14 @@ async function measureJpeg(jpeg) {
     blackFraction: Number((black / pixels).toFixed(3)),
     brightFraction: Number((bright / pixels).toFixed(3)),
     colourFraction: Number((colourful / pixels).toFixed(3)),
-    centreBlackFraction: Number((centreDark / Math.max(1, centreCount)).toFixed(3))
+    centreBlackFraction: Number((centreDark / Math.max(1, centreCount)).toFixed(3)),
+    // A few fixed points make a flat or untextured frame obvious from the log
+    // alone: top-left (sky), centre (the subject), bottom-left (ground).
+    corners: [[0, 0], [Math.floor(PROBE_HEIGHT / 2), Math.floor(PROBE_WIDTH / 2)], [PROBE_HEIGHT - 1, 0]]
+      .map(([row, column]) => {
+        const at = (row * PROBE_WIDTH + column) * 3;
+        return [raw[at], raw[at + 1], raw[at + 2]];
+      })
   };
 }
 
@@ -930,7 +937,7 @@ async function preflight(plan) {
     console.log(`::notice title=Render preflight picture::${health.projection.canvas[0]}x${health.projection.canvas[1]} canvas, `
       + `stretch ${health.projection.stretch}, mean luminance ${health.meanLuminance}/255, `
       + `${(health.blackFraction * 100).toFixed(1)}% near-black, ${(health.brightFraction * 100).toFixed(1)}% near-white, `
-      + `${(health.colourFraction * 100).toFixed(1)}% colourful.`);
+      + `${(health.colourFraction * 100).toFixed(1)}% colourful, corners ${health.corners.map(c => `rgb(${c})`).join(' / ')}.`);
     console.log(`Render preflight picture: ${health.projection.canvas[0]}x${health.projection.canvas[1]} canvas, `
       + `stretch ${health.projection.stretch}, mean luminance ${health.meanLuminance}/255, `
       + `${(health.blackFraction * 100).toFixed(1)}% near-black, ${(health.brightFraction * 100).toFixed(1)}% near-white, `

@@ -1340,7 +1340,9 @@ jobs:
           git init -q -b "$BRANCH" .
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          cp "$GITHUB_WORKSPACE"/preview/*.png . 2>/dev/null || true
+          # Every image, not just the PNG stills: a rejected preflight frame is a
+          # JPEG, and it is the most useful picture of a broken run.
+          cp "$GITHUB_WORKSPACE"/preview/* . 2>/dev/null || true
           {
             echo "# Still previews"
             echo
