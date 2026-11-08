@@ -385,7 +385,21 @@ jobs:
           MODEL_QUALITY: ${{ inputs.model_quality }}
           MODEL_CACHE_HIT: ${{ steps.model-cache.outputs.cache-hit }}
         run: |
-          curl -fsSL https://ollama.com/download/ollama-linux-amd64.tar.zst -o ollama.tar.zst
+          # Everything this step prints is kept. If it fails, the tail goes into the run
+          # summary and is published with the stills, because the runner's raw log is not
+          # always downloadable - this step once failed with nothing but "exit code 22".
+          mkdir -p dist dist/preview
+          MODEL_LOG=dist/model-setup.log
+          exec > >(tee "$MODEL_LOG") 2>&1
+          trap 'status=$?; if [ "$status" -ne 0 ]; then { echo "## Model setup failed"; echo; echo "\`\`\`"; tail -n 80 "$MODEL_LOG" 2>/dev/null; echo "\`\`\`"; } >> "$GITHUB_STEP_SUMMARY"; cp "$MODEL_LOG" dist/preview/model-setup.log 2>/dev/null || true; fi' EXIT
+          # Three tries: a rate-limited or flaky CDN must not cost the whole run.
+          for INSTALL_ATTEMPT in 1 2 3; do
+            if curl -fsSL https://ollama.com/download/ollama-linux-amd64.tar.zst -o ollama.tar.zst; then break; fi
+            echo "Ollama download failed on attempt ${INSTALL_ATTEMPT} of 3."
+            rm -f ollama.tar.zst
+            sleep $((INSTALL_ATTEMPT * 10))
+          done
+          test -s ollama.tar.zst
           sudo tar -I zstd -xf ollama.tar.zst -C /usr
           rm -f ollama.tar.zst
           # CPU runners are the whole cost of this workflow. Flash attention and a
@@ -404,7 +418,12 @@ jobs:
             if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then break; fi
             sleep 2
           done
-          curl -fsS http://127.0.0.1:11434/api/tags >/dev/null
+          if ! curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then
+            echo "Ollama is not answering on port 11434; last 40 lines of its log:" >&2
+            tail -n 40 ollama.log >&2 || true
+            echo "## Ollama did not start" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           # Every preset is a thinking model that can hold the JSON schema and
           # write a complete blueprint. qwen3 is the family that follows
           # schema-constrained output best at every size, so each preset is the
@@ -490,10 +509,18 @@ jobs:
           # Ollama treats that as a different runner: the model was loaded here,
           # then unloaded and loaded AGAIN by the first real prompt. Loading it with
           # the same context size is what makes the story start typing immediately.
-          curl -fsS http://127.0.0.1:11434/api/generate \
-            -d "$(jq -nc --arg model "$SELECTED_MODEL" --argjson ctx "$AI_NUM_CTX" '{model:$model, prompt:"ok", stream:false, keep_alive:"60m", think:false, options:{num_predict:1, num_ctx:$ctx}}')" \
-            >/dev/null
-          python tools/say.py success "$SELECTED_MODEL is resident after $(( $(date +%s) - WARM_START ))s of one-time loading."
+          # -f is gone on purpose: an HTTP error must show the response body instead of a
+          # bare curl exit code, and a warm-up that fails must not kill the run.
+          WARM_BODY=$(mktemp)
+          WARM_CODE=$(curl -sS -o "$WARM_BODY" -w '%{http_code}' http://127.0.0.1:11434/api/generate \
+            -d "$(jq -nc --arg model "$SELECTED_MODEL" --argjson ctx "$AI_NUM_CTX" '{model:$model, prompt:"ok", stream:false, keep_alive:"60m", think:false, options:{num_predict:1, num_ctx:$ctx}}')" || true)
+          if [ "$WARM_CODE" = "200" ]; then
+            python tools/say.py success "$SELECTED_MODEL is resident after $(( $(date +%s) - WARM_START ))s of one-time loading."
+          else
+            python tools/say.py warning "The warm-up could not load $SELECTED_MODEL (HTTP ${WARM_CODE:-none}): $(head -c 300 "$WARM_BODY")"
+            echo "- Warm-up could not load the model (HTTP ${WARM_CODE:-none}): $(head -c 300 "$WARM_BODY")" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          rm -f "$WARM_BODY"
           python tools/model_residency.py --check --model "$SELECTED_MODEL" --label "model warm-up"
           {
             echo "## Selected generation model"
