@@ -386,10 +386,42 @@ class TypedConsoleTests(unittest.TestCase):
         beat.stop()
         beat.join(timeout=2)
         text = "".join(recorder.writes)
-        self.assertIn("[world plan] still loading the model", text)
+        # With no /api/ps answer the note must not claim a load happened.
+        self.assertIn("[world plan] no first token yet", text)
+        self.assertNotIn("still loading the model", text)
         self.assertNotIn("\u2026", text)
         # The heartbeat only writes whole lines: it never reprints streamed text.
         self.assertTrue(all(chunk.count("\n") == 1 for chunk in recorder.writes if chunk.strip()))
+
+    def test_a_resident_model_is_never_reported_as_loading(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from ollama_stream import Heartbeat, TypedConsole
+
+        recorder = _Recorder()
+        beat = Heartbeat("world plan", interval=2.0,
+                         console=TypedConsole(0, 0, out=recorder), resident=True,
+                         prompt_chars=23456)
+        beat.start()
+        time.sleep(2.4)
+        beat.stop()
+        beat.join(timeout=2)
+        text = "".join(recorder.writes)
+        self.assertIn("already in memory, no reload", text)
+        self.assertIn("23,456-character plan prompt", text)
+        self.assertNotIn("loading the model", text)
+
+    def test_a_genuine_load_says_so(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from ollama_stream import Heartbeat, TypedConsole
+
+        recorder = _Recorder()
+        beat = Heartbeat("world plan", interval=2.0,
+                         console=TypedConsole(0, 0, out=recorder), resident=False)
+        beat.start()
+        time.sleep(2.4)
+        beat.stop()
+        beat.join(timeout=2)
+        self.assertIn("still loading the model into memory", "".join(recorder.writes))
 
     def test_the_waiting_note_repeats_at_most_three_times(self):
         sys.path.insert(0, str(ROOT / "tools"))
@@ -403,7 +435,7 @@ class TypedConsoleTests(unittest.TestCase):
         beat.join(timeout=1)          # the thread stops itself once the cap is reached
         self.assertFalse(beat.is_alive())
         text = "".join(recorder.writes)
-        self.assertEqual(text.count("still loading the model"), HEARTBEAT_NOTES)
+        self.assertEqual(text.count("no first token yet"), HEARTBEAT_NOTES)
         self.assertIn("(quiet note 3/3)", text)
 
     def test_the_waiting_note_is_the_grey_line(self):
