@@ -155,7 +155,9 @@ class StudioExperienceTests(unittest.TestCase):
     def test_models_that_cannot_run_have_a_known_good_fallback(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
         # Every streaming call must be able to retry on a model we know loads.
-        self.assertEqual(workflow.count("--fallback-model"), 6)
+        # Story, story repair, narration edit, world plan, its helper round and the
+        # short post-sub-agent confirmation.
+        self.assertEqual(workflow.count("--fallback-model"), 7)
         self.assertIn("FALLBACK_MODEL=qwen3:4b", workflow)
         self.assertIn("FALLBACK_MODEL=qwen3:8b", workflow)
         # llama3.2-vision is the mllama architecture, which current Ollama cannot

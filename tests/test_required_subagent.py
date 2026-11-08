@@ -78,6 +78,23 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('if [ "$SUBA_ROUNDS" -ge 2 ]; then', self.text)
         self.assertIn("the world plan is final and the run moves on", self.text)
 
+    def test_the_confirmation_is_a_short_call_not_another_world_plan(self) -> None:
+        # "show the AI how much time it took and what it edited, then the AI
+        # confirms, then move on" - a few dozen tokens, not a second ten-minute plan.
+        self.assertIn("A SHORT CONFIRMATION, not another ten-minute world plan", self.text)
+        self.assertIn("confirm_request.json", self.text)
+        self.assertIn("num_predict': 220", self.text)
+        self.assertIn("--projected-seconds 0", self.text)
+        self.assertIn("the world plan is final and the run moves on", self.text)
+
+    def test_the_confirmation_answers_are_used_to_decide(self) -> None:
+        self.assertIn("changes_needed", self.text)
+        self.assertIn("The AI asked for changes, so it gets one more world plan round",
+                      self.text)
+
+    def test_a_real_subagent_round_marks_the_review_done(self) -> None:
+        self.assertIn("touch map_subagent_review.done", self.text)
+
     def test_the_helper_loop_cannot_skip_the_review(self) -> None:
         self.assertIn('if [ -z "$QUERIES" ] && [ "$TASKS" = "[]" ] '
                       '&& [ -f map_subagent_review.done ]; then break; fi', self.text)
