@@ -131,6 +131,15 @@ class FrameAuditTests(unittest.TestCase):
         # A called workflow cannot exceed its caller, so the backup button needs it too.
         self.assertIn("contents: write", START)
 
+    def test_two_comparison_runs_do_not_overwrite_each_others_stills(self):
+        # A hard run and a smart_11b run dispatched from the same workflow used to
+        # share one artifact name and one branch, so the second silently replaced
+        # the first. Both are namespaced by the model preset now.
+        self.assertIn("name: short-preview-stills-${{ inputs.model_quality || 'default' }}", WORKFLOW)
+        self.assertIn('BRANCH="media-preview-${{ inputs.model_quality || \'default\' }}"', WORKFLOW)
+        self.assertNotIn('name: short-preview-stills\n', WORKFLOW)
+        self.assertIn('git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" "$BRANCH"', WORKFLOW)
+
     def test_publishing_can_never_fail_the_run(self):
         block = WORKFLOW.split("publish_preview:")[1]
         self.assertIn("continue-on-error: true", block)

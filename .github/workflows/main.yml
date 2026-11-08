@@ -1099,6 +1099,10 @@ jobs:
 
       - name: Package the runnable Roblox Studio experience
         id: studio-experience
+        env:
+          # Used only to name the artifact and branch the stills summary mentions,
+          # so two comparison runs stay apart.
+          MODEL_QUALITY: ${{ inputs.model_quality || 'default' }}
         run: |
           python tools/build_studio_experience.py \
             --map dist/Roblox_Story_Map.json \
@@ -1139,7 +1143,7 @@ jobs:
             echo "- A vertical H.264/AAC MP4 is rendered automatically in the Linux workflow with headless Three.js and FFmpeg; no local Roblox Studio or Blender run is needed."
             echo "- The AI plans and times every facial expression; the renderer animates a mouth that follows the narration and cuts to face close-ups like a Roblox story short."
             echo "- The renderer measured its own frames before shipping: see the \`Projection probe\` and \`Frame audit\` lines in the render step, which fail the run on a stretched or black world."
-            echo "- Small PNG stills of that same footage are in the \`short-preview-stills\` artifact, and on the [media-preview branch](https://github.com/$GITHUB_REPOSITORY/tree/media-preview), so the look can be checked without downloading the MP4."
+            echo "- Small PNG stills of that same footage are in the \`short-preview-stills-${MODEL_QUALITY}\` artifact, and on the [media-preview-${MODEL_QUALITY} branch](https://github.com/$GITHUB_REPOSITORY/tree/media-preview-${MODEL_QUALITY}), so the look can be checked without downloading the MP4."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Free model RAM for the physics renderer
@@ -1183,7 +1187,9 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: short-preview-stills
+          # One name per model preset: two test runs of the same workflow (the
+          # hard vs smart_11b comparison, for example) must not collide.
+          name: short-preview-stills-${{ inputs.model_quality || 'default' }}
           path: dist/preview/
           if-no-files-found: warn
           retention-days: 14
@@ -1315,7 +1321,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          name: short-preview-stills
+          name: short-preview-stills-${{ inputs.model_quality || 'default' }}
           path: preview
 
       - name: Publish them to the media-preview branch
@@ -1328,7 +1334,10 @@ jobs:
           ls -la preview
           WORK=$(mktemp -d)
           cd "$WORK"
-          git init -q -b media-preview .
+          # A branch per model preset, so the hard run and the smart_11b run of a
+          # comparison test never overwrite each other's stills.
+          BRANCH="media-preview-${{ inputs.model_quality || 'default' }}"
+          git init -q -b "$BRANCH" .
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           cp "$GITHUB_WORKSPACE"/preview/*.png . 2>/dev/null || true
@@ -1348,5 +1357,5 @@ jobs:
           } > README.md
           git add -A
           git commit -q -m "Still previews for run $GITHUB_RUN_ID" || exit 0
-          git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" media-preview
-          echo "Published the stills to the media-preview branch."
+          git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" "$BRANCH"
+          echo "Published the stills to the ${BRANCH} branch."
