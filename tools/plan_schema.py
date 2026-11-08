@@ -161,12 +161,26 @@ def build_schema(usernames=()) -> dict:
             "camera_shots": {"type": "array", "items": shot, "minItems": 6},
             "face_expressions": {"type": "array", "items": beat, "minItems": 6},
             "search_queries": {"type": "array", "items": {"type": "string"}},
-            # The local model may delegate up to three fiddly jobs to the Gemini
-            # sub-agent; the workflow runs them and asks again with the answers.
-            "subagent_tasks": {"type": "array", "items": subagent_task},
+            # The Gemini sub-agent is REQUIRED for the map and the camera plan: this
+            # step is where the world and the shots are designed, and the sub-agent is
+            # the second pair of eyes that checks them. The schema therefore demands at
+            # least one delegated task. (Everywhere else - story, narration, summary -
+            # delegating stays optional.)
+            "subagent_tasks": {"type": "array", "items": subagent_task, "minItems": 1},
+            # After the sub-agent has answered, the AI says what it did with each
+            # result (kept it, fixed it, asked again) rather than moving on silently.
+            "subagent_review": {
+                "type": "object",
+                "properties": {
+                    "accepted": {"type": "array", "items": {"type": "string"}},
+                    "note": {"type": "string"},
+                },
+                "required": ["accepted"],
+            },
         },
         "required": ["name", "theme", "props", "character_placements",
-                     "camera_shots", "face_expressions", "search_queries"],
+                     "camera_shots", "face_expressions", "search_queries",
+                     "subagent_tasks"],
     }
 
 

@@ -275,6 +275,7 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
         print(paint(f"[gemini sub-agent] {API_KEY_ENV} is not configured; "
                     f"skipping {len(request.get('tasks', []))} delegated task(s) and "
                     f"continuing.", "warning"), flush=True)
+    started_all = time.monotonic()
     for task in request.get("tasks", []):
         if skipped:
             results.append({"id": task["id"], "kind": task["kind"], "ok": False,
@@ -287,6 +288,7 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
             target = f" for {task['apply_to']}" if task.get("apply_to") else ""
             print(paint(f"[gemini sub-agent] giving it the file rules{target}: "
                         f"{', '.join(topics)}.", "tool"), flush=True)
+        started = time.monotonic()
         try:
             text = call_gemini(build_prompt(task, request.get("context", "")),
                                api_key=api_key, model=model, timeout=timeout, url=url)
@@ -294,9 +296,11 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
             print(paint(f"[gemini sub-agent] task {task['id']} failed ({exc}); "
                         f"continuing without it.", "error"), file=sys.stderr, flush=True)
             results.append({"id": task["id"], "kind": task["kind"], "ok": False,
+                            "seconds": round(time.monotonic() - started, 1),
                             "error": str(exc)[:300]})
             continue
-        entry = {"id": task["id"], "kind": task["kind"], "ok": True, "text": text}
+        entry = {"id": task["id"], "kind": task["kind"], "ok": True, "text": text,
+                 "seconds": round(time.monotonic() - started, 1)}
         if task["kind"] == "edit" and task.get("apply_to"):
             target = safe_target(task["apply_to"], root)
             if target is None:
@@ -313,8 +317,16 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
         print(paint(f"[gemini sub-agent] reply to {task['id']} ({task['kind']}, "
                     f"{len(text)} chars): {preview[:700]}{'...' if len(preview) > 700 else ''}",
                     "answer"), flush=True)
+        # The local AI is told how long each job took and what file it touched, so it
+        # can confirm or correct the result before the workflow moves on.
+        took = entry["seconds"]
+        touched = entry.get("applied_to") or entry.get("apply_error") or "nothing written"
+        print(paint(f"[gemini sub-agent] task {task['id']} finished in {took}s "
+                    f"({touched}).", "success"), flush=True)
         results.append(entry)
-    return {"model": model, "skipped": skipped, "results": results}
+    return {"model": model, "skipped": skipped,
+            "seconds": round(time.monotonic() - started_all, 1),
+            "results": results}
 
 
 def main() -> None:

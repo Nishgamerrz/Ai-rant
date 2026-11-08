@@ -262,6 +262,32 @@ class ThinkingUnsupported(Exception):
     """Raised when the selected model has no reasoning channel at all."""
 
 
+class ModelMissing(Exception):
+    """The model named in the request is not installed on this runner."""
+
+
+def installed_models(url: str, timeout: float = 30) -> set[str]:
+    """Names Ollama reports in /api/tags, as 'name:tag'.
+
+    Asked before a hand-over: switching to a model that is not on disk is not a
+    rescue, it is a 404 that loses the call.
+    """
+    base = url.split("/api/")[0]
+    try:
+        with urllib.request.urlopen(f"{base}/api/tags", timeout=timeout) as handle:
+            payload = json.loads(handle.read().decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 - never let the probe itself break a call
+        return set()
+    names = set()
+    for entry in payload.get("models") or []:
+        name = str(entry.get("name") or entry.get("model") or "")
+        if name:
+            names.add(name)
+            if ":" not in name:
+                names.add(f"{name}:latest")
+    return names
+
+
 class ModelUnusable(Exception):
     """Raised when Ollama fails (5xx) to load or run the selected model."""
 
@@ -315,6 +341,13 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
         detail = exc.read().decode("utf-8", "replace")
         if exc.code == 400 and "think" in detail.lower():
             raise ThinkingUnsupported(detail.strip()[:300]) from exc
+        if exc.code == 404:
+            # Ollama answers 404 for a model it does not have ("model 'qwen3:4b' not
+            # found"). This used to escape as a bare HTTPError and kill the whole
+            # call - the world plan died that way when the fallback had never been
+            # pulled, and the run silently produced a procedural world instead of the
+            # AI's furnished one.
+            raise ModelMissing(f"HTTP 404: {detail.strip()[:300]}") from exc
         if exc.code >= 500:
             # For example llama3.2-vision: Ollama exits with
             # "unknown model architecture: 'mllama'" and returns HTTP 500.
@@ -571,8 +604,9 @@ def main() -> None:
               "type_delay": args.type_delay, "type_budget": args.type_budget,
               "heartbeat_seconds": args.heartbeat_seconds}
 
-    def run_once(payload: dict, note: str) -> dict:
-        result = stream(payload, args.url, args.label, args.timeout, args.quiet, **limits)
+    def run_once(payload: dict, note: str, overrides: dict | None = None) -> dict:
+        result = stream(payload, args.url, args.label, args.timeout, args.quiet,
+                        **{**limits, **(overrides or {})})
         # A reasoning model can spend the whole num_predict budget thinking and
         # stop mid-sentence (`done_reason: "length"`). That used to surface as a
         # mysteriously short story and burn a whole retry round; finish it here
@@ -610,7 +644,8 @@ def main() -> None:
                              {"role": "user", "content": steer}],
                 "options": {**(payload.get("options") or {}), "num_predict": bigger},
             }
-            retried = stream(retry_payload, args.url, args.label, args.timeout, args.quiet, **limits)
+            retried = stream(retry_payload, args.url, args.label, args.timeout, args.quiet,
+                             **{**limits, **(overrides or {})})
             retried["token_ceiling_retry"] = bigger
             retried["steered_after_repeat"] = looping
             if retried.get("done_reason") != "length" and not retried.get("repeated"):
@@ -622,17 +657,17 @@ def main() -> None:
                 result = retried
         return result
 
-    def attempt(payload: dict, note: str = "") -> dict | None:
+    def attempt(payload: dict, note: str = "", overrides: dict | None = None) -> dict | None:
         try:
-            return run_once(payload, note)
+            return run_once(payload, note, overrides)
         except ThinkingUnsupported as exc:
             # Thinking is requested for every preset, but a few architectures
             # have no reasoning channel. Answer normally instead of failing.
             print(paint(f"[{args.label}] this model has no thinking channel ({exc}); "
                         f"answering without reasoning tokens.{note}", "warning"), flush=True)
             try:
-                result = run_once({**payload, "think": False}, note)
-            except (ModelUnusable, ThinkingUnsupported) as retry_exc:
+                result = run_once({**payload, "think": False}, note, overrides)
+            except (ModelUnusable, ModelMissing, ThinkingUnsupported) as retry_exc:
                 print(paint(f"[{args.label}] the model is unusable at all ({retry_exc}).",
                             "error"), flush=True)
                 return None
@@ -642,6 +677,10 @@ def main() -> None:
             print(paint(f"[{args.label}] {model} is too slow for this run ({exc}).",
                         "warning"), flush=True)
             return None
+        except ModelMissing as exc:
+            print(paint(f"[{args.label}] {model} is not installed on this runner ({exc}); "
+                        f"it has to be pulled before it can be used.", "error"), flush=True)
+            return None
         except ModelUnusable as exc:
             print(paint(f"[{args.label}] {model} cannot run here ({exc}).", "error"),
                   flush=True)
@@ -649,20 +688,58 @@ def main() -> None:
 
     try:
         result = attempt(request)
+        switched = False
         if result is None and args.fallback_model and args.fallback_model != model:
-            print(paint(f"[{args.label}] switching to the known-good fallback model "
-                        f"{args.fallback_model} so the run continues.", "warning"), flush=True)
-            fallback = {**request, "model": args.fallback_model,
-                        "think": bool(args.fallback_thinking)}
-            result = attempt(fallback, f" (fallback {args.fallback_model})")
-            if result is not None:
-                result["fallback_model"] = args.fallback_model
-                # Sticky hand-over. Every later call in the run names the run's
-                # primary model, so without this the next step would reload the
-                # slow model (minutes), find it slow again, and reload the
-                # fallback: a reload before every single step.
-                stick_to_fallback(args.fallback_model, args.label,
-                                  args.output.parent / ".ai_model")
+            # Only hand over to a model that is actually on disk. A run whose
+            # fallback had never been pulled used to switch to it anyway, take a 404
+            # and lose the call entirely - the world plan died that way and the run
+            # shipped a procedural world instead of the AI's.
+            available = installed_models(args.url)
+            if available and args.fallback_model not in available:
+                print(paint(f"[{args.label}] {args.fallback_model} is NOT installed "
+                            f"(Ollama has: {', '.join(sorted(available)) or 'nothing'}), so "
+                            f"there is nothing to hand over to. Trying {model} once more.",
+                            "warning"), flush=True)
+                print("::warning title=Fallback model missing::"
+                      f"{args.fallback_model} was never pulled, so this call could not "
+                      f"hand over. Pull it (ollama pull {args.fallback_model}).", flush=True)
+            else:
+                if not available:
+                    print(paint(f"[{args.label}] could not ask Ollama which models it has; "
+                                f"trying the fallback anyway.", "warning"), flush=True)
+                print(paint(f"[{args.label}] switching to the known-good fallback model "
+                            f"{args.fallback_model} so the run continues.", "warning"), flush=True)
+                fallback = {**request, "model": args.fallback_model,
+                            "think": bool(args.fallback_thinking)}
+                # The projection budget is what triggered the hand-over; it must not
+                # trigger again on the same measured rate, or the retry dies the same
+                # death as the first attempt.
+                result = attempt(fallback, f" (fallback {args.fallback_model})")
+                if result is not None:
+                    result["fallback_model"] = args.fallback_model
+                    switched = True
+                    # Sticky hand-over. Every later call in the run names the run's
+                    # primary model, so without this the next step would reload the
+                    # slow model (minutes), find it slow again, and reload the
+                    # fallback: a reload before every single step.
+                    stick_to_fallback(args.fallback_model, args.label,
+                                      args.output.parent / ".ai_model")
+                else:
+                    print(paint(f"[{args.label}] the fallback {args.fallback_model} could not "
+                                f"answer either; going back to {model} with the speed "
+                                f"projection switched off so the work is not thrown away.",
+                                "warning"), flush=True)
+        if result is None and not switched:
+            # Last resort: the primary again, with no projection ceiling. A slow but
+            # working call is worth more than a lost plan.
+            # A model that is genuinely working should not be killed three times for
+            # its speed. The stall watchdog stays on (that catches a frozen process),
+            # the rate projection and the tps floor do not.
+            print(paint(f"[{args.label}] asking {model} once more, with the speed "
+                        f"projection switched off: a slow answer is worth more than a "
+                        f"lost plan.", "warning"), flush=True)
+            result = attempt(request, " (no speed projection)",
+                             {"projected_seconds": 0, "min_tps": 0, "max_seconds": 0})
         if result is None:
             raise SystemExit(1)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
