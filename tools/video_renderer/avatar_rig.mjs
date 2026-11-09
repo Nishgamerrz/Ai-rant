@@ -3,11 +3,395 @@ function clamp(value, min, max) {
 }
 
 /**
+ * A Roblox avatar is not soft skin: it is a small set of RIGID parts (head, torso,
+ * upper arm, forearm, hand, thigh, shin, foot) that rotate around their joints.
+ * The OBJ Roblox Studio exports already carries exactly those parts as named
+ * groups (Handle1, Rig1...Rig15), so their bounding boxes say what each one is:
+ * the head is the top part that straddles the centre line, arms are the parts far
+ * out to one side, legs are the narrow parts below the hips, and the foot is the
+ * lowest leg part with the longest Z.
+ *
+ * Every part is then bound 100% to ONE bone. A part that follows one joint is a
+ * rigid transform of itself, so no triangle can ever stretch, tear or "explode" -
+ * the failure that made the shipped MP4 look like an exploding character. The old
+ * per-triangle smoothing pass is kept only as the fallback for models that have no
+ * separate parts (single-mesh GLB/FBX/STL avatars).
+ */
+const PART_LIMIT = 512;
+
+function partBoxes(THREE, model) {
+  model.updateMatrixWorld(true);
+  const entries = [];
+  model.traverse((object) => {
+    if (!object.isMesh || !object.geometry?.getAttribute?.('position')) return;
+    const box = new THREE.Box3().setFromObject(object);
+    if (!Number.isFinite(box.min.x) || !Number.isFinite(box.max.x)) return;
+    entries.push({ object, box });
+  });
+  return entries.slice(0, PART_LIMIT);
+}
+
+function boxCentre(box) {
+  return [(box.min.x + box.max.x) / 2, (box.min.y + box.max.y) / 2, (box.min.z + box.max.z) / 2];
+}
+
+/**
+ * Name every rigid part of an avatar from its own geometry.
+ * Returns { parts, height, centreX, confident, joints }.
+ */
+export function classifyAvatarParts(THREE, model) {
+  const entries = partBoxes(THREE, model);
+  const result = { parts: [], height: 0, centreX: 0, confident: false, joints: null };
+  if (!entries.length) return result;
+  const total = new THREE.Box3();
+  for (const entry of entries) total.union(entry.box);
+  const height = total.max.y - total.min.y;
+  const width = total.max.x - total.min.x;
+  result.height = height;
+  result.centreX = (total.min.x + total.max.x) / 2;
+  if (!(height > 0.1) || !(width > 0.05)) return result;
+  const centreX = result.centreX;
+  const bottom = total.min.y;
+  const straddles = (box) => (box.min.x - centreX) < -0.08 * width && (box.max.x - centreX) > 0.08 * width;
+
+  // Torso parts straddle the centre line; their widest half-extent tells an arm
+  // (far out to the side) from a leg (narrow, under the hips).
+  const bodyParts = entries.filter((entry) => straddles(entry.box));
+  const torsoHalf = bodyParts.length
+    ? Math.max(...bodyParts.map((entry) => Math.max(
+      Math.abs(entry.box.max.x - centreX), Math.abs(entry.box.min.x - centreX))))
+    : width * 0.25;
+  const armReach = Math.max(torsoHalf * 0.9, width * 0.12);
+
+  const parts = entries.map((entry) => {
+    const centre = boxCentre(entry.box);
+    return {
+      object: entry.object,
+      box: entry.box,
+      centre,
+      localX: centre[0] - centreX,
+      side: centre[0] < centreX ? 'Left' : 'Right',
+      spanY: entry.box.max.y - entry.box.min.y,
+      spanZ: entry.box.max.z - entry.box.min.z,
+      bone: null,
+    };
+  });
+
+  // Arms: far out to one side, above the hips.
+  const hipLine = bottom + height * 0.34;
+  const limbs = parts.filter((part) => !straddles(part.box));
+  const armParts = limbs.filter((part) => Math.abs(part.localX) > armReach && part.centre[1] > hipLine);
+  const legParts = limbs.filter((part) => !armParts.includes(part));
+
+  // Legs: one leg is the lowest group of parts on each side.
+  for (const side of ['Left', 'Right']) {
+    const sideLegs = legParts.filter((part) => part.side === side)
+      .sort((a, b) => b.centre[1] - a.centre[1]);
+    if (!sideLegs.length) continue;
+    if (sideLegs.length === 1) { sideLegs[0].bone = `${side}UpperLeg`; continue; }
+    sideLegs[0].bone = `${side}UpperLeg`;
+    sideLegs[sideLegs.length - 1].bone = `${side}Foot`;
+    for (let index = 1; index < sideLegs.length - 1; index += 1) sideLegs[index].bone = `${side}LowerLeg`;
+  }
+  // Arms: highest part is the upper arm, lowest is the hand.
+  for (const side of ['Left', 'Right']) {
+    const sideArms = armParts.filter((part) => part.side === side)
+      .sort((a, b) => b.centre[1] - a.centre[1]);
+    if (!sideArms.length) continue;
+    if (sideArms.length === 1) { sideArms[0].bone = `${side}UpperArm`; continue; }
+    sideArms[0].bone = `${side}UpperArm`;
+    sideArms[sideArms.length - 1].bone = `${side}Hand`;
+    for (let index = 1; index < sideArms.length - 1; index += 1) sideArms[index].bone = `${side}LowerArm`;
+  }
+
+  // Body parts: the CHEST is the widest piece across the shoulders (but never a
+  // hat sitting in the top of the silhouette), the HEAD is the lowest piece that
+  // starts above the chest, and whatever is worn above the head's own bottom is
+  // worn ON the head. Run #110 shipped a head bound to the chest, which is what
+  // dragged the whole face down with the torso.
+  const body = parts.filter((part) => straddles(part.box));
+  const widthOf = (part) => part.box.max.x - part.box.min.x;
+  const chestCandidates = body.filter((part) => part.centre[1] < bottom + height * 0.78);
+  const chestPart = chestCandidates.length
+    ? chestCandidates.reduce((best, part) => (widthOf(part) > widthOf(best) ? part : best))
+    : null;
+  if (chestPart) chestPart.bone = 'Chest';
+  const aboveChest = (part) => (chestPart ? part.box.min.y >= chestPart.box.max.y - height * 0.03 : false);
+  const headCandidates = body.filter((part) => part !== chestPart && aboveChest(part))
+    .sort((a, b) => a.box.min.y - b.box.min.y);
+  const headPartChosen = headCandidates.length
+    ? headCandidates[0]
+    : body.filter((part) => part !== chestPart).sort((a, b) => b.centre[1] - a.centre[1])[0] || null;
+  if (headPartChosen) headPartChosen.bone = 'Head';
+  if (headPartChosen) {
+    for (const part of body) {
+      if (part === headPartChosen || part === chestPart || part.bone) continue;
+      if (part.box.min.y >= headPartChosen.box.min.y - height * 0.02) part.bone = 'Head';
+    }
+  }
+  const torsoParts = body.filter((part) => !part.bone).sort((a, b) => b.centre[1] - a.centre[1]);
+  torsoParts.forEach((part, index) => {
+    part.bone = index === torsoParts.length - 1 || torsoParts.length === 1 ? 'Hips'
+      : (torsoParts.length >= 3 && index === 0 ? 'Spine' : 'Spine');
+  });
+  // Anything still unnamed (an accessory floating beside the body) follows the chest.
+  for (const part of parts) if (!part.bone) part.bone = 'Chest';
+
+  const byBone = (bone) => parts.filter((part) => part.bone === bone);
+  const maxY = (bone, fallback) => {
+    const list = byBone(bone);
+    return list.length ? Math.max(...list.map((part) => part.box.max.y)) : fallback;
+  };
+  const minY = (bone, fallback) => {
+    const list = byBone(bone);
+    return list.length ? Math.min(...list.map((part) => part.box.min.y)) : fallback;
+  };
+  const meanX = (bone, fallback) => {
+    const list = byBone(bone);
+    return list.length ? list.reduce((sum, part) => sum + part.centre[0], 0) / list.length : fallback;
+  };
+  const centreZ = (parts ? boxCentre(total)[2] : 0);
+
+  const hips = byBone('Hips')[0] || byBone('Spine')[0] || null;
+  const chest = byBone('Chest')[0] || null;
+  const headPart = byBone('Head')[0] || null;
+  const hipY = hips ? hips.centre[1] : bottom + height * 0.46;
+  const joints = {
+    root: [centreX, bottom, centreZ],
+    hips: [centreX, hipY, centreZ],
+    spine: [centreX, chest ? Math.min(chest.box.min.y, hipY + height * 0.06) : hipY + height * 0.14, centreZ],
+    chest: [centreX, chest ? chest.centre[1] : hipY + height * 0.26, centreZ],
+    neck: [centreX, headPart ? headPart.box.min.y - height * 0.05 : bottom + height * 0.72, centreZ],
+    head: [centreX, headPart ? headPart.box.min.y : bottom + height * 0.76, centreZ],
+  };
+  // Capitals too: the rig builder names bones 'Head', 'Hips'..., and a missing key
+  // silently put the head joint at the origin (0,0,0) once.
+  joints.Root = joints.root;
+  joints.Hips = joints.hips;
+  joints.Spine = joints.spine;
+  joints.Chest = joints.chest;
+  joints.Neck = joints.neck;
+  joints.Head = joints.head;
+  for (const side of ['Left', 'Right']) {
+    const sign = side === 'Left' ? -1 : 1;
+    const upperArm = byBone(`${side}UpperArm`);
+    const lowerArm = byBone(`${side}LowerArm`);
+    const hand = byBone(`${side}Hand`);
+    const upperLeg = byBone(`${side}UpperLeg`);
+    const lowerLeg = byBone(`${side}LowerLeg`);
+    const foot = byBone(`${side}Foot`);
+    joints[`${side}UpperArm`] = [
+      upperArm.length ? Math.min(...upperArm.map((part) => Math.abs(part.box.max.x - centreX)), Math.abs(centreX)) * sign + centreX : centreX + sign * height * 0.14,
+      upperArm.length ? Math.max(...upperArm.map((part) => part.box.max.y)) - height * 0.04 : bottom + height * 0.68,
+      centreZ,
+    ];
+    joints[`${side}LowerArm`] = [
+      meanX(`${side}LowerArm`, centreX + sign * height * 0.16),
+      lowerArm.length ? Math.max(...lowerArm.map((part) => part.box.max.y)) : bottom + height * 0.5,
+      centreZ,
+    ];
+    joints[`${side}Hand`] = [
+      meanX(`${side}Hand`, centreX + sign * height * 0.17),
+      hand.length ? Math.max(...hand.map((part) => part.box.max.y)) : bottom + height * 0.4,
+      centreZ,
+    ];
+    joints[`${side}UpperLeg`] = [
+      meanX(`${side}UpperLeg`, centreX + sign * height * 0.05),
+      upperLeg.length ? Math.max(...upperLeg.map((part) => part.box.max.y)) : hipY,
+      centreZ,
+    ];
+    joints[`${side}LowerLeg`] = [
+      meanX(`${side}LowerLeg`, centreX + sign * height * 0.05),
+      lowerLeg.length ? Math.max(...lowerLeg.map((part) => part.box.max.y)) : bottom + height * 0.22,
+      centreZ,
+    ];
+    joints[`${side}Foot`] = [
+      meanX(`${side}Foot`, centreX + sign * height * 0.05),
+      foot.length ? Math.max(...foot.map((part) => part.box.max.y)) : bottom + height * 0.08,
+      centreZ,
+    ];
+  }
+
+  result.parts = parts;
+  result.joints = joints;
+  // Confident only when the avatar really is built from separate body parts.
+  const needed = ['Head', 'Chest', 'LeftUpperArm', 'RightUpperArm', 'LeftUpperLeg', 'RightUpperLeg'];
+  result.confident = parts.length >= 6 && needed.every((bone) => byBone(bone).length);
+  return result;
+}
+
+/**
+ * Build the rigid, part-aware rig. Each OBJ group is one bone, exactly like an
+ * R15 avatar, so a part can never deform: it can only rotate around its joint.
+ */
+export function buildPartRig(THREE, model, classified) {
+  const rigRoot = new THREE.Group();
+  rigRoot.name = 'RigidR15Rig';
+  const bones = [];
+  const byName = {};
+  const joints = classified.joints;
+  const make = (name, parent, position) => {
+    const bone = new THREE.Bone();
+    bone.name = name;
+    const base = joints[name] || joints[name.toLowerCase()] || [0, 0, 0];
+    const origin = parent ? (joints[parent.name] || joints[parent.name.toLowerCase()] || [0, 0, 0]) : [0, 0, 0];
+    bone.position.set(base[0] - origin[0], base[1] - origin[1], base[2] - origin[2]);
+    parent ? parent.add(bone) : rigRoot.add(bone);
+    bones.push(bone);
+    byName[name] = bone;
+    return bone;
+  };
+  const root = make('Root', null, joints.root);
+  const hips = make('Hips', root);
+  const spine = make('Spine', hips);
+  const chest = make('Chest', spine);
+  const neck = make('Neck', chest);
+  make('Head', neck);
+  for (const side of ['Left', 'Right']) {
+    const upperArm = make(`${side}UpperArm`, chest);
+    const lowerArm = make(`${side}LowerArm`, upperArm);
+    make(`${side}Hand`, lowerArm);
+    const upperLeg = make(`${side}UpperLeg`, hips);
+    const lowerLeg = make(`${side}LowerLeg`, upperLeg);
+    make(`${side}Foot`, lowerLeg);
+  }
+
+  const boneIndices = new Map(bones.map((bone, index) => [bone.name, index]));
+  const meshes = [];
+  for (const part of classified.parts) {
+    const object = part.object;
+    let geometry = object.geometry.clone();
+    geometry.applyMatrix4(object.matrixWorld);
+    if (geometry.getIndex()) geometry = geometry.toNonIndexed();
+    const count = geometry.getAttribute('position').count;
+    const index = boneIndices.get(part.bone) ?? boneIndices.get('Chest') ?? 0;
+    const indices = new Uint16Array(count * 4);
+    const weights = new Float32Array(count * 4);
+    for (let vertex = 0; vertex < count; vertex += 1) {
+      indices[vertex * 4] = index;
+      weights[vertex * 4] = 1;
+    }
+    geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(indices, 4));
+    geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(weights, 4));
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    const skinned = new THREE.SkinnedMesh(geometry, object.material);
+    skinned.name = object.name || part.bone;
+    skinned.castShadow = true;
+    skinned.receiveShadow = true;
+    skinned.frustumCulled = false;
+    const materials = Array.isArray(skinned.material) ? skinned.material : [skinned.material];
+    for (const material of materials) {
+      if (!material) continue;
+      material.side = THREE.DoubleSide;
+      material.needsUpdate = true;
+    }
+    rigRoot.add(skinned);
+    meshes.push(skinned);
+  }
+  rigRoot.updateMatrixWorld(true);
+  const skeleton = new THREE.Skeleton(bones);
+  for (const mesh of meshes) mesh.bind(skeleton);
+  rigRoot.updateMatrixWorld(true);
+  const rig = {
+    root: rigRoot, bones: byName, meshCount: meshes.length, skeleton, meshes,
+    height: classified.height, mode: 'rigid-parts', joints,
+    boneOfMesh: meshes.map((mesh) => mesh.name),
+    partBones: classified.parts.map((part) => [part.object.name || part.bone, part.bone]),
+  };
+  rig.restProfile = recordRestProfile(THREE, rig);
+  return rig;
+}
+
+/**
+ * Remember, for every vertex, how far it sits from its own part's centre in the
+ * bind pose. A rigid part keeps that distance exactly; if any vertex drifts, the
+ * part is being stretched, which is the bug this file exists to prevent.
+ */
+export function recordRestProfile(THREE, rig) {
+  const profile = [];
+  for (const mesh of rig.meshes) {
+    const position = mesh.geometry.getAttribute('position');
+    const centre = new THREE.Vector3();
+    const step = Math.max(1, Math.floor(position.count / 300));
+    let counted = 0;
+    for (let vertex = 0; vertex < position.count; vertex += step) {
+      centre.add(new THREE.Vector3(position.getX(vertex), position.getY(vertex), position.getZ(vertex)));
+      counted += 1;
+    }
+    if (counted) centre.multiplyScalar(1 / counted);
+    const distances = [];
+    for (let vertex = 0; vertex < position.count; vertex += step) {
+      distances.push(new THREE.Vector3(position.getX(vertex), position.getY(vertex), position.getZ(vertex))
+        .distanceTo(centre));
+    }
+    profile.push({ mesh, centre, distances, step });
+  }
+  return profile;
+}
+
+/**
+ * Measure how far the CURRENT pose deforms each part: 0 means perfectly rigid.
+ * Returns { maxStretch, worstPart, samples } where maxStretch is the largest
+ * relative change of a vertex's distance from its part centre.
+ */
+export function measureRigStretch(THREE, rig) {
+  const profile = rig.restProfile;
+  if (!profile) return { maxStretch: 0, worstPart: '', samples: 0 };
+  let maxStretch = 0;
+  let worstPart = '';
+  let samples = 0;
+  for (const entry of profile) {
+    const mesh = entry.mesh;
+    const position = mesh.geometry.getAttribute('position');
+    const posed = [];
+    const centre = new THREE.Vector3();
+    for (let vertex = 0; vertex < position.count; vertex += entry.step) {
+      const point = mesh.getVertexPosition(vertex, new THREE.Vector3());
+      posed.push(point);
+      centre.add(point);
+    }
+    if (!posed.length) continue;
+    centre.multiplyScalar(1 / posed.length);
+    for (let index = 0; index < posed.length; index += 1) {
+      const rest = entry.distances[index] ?? 0;
+      if (rest < 1e-6) continue;
+      const stretch = Math.abs(posed[index].distanceTo(centre) - rest) / rest;
+      samples += 1;
+      if (stretch > maxStretch) {
+        maxStretch = stretch;
+        worstPart = mesh.name || mesh.parent?.name || 'part';
+      }
+    }
+  }
+  return { maxStretch, worstPart, samples };
+}
+
+/**
+ * The rig every avatar uses: rigid parts when the model is built from separate
+ * body parts (a Roblox OBJ always is), the older region rig only for a single
+ * fused mesh (GLB/FBX/STL), where per-part rigidity is not available.
+ */
+export function buildAvatarRig(THREE, model) {
+  const classified = classifyAvatarParts(THREE, model);
+  if (classified.confident) {
+    try {
+      const rig = buildPartRig(THREE, model, classified);
+      rig.height = classified.height;
+      return rig;
+    } catch (error) {
+      console.warn('Rigid part rig failed, falling back to the region rig:', error.message);
+    }
+  }
+  return buildRegionRig(THREE, model);
+}
+
+/**
  * Build an approximate R15-style skeleton and skin weights for an authentic,
  * unrigged Roblox OBJ. All mesh transforms are baked into the avatar-root space
  * first, so the same rig can drive every OBJ material group/accessory.
  */
-export function buildAvatarRig(THREE, model) {
+export function buildRegionRig(THREE, model) {
   model.updateMatrixWorld(true);
   const bounds = new THREE.Box3().setFromObject(model);
   const size = bounds.getSize(new THREE.Vector3());
@@ -463,7 +847,7 @@ function tracksForNativeClip(THREE, clip) {
 }
 
 /** Sample Roblox KeyframeSequence Pose channels on the generated avatar rig. */
-export function applyRobloxAnimationRig(THREE, bones, clip, time, loop = true, positionScale = 1) {
+export function applyRobloxAnimationRig(THREE, bones, clip, time, loop = true, positionScale = 1, blend = 1) {
   if (!clip?.keyframes?.length || !Number.isFinite(clip.duration) || clip.duration <= 0) return 0;
   let restPose = nativeRestPoseCache.get(bones);
   if (!restPose) {
@@ -488,7 +872,9 @@ export function applyRobloxAnimationRig(THREE, bones, clip, time, loop = true, p
     const span=b.time-a.time;
     const alpha=span>1e-8?clamp((sampleTime-a.time)/span,0,1):0;
     const rotation=a.rotation.clone().slerp(b.rotation,alpha);
-    const weight=a.weight+(b.weight-a.weight)*alpha;
+    // `blend` fades the whole clip: 1 = walking, 0 = the rig's rest stance, which
+    // stops a walk cycle from running under a character who is standing still.
+    const weight=(a.weight+(b.weight-a.weight)*alpha)*clamp(blend,0,1);
     // Roblox Animate Poses are rotations. Replaying their CFrame position deltas
     // on this generated skeleton pushed limb bones away from their sockets,
     // which is what looked like stretching arms. Only the root/hip may translate,
@@ -506,19 +892,24 @@ export function applyRobloxAnimationRig(THREE, bones, clip, time, loop = true, p
   return applied;
 }
 
-/** Procedural fallback for profiles that have no native Roblox KeyframeSequence. */
-export function animateAvatarRig(bones, time, phase, jumpAmount = 0) {
-  const gait = Math.sin(time * 2.8 + phase);
+/**
+ * Procedural walk cycle. `gaitAmount` is the amplitude: 1 while the body is
+ * travelling, 0 while it stands still. A walk cycle running under a motionless
+ * body is exactly what makes feet skate, and it is what the shipped MP4 showed.
+ */
+export function animateAvatarRig(bones, time, phase, jumpAmount = 0, gaitAmount = 1) {
+  const amount = clamp(gaitAmount, 0, 1);
+  const gait = Math.sin(time * 2.8 + phase) * amount;
   const opposite = -gait;
   const jump = clamp(jumpAmount, 0, 1);
   bones.LeftUpperArm.rotation.x = gait * 0.62;
   bones.RightUpperArm.rotation.x = opposite * 0.62;
-  bones.LeftLowerArm.rotation.x = -0.10 + Math.max(0, opposite) * 0.30;
-  bones.RightLowerArm.rotation.x = -0.10 + Math.max(0, gait) * 0.30;
-  bones.LeftUpperArm.rotation.z = 0.04 - jump * 0.46;
-  bones.RightUpperArm.rotation.z = -0.04 + jump * 0.46;
-  bones.LeftHand.rotation.x = -0.08;
-  bones.RightHand.rotation.x = -0.08;
+  bones.LeftLowerArm.rotation.x = (-0.10 + Math.max(0, opposite) * 0.30) * amount;
+  bones.RightLowerArm.rotation.x = (-0.10 + Math.max(0, gait) * 0.30) * amount;
+  bones.LeftUpperArm.rotation.z = 0.04 * amount - jump * 0.46;
+  bones.RightUpperArm.rotation.z = -0.04 * amount + jump * 0.46;
+  bones.LeftHand.rotation.x = -0.08 * amount;
+  bones.RightHand.rotation.x = -0.08 * amount;
 
   bones.LeftUpperLeg.rotation.x = opposite * 0.58;
   bones.RightUpperLeg.rotation.x = gait * 0.58;
@@ -526,8 +917,33 @@ export function animateAvatarRig(bones, time, phase, jumpAmount = 0) {
   bones.RightLowerLeg.rotation.x = Math.max(0, opposite) * 0.50 + jump * 0.18;
   bones.LeftFoot.rotation.x = -bones.LeftLowerLeg.rotation.x * 0.45;
   bones.RightFoot.rotation.x = -bones.RightLowerLeg.rotation.x * 0.45;
-  bones.Hips.rotation.y = Math.sin(time * 0.9 + phase) * 0.035;
-  bones.Spine.rotation.x = 0.025 + Math.sin(time * 2.8 + phase) * 0.035;
+  bones.Hips.rotation.y = Math.sin(time * 0.9 + phase) * 0.035 * amount;
+  bones.Spine.rotation.x = (0.025 + Math.sin(time * 2.8 + phase) * 0.035) * amount;
   bones.Chest.rotation.x = -bones.Spine.rotation.x * 0.45;
   bones.Head.rotation.y = Math.sin(time * 1.15 + phase) * 0.08;
+}
+
+/**
+ * Standing still, alive: breathing, a slow weight shift and a small head turn.
+ * Used while the camera holds on a character, so they read as acting rather than
+ * frozen. It never touches the legs - feet stay planted.
+ */
+export function idleAvatarRig(bones, time, phase, amount = 1) {
+  const strength = clamp(amount, 0, 1);
+  if (strength <= 0) return;
+  const breath = Math.sin(time * 1.6 + phase) * strength;
+  const sway = Math.sin(time * 0.7 + phase * 1.4) * strength;
+  bones.Chest.rotation.x += breath * 0.035;
+  bones.Spine.rotation.x += breath * 0.02;
+  bones.Spine.rotation.z = sway * 0.02;
+  bones.Head.rotation.y += sway * 0.10;
+  bones.Head.rotation.x = Math.sin(time * 1.1 + phase * 0.7) * 0.03 * strength;
+  if (bones.LeftUpperArm) {
+    bones.LeftUpperArm.rotation.z += breath * 0.05 - 0.05 * strength;
+    bones.RightUpperArm.rotation.z -= breath * 0.05 - 0.05 * strength;
+    bones.LeftUpperArm.rotation.x += Math.sin(time * 0.9 + phase) * 0.05 * strength;
+    bones.RightUpperArm.rotation.x += Math.sin(time * 0.9 + phase + 1.2) * 0.05 * strength;
+    bones.LeftLowerArm.rotation.x -= 0.12 * strength;
+    bones.RightLowerArm.rotation.x -= 0.12 * strength;
+  }
 }

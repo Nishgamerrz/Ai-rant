@@ -188,6 +188,98 @@ def render_frame():
         assert "Render preflight passed" in result.stdout, explain(combined)
 
 
+def render_room_frame():
+    """Render a REAL indoor scene built by the real builder, at the start of the run.
+
+    Run #109 spent three hours building a bedroom story and then rendered an open
+    field: no room, no walls, just outside. This check builds the same kind of room
+    the run will build (through tools/build_story_map.py), loads it in Chromium and
+    asks the renderer to prove every camera stays inside the walls. If anything in
+    that path is broken, the run dies here - in the first minutes - instead of after
+    the render.
+    """
+    node = shutil.which("node")
+    assert node, "node is not installed"
+    response = {
+        "message": {"content": json.dumps({
+            "name": "Preflight Bedroom", "theme": "A cramped bedroom at night",
+            "ground_material": "Wood", "ground_color": [150, 190, 225],
+            "ambient_color": [190, 200, 215],
+            "props": [
+                {"name": "Bed", "model": "furniture", "shape": "Block", "material": "Wood",
+                 "position": [-10, 1.5, 30], "size": [6, 3, 7], "color": [200, 160, 120],
+                 "physics": "static"},
+                {"name": "Desk", "model": "furniture", "shape": "Block", "material": "Wood",
+                 "position": [12, 1.5, 32], "size": [4, 3, 2], "color": [190, 150, 110],
+                 "physics": "static"},
+                {"name": "Chair", "model": "furniture", "shape": "Block", "material": "Wood",
+                 "position": [12, 1, 29], "size": [2, 2, 2], "color": [170, 130, 95],
+                 "physics": "static"},
+                {"name": "Wardrobe", "model": "furniture", "shape": "Block", "material": "Wood",
+                 "position": [-13, 4, 40], "size": [4, 8, 2], "color": [150, 110, 80],
+                 "physics": "static"},
+                {"name": "Lamp", "model": "lamp", "shape": "Cylinder", "material": "Neon",
+                 "position": [14, 4, 40], "size": [1, 5, 1], "color": [255, 230, 180],
+                 "physics": "static"},
+                {"name": "Bookshelf", "model": "shelf", "shape": "Block", "material": "Wood",
+                 "position": [8, 4, 40], "size": [4, 8, 1.5], "color": [160, 120, 90],
+                 "physics": "static"},
+                {"name": "Plant", "model": "plant", "shape": "Cylinder", "material": "Wood",
+                 "position": [15, 2, 26], "size": [2, 4, 2], "color": [90, 160, 90],
+                 "physics": "static"},
+                {"name": "Nightstand", "model": "furniture", "shape": "Block", "material": "Wood",
+                 "position": [-14, 1, 30], "size": [2, 2, 2], "color": [180, 140, 100],
+                 "physics": "static"},
+            ],
+            "character_placements": [
+                {"username": "PreflightLead", "role": "lead", "position": [0, 0, 24]},
+                {"username": "PreflightFriend", "role": "supporting", "position": [-6, 0, 24]},
+            ],
+            "camera_shots": [
+                {"time": 0, "position": [0, 75, 170], "target": [0, 3, 24],
+                 "focus_username": "PreflightLead", "transition": "smooth", "framing": "auto"},
+                {"time": 15, "position": [3, 6, 30], "target": [0, 5, 24],
+                 "focus_username": "PreflightFriend", "transition": "snap", "framing": "face",
+                 "face_distance": 2.6},
+                {"time": 30, "position": [0, 10, 44], "target": [0, 4, 24],
+                 "focus_username": "PreflightLead", "transition": "smooth", "framing": "wide"},
+            ],
+            "face_expressions": [
+                {"time": 1, "expression": "neutral", "intensity": 0.6, "username": "PreflightLead"},
+                {"time": 20, "expression": "happy", "intensity": 1, "username": "PreflightFriend"},
+                {"time": 29, "expression": "worried", "intensity": 0.8, "username": "PreflightLead"},
+            ],
+            "search_queries": [],
+        })}
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        source = work / "response.json"
+        source.write_text(json.dumps(response), encoding="utf-8")
+        cast = work / "cast.json"
+        cast.write_text(json.dumps(["PreflightLead", "PreflightFriend"]), encoding="utf-8")
+        world = work / "room.json"
+        built = subprocess.run([sys.executable, str(ROOT / "tools" / "build_story_map.py"),
+                                str(source), str(world), "40", "--json-only", "--strict",
+                                "--min-props", "8", "--target-props", "1260",
+                                "--usernames", str(cast),
+                                "--story-topic", "two brothers in a cramped bedroom"],
+                               capture_output=True, text=True, cwd=ROOT, timeout=300)
+        assert built.returncode == 0, explain(built.stderr or built.stdout, 6)
+        plan = json.loads(world.read_text(encoding="utf-8"))
+        assert plan.get("interior"), "the bedroom story was not built as a room"
+        names = " ".join(part["name"] for part in plan["props"])
+        for needed in ("Room Floor", "Room Ceiling", "Room Wall", "Room Door"):
+            assert needed in names, f"the built room has no {needed}"
+        result = subprocess.run([node, str(RENDERER / "render_short.mjs"),
+                                 "--map", str(world), "--preflight"],
+                                capture_output=True, text=True, cwd=ROOT, timeout=600)
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0, explain(combined)
+        assert "Render preflight room check" in result.stdout, explain(combined)
+        assert "camera positions all inside" in result.stdout, explain(combined)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--render", action="store_true",
@@ -202,6 +294,8 @@ def main() -> int:
     check("world-plan schema builds", plan_schema)
     if args.render:
         check("renderer loads the page and captures a frame", render_frame)
+        check("renderer builds a real room and keeps every camera inside it",
+              render_room_frame)
     if FAILURES:
         print(f"\nPreflight failed in {len(FAILURES)} check(s):", flush=True)
         for item in FAILURES:

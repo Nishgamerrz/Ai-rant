@@ -6,6 +6,8 @@
     "render": "node render_short.mjs",
     "test:physics": "node physics_smoke_test.mjs",
     "test:avatar-rig": "node avatar_rig_smoke_test.mjs",
+    "test:avatar-rigid": "node avatar_rigid_parts_smoke_test.mjs",
+    "test:actor-motion": "node actor_motion_smoke_test.mjs",
     "test:avatar-obj": "node avatar_obj_smoke_test.mjs",
     "test:module-resolution": "node module_resolution_smoke_test.mjs",
     "test:camera": "node scene_camera_smoke_test.mjs",

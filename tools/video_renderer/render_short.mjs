@@ -85,7 +85,8 @@ function buildHtml(data) {
   import { PLYLoader } from '/modules/three/examples/jsm/loaders/PLYLoader.js';
   import { STLLoader } from '/modules/three/examples/jsm/loaders/STLLoader.js';
   import { TDSLoader } from '/modules/three/examples/jsm/loaders/TDSLoader.js';
-  import { animateAvatarRig, applyRobloxAnimationRig, buildAvatarRig, measureFaceAnchor } from '/avatar_rig.mjs';
+  import { animateAvatarRig, applyRobloxAnimationRig, buildAvatarRig, idleAvatarRig, measureFaceAnchor, measureRigStretch } from '/avatar_rig.mjs';
+  import { planMarks, poseAt, roomBoundsFrom, yawToward } from '/actor_motion.mjs';
   import { chooseFaceCamera, chooseSafeCamera } from '/scene_camera.mjs';
   import { buildShapeGeometry, SHAPE_ROTATIONS } from '/map_shapes.mjs';
   import { createParticleField, isAdditive, sampleParticles } from '/particles.mjs';
@@ -429,7 +430,10 @@ function buildHtml(data) {
   const actors=[];
   const placements=new Map((DATA.plan.character_placements||[]).map(c=>[String(c.username).toLowerCase(),c]));
   const mapProps=DATA.plan.props||[];
-  const cameraBlockers=mapProps.filter(p=>p.physics!=='dynamic'&&p.size[1]>=2.5);
+  // A room is a closed set: the cast may not walk through a wall, and a camera may
+  // not be pushed outside one (which is how an indoor scene rendered as "outside").
+  const roomBounds=roomBoundsFrom(DATA.plan.interior);
+  window.roomBounds=roomBounds;
   function actorPointIsClear(x,z,occupied){
     for(const p of mapProps){
       const [px,py,pz]=p.position,[sx,sy,sz]=p.size;
@@ -532,7 +536,10 @@ function buildHtml(data) {
     const bones=avatarRig?.bones&&avatarRig.bones.Head?avatarRig.bones:(avatarRig?.Head?avatarRig:null);
     addRequestedAvatarEffects(root,bones,placement?.visual_effects,frontDirection);
     const face=bones?.Head?attachAnimatedFace(bones.Head,avatarRig,index,frontDirection,DATA.faceAnimation):null;
-    actors.push({root,username:String(username||''),baseX:Number(point[0]),baseY:Number(point[1]),baseZ:Number(point[2]),
+    actors.push({root,username:String(username||''),front:frontDirection||[0,0,1],
+      baseX:Number(point[0]),
+      // A room's floor slab is 0.2 thick with its top at y = 0.2: stand ON it.
+      baseY:Number(point[1])+(roomBounds?0.2:0),baseZ:Number(point[2]),
       phase:index*1.73,lead,stride:lead?2.1:1.15,rig:bones,animationClips,animationScale,face,
       blinks:blinkSchedule(index*31+5,DATA.duration+4,lead?1.15:.9)});
   }
@@ -653,46 +660,98 @@ function buildHtml(data) {
         ? focusActor.rig.Head.getWorldPosition(new THREE.Vector3())
         : new THREE.Vector3(focusActor.root.position.x,focusActor.root.position.y+5.35,focusActor.root.position.z);
       const faceDistance=Math.max(2.0,Math.min(3.4,Number(a.face_distance||b.face_distance||2.45)));
-      const faceView=chooseFaceCamera(head.toArray(),desired.toArray(),cameraBlockers,faceDistance);
+      const faceView=chooseFaceCamera(head.toArray(),desired.toArray(),cameraBlockers,faceDistance,roomBounds);
       camera.position.set(faceView[0],faceView[1],faceView[2]);camera.lookAt(head);camera.updateMatrixWorld(true);
       return;
     }
-    const preferred= index===0 ? [23,48] : (index>=shots.length-1 ? [14,28] : [17,36]);
-    const safe=chooseSafeCamera(target.toArray(),desired.toArray(),cameraBlockers,preferred[0],preferred[1]);
+    // In a room the camera cannot back off 23 studs: it would leave the walls.
+    const preferred= roomBounds ? (index===0 ? [8,13] : (index>=shots.length-1 ? [6,10] : [7,12]))
+      : (index===0 ? [23,48] : (index>=shots.length-1 ? [14,28] : [17,36]));
+    const safe=chooseSafeCamera(target.toArray(),desired.toArray(),cameraBlockers,preferred[0],preferred[1],roomBounds);
     camera.position.set(safe[0],safe[1],safe[2]);camera.lookAt(target);camera.updateMatrixWorld(true);
   }
-  // Move actors on deterministic, collision-free paths. A dynamic rigidbody used to
-  // wedge against generated map Parts and keep moving the rig in place, causing foot
-  // sliding and apparent limb stretch. Native Roblox clips still drive every pose.
-  function animateActor(actor,t){
-    const cycle=t*1.8+actor.phase,progress=Math.max(0,Math.min(1,t/DATA.duration));
-    const x=actor.baseX+Math.sin(cycle*.42)*actor.stride;
-    const z=actor.baseZ+Math.cos(cycle*.34+actor.phase)*actor.stride*.52;
-    const jumpProgress=actor.lead?Math.max(0,Math.min(1,(progress-.88)/.12)):0;
-    const jumpHeight=actor.lead?Math.sin(Math.PI*jumpProgress)*3.0:0;
-    actor.root.position.set(x,actor.baseY+jumpHeight,z);
-    const vx=Math.cos(cycle*.42)*actor.stride*.42*1.8;
-    const vz=-Math.sin(cycle*.34+actor.phase)*actor.stride*.34*.52*1.8;
-    const nativeClips=actor.animationClips;
-    const jumpPose=actor.lead?Math.max(0,Math.sin(Math.PI*jumpProgress)):0;
-    if(nativeClips?.walk){
-      const jumping=Boolean(actor.lead&&jumpProgress>0&&nativeClips.jump);
-      const clip=jumping?nativeClips.jump:nativeClips.walk;
-      const clipTime=jumping?jumpProgress*clip.duration:(t*1.15+actor.phase*clip.duration);
-      const mapped=applyRobloxAnimationRig(THREE,actor.rig,clip,clipTime,!jumping,actor.animationScale);
-      if(!mapped)throw new Error('Native Roblox animation lost all mapped Pose channels during rendering.');
-      actor.root.rotation.y=Math.atan2(vx,Math.max(.001,-vz));
-      actor.root.rotation.z=0;
-    }else{
-      actor.root.rotation.y=Math.atan2(vx,Math.max(.001,-vz));
-      actor.root.rotation.z=0;
-      if(actor.rig)animateAvatarRig(actor.rig,t,actor.phase,jumpPose);
+  // ---------------------------------------------------------------------------
+  // ACTING, NOT STANDING
+  //
+  // The shipped MP4 had characters glued to one spot: a fixed sine circle about a
+  // stud wide, one walk cycle looping forever, and - because the avatar's front is
+  // +Z while the yaw used atan2(vx, -vz) - the body facing 180 degrees away from
+  // the way it was sliding. A Roblox story short BLOCKS the scene instead: at every
+  // camera cut the characters are somewhere new, they walk there during the first
+  // moments of the shot, then stand and act while the camera holds. The maths lives
+  // in actor_motion.mjs so it can be tested without a browser.
+  const ACTOR_STRIDE = 2.4;            // studs per full walk cycle
+  function planBlocking() {
+    if (window.blockingReady) return;
+    if (!actors.length || !shots.length) return;
+    const planned = planMarks({ actors, shots, drift: roomBounds ? 2.0 : 3.0, bounds: roomBounds });
+    planned.forEach((entry, index) => {
+      if (!entry) return;
+      actors[index].marks = entry.marks;
+      actors[index].walkedBefore = entry.walkedBefore;
+    });
+    window.blockingReady = true;
+    window.blockingSummary = actors.map((actor) => ({
+      username: actor.username, marks: (actor.marks || []).length,
+      travelled: Math.round((actor.walkedBefore?.[actor.walkedBefore.length - 1] ?? 0) * 10) / 10,
+    }));
+  }
+  function actorPoseAt(actor, t) {
+    planBlocking();
+    const partnerMarks = actors.filter((other) => other !== actor && other.marks)
+      .map((other) => other.marks)[0] || null;
+    const pose = poseAt({
+      marks: actor.marks || [[actor.baseX, actor.baseZ]],
+      walkedBefore: actor.walkedBefore || [],
+      shots: shots.length ? shots : [{ time: 0 }, { time: DATA.duration }],
+      duration: DATA.duration, t, front: actor.front, partnerMarks, lastYaw: actor.lastYaw,
+    });
+    actor.lastYaw = pose.yaw;
+    return pose;
+  }
+  function animateActor(actor, t) {
+    const pose = actorPoseAt(actor, t);
+    actor.root.position.set(pose.x, actor.baseY, pose.z);
+    actor.root.rotation.y = pose.yaw;
+    actor.root.rotation.z = 0;
+    // A last-beat cheer uses the arms only: an earlier version lifted the whole
+    // body 3 studs off the floor and left the feet under the ground plane.
+    const cheer = actor.lead ? Math.max(0, Math.min(1, (t / DATA.duration - 0.9) / 0.1)) : 0;
+    if (actor.rig) {
+      const walkPhase = pose.walked / ACTOR_STRIDE * Math.PI * 2;
+      if (actor.animationClips?.walk) {
+        const mapped = applyRobloxAnimationRig(THREE, actor.rig, actor.animationClips.walk,
+          walkPhase / Math.PI, true, actor.animationScale, pose.moving);
+        if (!mapped) throw new Error('Native Roblox animation lost all mapped Pose channels during rendering.');
+      } else {
+        animateAvatarRig(actor.rig, walkPhase / Math.PI, actor.phase, 0, pose.moving);
+      }
+      idleAvatarRig(actor.rig, t, actor.phase, 1 - pose.moving);
+      if (cheer > 0 && actor.rig.LeftUpperArm) {
+        actor.rig.LeftUpperArm.rotation.z -= cheer * 1.5;
+        actor.rig.RightUpperArm.rotation.z += cheer * 1.5;
+      }
     }
-    updateActorFace(actor,t);
+    updateActorFace(actor, t);
     actor.root.updateMatrixWorld(true);
   }
   window.sceneReady=avatarPromise.then(()=>{
-    window.avatarRigSummary={total:actors.length,rigged:actors.filter(actor=>actor.rig).length,nativeAnimations:actors.filter(actor=>actor.rig&&actor.animationClips?.walk).length};
+    window.avatarRigSummary={total:actors.length,rigged:actors.filter(actor=>actor.rig).length,nativeAnimations:actors.filter(actor=>actor.rig&&actor.animationClips?.walk).length,modes:actors.map(actor=>actor.rig?.mode||'none')};
+    // Prove on the real avatars, before a single frame is encoded, that no part can
+    // deform: pose each actor hard and measure the deformation of every part.
+    let worstStretch=0,worstPart='';
+    for(const actor of actors){
+      if(!actor.rig)continue;
+      const walkPhase=3.1;
+      animateAvatarRig(actor.rig,walkPhase,actor.phase,0,1);
+      idleAvatarRig(actor.rig,1.7,actor.phase,0.5);
+      actor.root.updateMatrixWorld(true);
+      actor.rig.Head&&actor.rig.Head.parent&&actor.rig.root.updateMatrixWorld(true);
+      const report=measureRigStretch(THREE,actor.rig);
+      if(report.maxStretch>worstStretch){worstStretch=report.maxStretch;worstPart=actor.username+':'+report.worstPart;}
+    }
+    window.rigStretchSummary={maxStretch:worstStretch,worstPart};
+    planBlocking();
     window.faceRigSummary={faces:actors.filter(actor=>actor.face).length,
       expressionSwitches:fallbackTimeline.length,
       expressionSource:expressionTimeline.length?'ai-timeline':'generated-fallback',
@@ -707,6 +766,13 @@ function buildHtml(data) {
   // projection that is wider in one axis than the other, which happens when the
   // camera aspect and the canvas the browser really drew disagree. Measure it in
   // pixels against the live drawing buffer instead of trusting the constants.
+  // Where the camera really ends up at a given moment, asked of the same code that
+  // renders the shot. The preflight uses it to prove every indoor shot is taken
+  // from INSIDE the room, before the AI has spent an hour planning a world.
+  window.probeCameraAt=(t)=>{
+    cameraAt(t);
+    return {position:camera.position.toArray(),target:camera.getWorldDirection(new THREE.Vector3()).toArray()};
+  };
   window.probeProjection=()=>{
     const size=renderer.getDrawingBufferSize(new THREE.Vector2());
     camera.aspect=size.x/size.y;camera.updateProjectionMatrix();camera.updateMatrixWorld(true);
@@ -801,6 +867,7 @@ function createStaticServer(html, avatarRoot) {
     const pathname = decodeURIComponent(new URL(request.url, 'http://127.0.0.1').pathname);
     if (pathname === '/') { response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); response.end(html); return; }
     if (pathname === '/avatar_rig.mjs') { serveFile(response, join(ROOT, 'avatar_rig.mjs')); return; }
+    if (pathname === '/actor_motion.mjs') { serveFile(response, join(ROOT, 'actor_motion.mjs')); return; }
     if (pathname === '/scene_camera.mjs') { serveFile(response, join(ROOT, 'scene_camera.mjs')); return; }
     if (pathname === '/map_shapes.mjs') { serveFile(response, join(ROOT, 'map_shapes.mjs')); return; }
     if (pathname === '/particles.mjs') { serveFile(response, join(ROOT, 'particles.mjs')); return; }
@@ -1006,6 +1073,28 @@ async function preflight(plan) {
       throw new Error(`the frame is colourless (${(health.colourFraction * 100).toFixed(1)}% coloured pixels, `
         + `${(health.brightFraction * 100).toFixed(1)}% near-white)`);
     }
+    // A room scene must be shot from inside the room. This is the check that would
+    // have caught the "outside world" MP4 before its three-hour render.
+    if (plan && plan.interior) {
+      stage = 'check the cameras stay inside the room';
+      const bounds = await page.evaluate(() => window.roomBounds);
+      if (!bounds) throw new Error('the plan describes a room but the renderer built no room bounds');
+      const times = Array.from({ length: 9 }, (_, index) => (index / 8) * 40);
+      for (const t of times) {
+        const probe = await page.evaluate((time) => window.probeCameraAt(time), t);
+        const [x, y, z] = probe.position;
+        const inside = x >= bounds.minX - 0.75 && x <= bounds.maxX + 0.75
+          && z >= bounds.minZ - 0.75 && z <= bounds.maxZ + 0.75
+          && y >= bounds.minY - 0.75 && y <= bounds.maxY + 0.75;
+        if (!inside) {
+          throw new Error(`at t=${t}s the camera sits at [${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)}], `
+            + `outside the room [${bounds.minX.toFixed(1)}..${bounds.maxX.toFixed(1)}] x `
+            + `[${bounds.minZ.toFixed(1)}..${bounds.maxZ.toFixed(1)}]: the shot would be taken from outside`);
+        }
+      }
+      console.log(`Render preflight room check: ${times.length} camera positions all inside the `
+        + `${(bounds.maxX - bounds.minX).toFixed(0)}x${(bounds.maxZ - bounds.minZ).toFixed(0)} room.`);
+    }
     const props = await page.evaluate(() => (window.physicsSummary || {}).staticProps || 0);
     console.log(`Render preflight passed: page built, WebGL scene ready, ${props} collider(s), `
       + `frame captured (${shot.length.toLocaleString()} bytes).`);
@@ -1081,6 +1170,15 @@ async function main() {
     console.log(`Avatar sources: ${orderedProfiles.map(profile => `${profile.username}=${profile.model_source || (profile.thumbnail_ready ? 'official-thumbnail-fallback' : 'unknown')}`).join(', ')}.`);
     console.log(`Automatic avatar limb rigs: ${avatarRigging.rigged}/${avatarRigging.total} mesh(es) skinned to R15-style joints.`);
     console.log(`Native Roblox walk clips retargeted: ${avatarRigging.nativeAnimations}/${avatarRigging.total} avatar(s).`);
+    console.log(`Avatar rig mode: ${(avatarRigging.modes||[]).join(', ') || 'none'} (rigid parts cannot stretch).`);
+    const stretch=await page.evaluate(()=>window.rigStretchSummary);
+    console.log(`Avatar deformation under a hard pose: ${(stretch.maxStretch*100).toFixed(3)}%${stretch.worstPart?` (worst: ${stretch.worstPart})`:''}.`);
+    if(Number(stretch.maxStretch)>0.02){
+      throw new Error(`The avatar mesh deforms by ${(stretch.maxStretch*100).toFixed(1)}% in ${stretch.worstPart}: that is the exploding-character bug, so no MP4 is written.`);
+    }
+    const blocking=await page.evaluate(()=>window.blockingSummary);
+    const moved=(blocking||[]).map(entry=>`${entry.username} ${entry.travelled} studs over ${entry.marks} marks`).join(', ');
+    console.log(`Cast blocking: ${moved||'none'} - characters walk between camera cuts instead of standing still.`);
     if (args.face_animation !== 'off' && faces.faces !== avatarRigging.total) {
       throw new Error(`Face animation blocked: only ${faces.faces}/${avatarRigging.total} avatars received an animated face.`);
     }
