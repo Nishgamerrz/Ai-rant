@@ -17,3 +17,12 @@ venv/
 
 # OS
 .DS_Store
+
+# Next.js
+.next/
+next-env.d.ts
+out/
+web/.next/
+web/next-env.d.ts
+
+web/package-lock.json

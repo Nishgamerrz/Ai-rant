@@ -93,12 +93,13 @@ Available tools — return them as JSON exactly like this (inside ```json):
 ```
 
 Rules:
-- `tool_calls` may be empty if you just want to answer.
+- `tool_calls` may be empty if you just want to answer — BUT for this workflow the SUB-AGENT IS MANDATORY AT THE START.
+  In your FIRST JSON you MUST include at least one `subagent` call (topic code/models/map etc) for your hardest subtask. The helper is Gemini with a Groq fallback that tries the free best models openai/gpt-oss-120b → openai/gpt-oss-20b → qwen/qwen3-32b → llama-3.3-70b-versatile → llama-3.1-8b-instant, has the full file-rules guide, and returns provider, seconds, whether it edited a file, and FULL text. After it returns you MUST accept (include id in subagent_review and paste its result verbatim) or decline (leave out and build your own replacement) — never re-ask the same task twice and do not leave it empty.
 - `path` is always relative to the workspace root (dist/agent_workspace). Do not use absolute paths or .. .
 - `create_file` creates or overwrites; directories are made as needed.
 - `run_cmd` runs a shell command with 60 s timeout; output is returned. Only use it for real tasks, not to list files (use list_files).
 - `create_image` renders the prompt to a PNG file at `path`. Describe the image well; it is generated locally.
-- `subagent` delegates to the Gemini helper (or Groq fallback). Use it for hard coding, writing, verifying or naming tasks. topic can be code, map, cameras, faces, narration, animation, models, or generic. Keep instruction precise.
+- `subagent` delegates to the Gemini helper (or Groq fallback). Use it for hard coding, writing, verifying or naming tasks. topic can be code, map, cameras, faces, narration, animation, models, or generic. Keep instruction precise — the helper knows shapes, materials, lights, 520 effects, grid/cast-lane/camera rules.
 - `search_web` is free and requires no key; it appends facts the workflow sends back next round.
 - After your tools run you will be asked again with their results. Keep going until the task is fully done, then return with no further tool_calls and a final answer.
 - Think briefly — this runs on a CPU runner — and never repeat the same tool call twice.

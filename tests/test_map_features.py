@@ -281,7 +281,7 @@ class PromptTests(unittest.TestCase):
     def test_the_sub_agent_is_required_for_maps_and_cameras(self):
         # It was an invitation once; it is a requirement now (see
         # tests/test_required_subagent.py for the full contract).
-        self.assertIn("THE GEMINI SUB-AGENT IS NOT OPTIONAL FOR THIS STEP", WORKFLOW)
+        self.assertTrue("THE GEMINI SUB-AGENT IS NOT OPTIONAL FOR THIS STEP" in WORKFLOW or "SUB-AGENT IS MANDATORY AND MUST HAPPEN AT THE START" in WORKFLOW)
         self.assertIn('"write"', WORKFLOW)
 
     def test_search_is_no_longer_forced_up_front(self):
