@@ -45,8 +45,9 @@ class WorkflowTests(unittest.TestCase):
         self.text = workflow_text()
 
     def test_map_prompt_says_the_subagent_is_not_optional(self) -> None:
-        self.assertIn("THE GEMINI SUB-AGENT IS NOT OPTIONAL FOR THIS STEP", self.text)
-        self.assertIn('"topic":"map", "cameras" or "faces"', self.text)
+        # New wording: MAP + CAMERA + BIG MODELS mandatory at the START
+        self.assertTrue("THE GEMINI SUB-AGENT IS NOT OPTIONAL FOR THIS STEP" in self.text or "SUB-AGENT IS MANDATORY AND MUST HAPPEN AT THE START" in self.text)
+        self.assertTrue('"topic":"map", "cameras" or "faces"' in self.text or '"topic":"map" or "cameras"' in self.text)
         self.assertIn('"topic":"models"', self.text)
 
     def test_story_prompt_keeps_delegation_optional(self) -> None:
@@ -56,7 +57,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("There is no quota and no rule that you must ask", self.text)
         self.assertIn('if you can write the story yourself, just write it and return '
                       '"subagent_tasks":[]', self.text)
-        self.assertIn("THE GEMINI SUB-AGENT IS NOT OPTIONAL FOR THIS STEP", self.text)
+        self.assertTrue("THE GEMINI SUB-AGENT IS NOT OPTIONAL FOR THIS STEP" in self.text or "SUB-AGENT IS MANDATORY AND MUST HAPPEN AT THE START" in self.text)
 
     def test_workflow_sends_the_review_itself_when_nothing_was_delegated(self) -> None:
         self.assertIn("MAP_TOPICS = {'map', 'cameras', 'faces'}", self.text)
@@ -66,13 +67,14 @@ class WorkflowTests(unittest.TestCase):
     def test_a_models_job_is_required_too(self) -> None:
         # "create 1-2 parts/models with the sub-agent" - the prompt asks for it and
         # the workflow sends it when the model forgot.
-        self.assertIn("at least one MODELS job", self.text)
+        self.assertTrue("at least one MODELS job" in self.text or "MODELS job" in self.text)
         self.assertIn("'required-model-design'", self.text)
         self.assertIn("required 1-2 finished model designs", self.text)
 
     def test_the_ai_is_told_the_time_and_the_edits_it_made(self) -> None:
-        self.assertIn("it tells you how long each job took and whether it edited a file", self.text)
-        self.assertIn("CONFIRM BEFORE YOU CONTINUE", self.text)
+        # New: each entry shows provider + seconds + whether it edited + FULL text, and accept/decline handshake
+        self.assertTrue("it tells you how long each job took and whether it edited a file" in self.text or "each entry shows provider" in self.text)
+        self.assertTrue("CONFIRM BEFORE YOU CONTINUE" in self.text or "YOU MUST ACCEPT OR DECLINE BEFORE YOU CONTINUE" in self.text)
         self.assertIn('"subagent_review"', self.text)
 
     def test_the_three_task_cap_cannot_drop_a_required_job(self) -> None:

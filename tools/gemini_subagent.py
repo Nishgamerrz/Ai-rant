@@ -325,11 +325,16 @@ def call_gemini(prompt: str, *, api_key: str, model: str = DEFAULT_MODEL,
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_KEY_ENV = "GROQ_API_KEY"
 GROQ_MODEL_VAR = "GROQ_MODEL"
-DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
-# Free Groq models, best first. If one has been retired the next is tried, so a
-# single deprecation can never leave the run without a helper.
-GROQ_MODEL_CHOICES = ("llama-3.3-70b-versatile", "llama-3.1-8b-instant",
-                      "openai/gpt-oss-20b", "qwen/qwen3-32b")
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
+# Free Groq models from the playground — best first. These are the cloud models
+# the user highlighted (Reasoning: GPT OSS 120B / 20B, Qwen 3 32B; Tool Use / Text:
+# same family) plus the trusted lama fallbacks. If one is retired/saturated the
+# next is tried, so a single deprecation/429 never leaves the run without a
+# helper. The sub-agent always tries Groq BEFORE Gemini when Gemini is in
+# back-off, and every model gets the same file-rules guide.
+GROQ_MODEL_CHOICES = ("openai/gpt-oss-120b", "openai/gpt-oss-20b",
+                      "qwen/qwen3-32b", "llama-3.3-70b-versatile",
+                      "llama-3.1-8b-instant")
 
 
 class GroqUnavailable(GeminiUnavailable):
