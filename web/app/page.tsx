@@ -16,16 +16,29 @@ export default function Home() {
   const [preview, setPreview] = useState<{ path: string; content: string } | null>(null);
   const [steps, setSteps] = useState<any[]>([]);
   const [runStatus, setRunStatus] = useState("idle");
+  const [liveLog, setLiveLog] = useState<string>("");
 
   async function pollLogs() {
     if (!selectedRun) return;
     try {
-      const j = await fetch(`/api/github/logs?run=${selectedRun}`, { cache: "no-store" }).then((r) => r.json());
+      const j = await fetch(`/api/github/logs?run=${selectedRun}&logs=1`, { cache: "no-store" }).then((r) => r.json());
       if (j.steps) setSteps(j.steps);
-      if (j.run) setRunStatus(j.run.status + (j.run.conclusion ? " · " + j.run.conclusion : ""));
-      const t = await fetch(`/api/agent/tunnel?run=${selectedRun}`, { cache: "no-store" }).then((r) => r.json()).catch(() => null);
-      if (t?.tunnel_url) setTunnelUrl(t.tunnel_url);
-      else setTunnelUrl(null);
+      if (j.run) {
+        const st = j.run.status + (j.run.conclusion ? " · " + j.run.conclusion : "");
+        setRunStatus(st);
+        // auto-switch to logs for brand-new in_progress runs where files are empty
+        if (j.run.status === "in_progress" || j.run.status === "queued") {
+          // keep user choice but default new runs to logs
+          setRightTab((prev) => prev);
+        }
+      }
+      if (j.logTail) setLiveLog(j.logTail);
+      if (j.tunnel_url) setTunnelUrl(j.tunnel_url);
+      else {
+        const t = await fetch(`/api/agent/tunnel?run=${selectedRun}`, { cache: "no-store" }).then((r) => r.json()).catch(() => null);
+        if (t?.tunnel_url) setTunnelUrl(t.tunnel_url);
+        else if (!j.tunnel_url) setTunnelUrl(null);
+      }
     } catch {}
   }
 
@@ -34,8 +47,11 @@ export default function Home() {
       setSteps([]);
       setRunStatus("idle");
       setTunnelUrl(null);
+      setLiveLog("");
       return;
     }
+    // new run -> show live execution by default (user can switch to files/subagent after)
+    setRightTab("logs");
     pollLogs();
     const id = setInterval(pollLogs, 3500);
     return () => clearInterval(id);
@@ -80,11 +96,11 @@ export default function Home() {
           {/* Right panel — desktop */}
           <div className="hidden lg:flex w-[380px] shrink-0 border-l border-zinc-800/80 bg-zinc-900/20 flex-col">
             <div className="flex-1 overflow-auto p-3 space-y-3">
-              {rightTab === "files" && <FileExplorer runId={selectedRun} onOpenFile={(path, content) => setPreview({ path, content })} />}
-              {rightTab === "logs" && <LogViewer steps={steps} runStatus={runStatus} />}
-              {rightTab === "subagent" && <SubagentTimeline runId={selectedRun} kind="agent" />}
-              {rightTab === "files" && selectedRun && <div className="pt-3 border-t border-zinc-800/60"><SubagentTimeline runId={selectedRun} kind="agent" /></div>}
-              {rightTab === "logs" && selectedRun && <div className="pt-3 border-t border-zinc-800/60"><FileExplorer runId={selectedRun} onOpenFile={(path, content) => setPreview({ path, content })} /></div>}
+              {rightTab === "files" && <FileExplorer runId={selectedRun} tunnelUrl={tunnelUrl} onOpenFile={(path, content) => setPreview({ path, content })} />}
+              {rightTab === "logs" && <LogViewer steps={steps} runStatus={runStatus} logTail={liveLog} />}
+              {rightTab === "subagent" && <SubagentTimeline runId={selectedRun} kind="agent" liveLog={liveLog || undefined} />}
+              {rightTab === "files" && selectedRun && <div className="pt-3 border-t border-zinc-800/60"><SubagentTimeline runId={selectedRun} kind="agent" liveLog={liveLog || undefined} /></div>}
+              {rightTab === "logs" && selectedRun && <div className="pt-3 border-t border-zinc-800/60"><FileExplorer runId={selectedRun} tunnelUrl={tunnelUrl} onOpenFile={(path, content) => setPreview({ path, content })} /></div>}
             </div>
           </div>
         </div>
@@ -96,9 +112,9 @@ export default function Home() {
             <button onClick={() => setRightTab("logs")} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${rightTab === "logs" ? "bg-white text-zinc-900" : "text-zinc-500"}`}>Logs</button>
             <button onClick={() => setRightTab("subagent")} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${rightTab === "subagent" ? "bg-white text-zinc-900" : "text-zinc-500"}`}>Subagent</button>
           </div>
-          {rightTab === "files" && <FileExplorer runId={selectedRun} onOpenFile={(p, c) => setPreview({ path: p, content: c })} />}
-          {rightTab === "logs" && <LogViewer steps={steps} runStatus={runStatus} />}
-          {rightTab === "subagent" && <SubagentTimeline runId={selectedRun} kind="agent" />}
+          {rightTab === "files" && <FileExplorer runId={selectedRun} tunnelUrl={tunnelUrl} onOpenFile={(p, c) => setPreview({ path: p, content: c })} />}
+          {rightTab === "logs" && <LogViewer steps={steps} runStatus={runStatus} logTail={liveLog} />}
+          {rightTab === "subagent" && <SubagentTimeline runId={selectedRun} kind="agent" liveLog={liveLog || undefined} />}
         </div>
 
         {/* Preview modal */}

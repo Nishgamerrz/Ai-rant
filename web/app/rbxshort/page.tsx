@@ -41,6 +41,7 @@ export default function RbxShortPage() {
   const [intelligence, setIntelligence] = useState<{ plan?: string; narration?: string; thinking?: string; loading: boolean }>({ loading: false });
   const [deleting, setDeleting] = useState<number | null>(null);
   const [preview, setPreview] = useState<{ path: string; content: string } | null>(null);
+  const [liveLog, setLiveLog] = useState<string>("");
 
   // Handle ?run= param
   useEffect(() => {
@@ -64,9 +65,10 @@ export default function RbxShortPage() {
   async function poll() {
     if (!selected) return;
     try {
-      const j = await fetch(`/api/github/logs?run=${selected}`, { cache: "no-store" }).then((r) => r.json());
+      const j = await fetch(`/api/github/logs?run=${selected}&logs=1`, { cache: "no-store" }).then((r) => r.json());
       if (j.steps) setSteps(j.steps);
       if (j.run) setStatus(`${j.run.status}${j.run.conclusion ? " · " + j.run.conclusion : ""}`);
+      if (j.logTail) setLiveLog(j.logTail);
       if (j.artifacts) setArtifacts(j.artifacts);
     } catch {}
   }
@@ -75,8 +77,10 @@ export default function RbxShortPage() {
       setSteps([]);
       setStatus("idle");
       setArtifacts([]);
+      setLiveLog("");
       return;
     }
+    setTab("execution");
     poll();
     const id = setInterval(poll, 3500);
     return () => clearInterval(id);
@@ -342,7 +346,7 @@ export default function RbxShortPage() {
                     )}
                   </div>
                 )}
-                {tab === "execution" && <LogViewer steps={steps} runStatus={status} />}
+                {tab === "execution" && <LogViewer steps={steps} runStatus={status} logTail={liveLog} />}
                 {tab === "intelligence" && (
                   <div className="space-y-3">
                     {intelligence.loading ? (
@@ -371,7 +375,7 @@ export default function RbxShortPage() {
                         )}
                       </>
                     )}
-                    <SubagentTimeline runId={selected} kind="rbx" />
+                    <SubagentTimeline runId={selected} kind="rbx" liveLog={liveLog || undefined} />
                   </div>
                 )}
                 {tab === "files" && (

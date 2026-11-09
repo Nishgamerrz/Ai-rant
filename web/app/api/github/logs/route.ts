@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 // Logs + artifacts proxy — keeps GITHUB_TOKEN server-side.
-// The UI polls this while a workflow is running so colours, "plan next/previous"
+// The UI polls this while a workflow is running so colours, plan next/previous
 // badges and the AI's thinking appear live.
+// Now also supports ?logs=1 to return live job log tail (via jobs/:id/logs redirect to blob)
+// and extracts Cloudflare tunnel URL from logs for live chat.
 
 const REPO = "Nishgamerrz/Ai-rant";
 
@@ -11,11 +13,35 @@ function token() {
   return t;
 }
 
+async function fetchJobLogTail(jobId: number, tok: string, maxChars = 48000): Promise<string | null> {
+  try {
+    const headers = { Authorization: `Bearer ${tok}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" } as Record<string, string>;
+    // This endpoint 302s to an Azure blob (productionresultssa.../job-logs.txt). fetch follows redirect.
+    const res = await fetch(`https://api.github.com/repos/${REPO}/actions/jobs/${jobId}/logs`, {
+      headers,
+      cache: "no-store",
+      // follow redirects (default) - Vercel can fetch azure blob, sandbox cannot but we handle gracefully
+    });
+    if (!res.ok) {
+      // 404 until job has logs, or 302 that failed to follow due to network
+      return null;
+    }
+    const text = await res.text();
+    if (!text) return null;
+    // Keep tail only - full logs can be 500KB+
+    if (text.length <= maxChars) return text;
+    return text.slice(-maxChars);
+  } catch {
+    return null;
+  }
+}
+
 export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
     const runId = url.searchParams.get("run") || url.searchParams.get("run_id") || "";
     if (!runId) return NextResponse.json({ error: "run id required" }, { status: 400 });
+    const wantLogs = url.searchParams.get("logs") === "1" || url.searchParams.get("include_logs") === "1";
     const tok = token();
     const headers = { Authorization: `Bearer ${tok}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" } as Record<string, string>;
 
@@ -46,9 +72,34 @@ export async function GET(req: NextRequest) {
     const artRes = await fetch(`https://api.github.com/repos/${REPO}/actions/runs/${runId}/artifacts`, { headers, cache: "no-store" });
     const artifacts = artRes.ok ? await artRes.json() : { artifacts: [] };
 
-    // 3) try to fetch a tiny log snippet via the check runs (no raw log zip needed)
-    // Raw logs need a zip download which is heavy to proxy on every poll; we use jobs/steps + artifacts.
-    // If the UI needs full logs, it can fetch via /api/github/run/[id]/logs.zip separately.
+    // 3) optional live log tail (heavy - only when ?logs=1)
+    let logTail: string | null = null;
+    let logTunnelUrl: string | null = null;
+    if (wantLogs && jobs.jobs?.length) {
+      // Prefer the in_progress or most recent job
+      const targetJobs = (jobs.jobs as any[])
+        .slice()
+        .sort((a, b) => {
+          const rank = (s: string) => (s === "in_progress" ? 0 : s === "queued" ? 1 : 2);
+          return rank(a.status) - rank(b.status);
+        })
+        .slice(0, 2); // fetch up to 2 jobs (usually 1)
+      for (const j of targetJobs) {
+        const tail = await fetchJobLogTail(j.id, tok);
+        if (tail) {
+          logTail = tail;
+          // Try to extract tunnel URL from log
+          const m = tail.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com\/?[^\s"'<>]*/);
+          if (m) logTunnelUrl = m[0].replace(/\/$/, "");
+          break;
+        }
+      }
+    }
+
+    // 4) also try to extract tunnel_url from artifacts if log didn't have it (fallback to existing /api/agent/tunnel logic)
+    // We don't fetch zip here to keep this endpoint light; tunnel endpoint can do that separately.
+    // But if we have logTail we already have tunnel_url.
+
     return NextResponse.json({
       run: {
         id: run.id,
@@ -67,9 +118,9 @@ export async function GET(req: NextRequest) {
         expired: a.expired,
         archive_download_url: a.archive_download_url,
       })),
-      // For the chat UI: if the agent already uploaded agent_chat.json, the UI can fetch it via artifact download
-      // (proxied through /api/github/artifact/[id]).
-      hint: "Poll this endpoint every 4s while status is not completed. Fetch artifact zip via /api/github/artifact?id=...",
+      logTail: logTail || undefined,
+      tunnel_url: logTunnelUrl || undefined,
+      hint: "Poll this endpoint every 4s while status is not completed. Fetch artifact zip via /api/github/artifact?id=...; add ?logs=1 for live job log tail and tunnel_url.",
     });
   } catch (e: any) {
     return NextResponse.json({ error: String(e?.message || e) }, { status: 502 });

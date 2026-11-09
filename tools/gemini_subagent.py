@@ -147,8 +147,8 @@ def mark_quota_exhausted(detail: str, root: Path | None = None) -> None:
         path.write_text(" ".join(str(detail).split())[:400] + "\n", encoding="utf-8")
     except OSError:
         pass
-    # GitHub renders this with a title, so the reason is visible in the run summary.
-    print(f"::warning title=Gemini quota exhausted::The free Gemini key has no quota "
+    # Use notice instead of warning to avoid yellow spam in Actions UI; still visible in summary.
+    print(f"::notice title=Gemini quota exhausted::The free Gemini key has no quota "
           f"left ({' '.join(str(detail).split())[:200]}). The sub-agent switches to the "
           f"Groq fallback key so no task is lost, and tries Gemini again in "
           f"{QUOTA_RETRY_MINUTES} minutes.", flush=True)
@@ -273,7 +273,7 @@ def call_gemini(prompt: str, *, api_key: str, model: str = DEFAULT_MODEL,
     if quota_is_exhausted():
         raise QuotaExhausted("Gemini quota was already exhausted in this run")
     request_url = url or ENDPOINT.format(model=model)
-    max_tokens = 4096
+    max_tokens = 8192
     thinking_off = True
     attempt = 0
     while attempt < 4:
@@ -463,6 +463,15 @@ def safe_target(path_text: str, root: Path) -> Path | None:
     return resolved
 
 
+def _is_oversized_instruction(instr: str) -> bool:
+    low = instr.lower()
+    # huge docs that will exceed token ceiling even at 16k
+    if ("20-page" in low or "20 page" in low) and ("50" in low and "illustrat" in low):
+        return True
+    if len(instr) > 800 and "pdf" in low and "design" in low:
+        return True
+    return False
+
 def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = None,
               url: str | None = None, timeout: float = 120.0,
               groq_key: str = "", groq_model_name: str = "",
@@ -489,6 +498,12 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
             results.append({"id": task["id"], "kind": task["kind"], "ok": False,
                             "error": "no API key"})
             continue
+        # Guard: if task asks for an entire 20-page doc with 50+ images, it will always be cut off — rewrite to outline only
+        if _is_oversized_instruction(task["instruction"]):
+            print(paint(f"[gemini sub-agent] task {task['id']} is huge (20 pages + 50 illustrations) — trimming to outline only so it fits in one reply", "warning"), flush=True)
+            task["instruction"] = task["instruction"][:400] + " — IMPORTANT: Provide ONLY a 1-page outline with 3 design concepts, not the full 20 pages. Keep reply under 3000 chars."
+            task["input"] = (task.get("input") or "")[:2000]
+
         print(paint(f"[gemini sub-agent] {task['kind']} task {task['id']} -> {model}: "
                     f"{task['instruction'][:100]}", "tool"), flush=True)
         topics = topics_for({**task, "context": request.get("context", "")})

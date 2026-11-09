@@ -1,7 +1,8 @@
 "use client";
 
-export function LogViewer({ steps, runStatus }: { steps: any[]; runStatus: string }) {
-  if (!steps?.length) {
+export function LogViewer({ steps, runStatus, logTail }: { steps: any[]; runStatus: string; logTail?: string }) {
+  const tail = (logTail || "").slice(-9000);
+  if (!steps?.length && !tail) {
     return (
       <div className="rounded-2xl bg-zinc-900/50 border border-zinc-800 p-6 text-center">
         <div className="h-8 w-8 rounded-xl bg-zinc-800 grid place-items-center mx-auto">
@@ -9,6 +10,20 @@ export function LogViewer({ steps, runStatus }: { steps: any[]; runStatus: strin
         </div>
         <div className="text-sm font-medium text-zinc-300 mt-3">Waiting for workflow</div>
         <div className="text-xs text-zinc-600 mt-1">Steps will appear as the runner starts</div>
+      </div>
+    );
+  }
+  if (!steps?.length && tail) {
+    return (
+      <div className="space-y-3">
+        <div className="rounded-2xl bg-zinc-900 border border-zinc-800 overflow-hidden">
+          <div className="h-9 px-3.5 flex items-center gap-2 border-b border-zinc-800">
+            <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
+            <span className="text-xs font-semibold tracking-wide text-zinc-200">Live log</span>
+            <span className="ml-auto text-[11px] text-zinc-600">{(logTail!.length/1024).toFixed(1)} KB</span>
+          </div>
+          <RawLogBlock text={tail} />
+        </div>
       </div>
     );
   }
@@ -24,6 +39,17 @@ export function LogViewer({ steps, runStatus }: { steps: any[]; runStatus: strin
           {runStatus || "pending"}
         </span>
       </div>
+      {tail && (
+        <div className="border-b border-zinc-800 bg-zinc-950/50">
+          <div className="h-7 px-3 flex items-center gap-2 text-[11px] font-medium text-zinc-500">
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" /> Live runner log tail — {(tail.length/1024).toFixed(1)} KB
+            <span className="ml-auto text-zinc-600">thinking streams here before artifact</span>
+          </div>
+          <div className="max-h-[260px] overflow-auto">
+            <RawLogBlock text={tail.slice(-6000)} />
+          </div>
+        </div>
+      )}
       <div className="divide-y divide-zinc-800/60 max-h-[320px] overflow-auto">
         {steps.map((s: any, i: number) => {
           const isSuccess = s.conclusion === "success";

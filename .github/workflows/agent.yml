@@ -66,6 +66,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          clean: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -237,3 +239,29 @@ jobs:
           path: dist/agent_workspace
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Keep runner alive for live tunnel / real-time files (idle, no checkout post failure)
+        if: always() && inputs.enable_tunnel == 'true'
+        run: |
+          echo "⏳ Agent finished — keeping runner alive for live file/chat via tunnel (up to 25m, heartbeat every 10s)."
+          if [ -f dist/tunnel_url.txt ]; then echo "Live URL: $(cat dist/tunnel_url.txt)"; echo "Files: /__nish/files  File: /__nish/file?path=...  Chat: /__nish/chat  Tools: /__nish/tools"; else echo "No tunnel file (tunnel not enabled or failed) — still idling so UI can poll final artifacts"; fi
+          ls -R dist/agent_workspace 2>&1 | head -n 120
+          echo "--- last tool lines ---"
+          tail -n 20 dist/agent_tools.jsonl 2>&1 | head -n 20
+          # idle loop - keep runner alive so Vercel can stream live files/chat via tunnel without workflow ending
+          for i in $(seq 1 150); do
+            echo "[keepalive $i/150] $(date -u +%H:%M:%S) — $(find dist/agent_workspace -type f 2>/dev/null | wc -l) files — $(du -sh dist/agent_workspace 2>/dev/null | cut -f1) — live at $(cat dist/tunnel_url.txt 2>/dev/null || echo none)"
+            # refresh preview json for UI polling (optional)
+            cp -f dist/agent_chat.json dist/preview/agent_chat.json 2>/dev/null || true
+            cp -f dist/agent_tools.jsonl dist/preview/agent_tools.jsonl 2>/dev/null || true
+            sleep 10
+          done
+          echo "idle finished — workflow will now complete (post-checkout will run normally, workspace preserved)"
+
+      - name: Publish final live snapshot (chat + tools) after idle
+        if: always()
+        run: |
+          mkdir -p dist/preview
+          cp -f dist/agent_chat.json dist/preview/agent_chat.json 2>/dev/null || echo "[]" > dist/preview/agent_chat.json
+          cp -f dist/agent_tools.jsonl dist/preview/agent_tools.jsonl 2>/dev/null || true
+          cat dist/agent_chat.json 2>&1 | head -n 20
