@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ModelSelector } from "@/components/ModelSelector";
 import { LogViewer } from "@/components/LogViewer";
+import { FileExplorer } from "@/components/FileExplorer";
+import { SubagentTimeline } from "@/components/SubagentTimeline";
 
 type Run = { id: number; display_title: string; status: string; conclusion: string | null; created_at: string; html_url: string };
 
@@ -38,6 +40,7 @@ export default function RbxShortPage() {
   const [tab, setTab] = useState<"overview" | "execution" | "intelligence" | "files">("overview");
   const [intelligence, setIntelligence] = useState<{ plan?: string; narration?: string; thinking?: string; loading: boolean }>({ loading: false });
   const [deleting, setDeleting] = useState<number | null>(null);
+  const [preview, setPreview] = useState<{ path: string; content: string } | null>(null);
 
   // Handle ?run= param
   useEffect(() => {
@@ -126,8 +129,14 @@ export default function RbxShortPage() {
         }),
       });
       const j = await res.json();
-      if (!res.ok) throw new Error(j.error);
-      setMsg({ text: "Workflow dispatched. Tracking new run…", ok: true });
+      if (!res.ok) {
+        // 409 = workflow already running / dispatch throttled — still poll for the run
+        if (res.status === 409 || String(j.error||"").includes("409") || String(j.error||"").toLowerCase().includes("already")) {
+          setMsg({ text: "Dispatch accepted (workflow already queued) — tracking latest run…", ok: true });
+        } else throw new Error(j.error);
+      } else {
+        setMsg({ text: "Workflow dispatched. Tracking new run…", ok: true });
+      }
       // Poll for new run and select it
       for (let i = 0; i < 10; i++) {
         await new Promise((r) => setTimeout(r, 1400));
@@ -245,7 +254,7 @@ export default function RbxShortPage() {
           </div>
         </div>
 
-        {/* Right: Runs + Detail */}
+        {/* Right: Runs + Detail — also supports polling subagent */}
         <div className="min-w-0 space-y-4">
           {/* Runs list */}
           <div className="rounded-2xl bg-zinc-900 border border-zinc-800 shadow-soft overflow-hidden">
@@ -362,22 +371,11 @@ export default function RbxShortPage() {
                         )}
                       </>
                     )}
+                    <SubagentTimeline runId={selected} kind="rbx" />
                   </div>
                 )}
                 {tab === "files" && (
-                  <div className="space-y-2">
-                    {artifacts.length === 0 && <div className="text-sm text-zinc-600 text-center py-8">No files yet — they appear after the workflow publishes artifacts.</div>}
-                    {artifacts.map((a) => (
-                      <div key={a.id} className="flex items-center gap-3 rounded-xl bg-zinc-950 border border-zinc-800 p-3">
-                        <div className="h-8 w-8 rounded-lg bg-zinc-800 grid place-items-center shrink-0"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M4 3H10M4 7H8" stroke="#a1a1aa" strokeWidth="1.3" strokeLinecap="round"/></svg></div>
-                        <div className="min-w-0 flex-1">
-                          <div className="text-sm font-medium truncate text-zinc-200">{a.name}</div>
-                          <div className="text-xs text-zinc-600">{a.expired ? "expired" : `${(a.size_in_bytes/1024).toFixed(1)} KB`}</div>
-                        </div>
-                        <a href={`/api/github/artifact?id=${a.id}`} target="_blank" className="h-8 px-3 rounded-xl bg-white text-zinc-900 text-xs font-semibold hover:bg-zinc-100 transition-colors flex items-center">Download</a>
-                      </div>
-                    ))}
-                  </div>
+                  <FileExplorer runId={selected} onOpenFile={(path, content) => setPreview({ path, content })} />
                 )}
               </div>
             </div>
@@ -392,6 +390,21 @@ export default function RbxShortPage() {
           )}
         </div>
       </div>
+
+      {preview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-md" onClick={() => setPreview(null)} />
+          <div className="relative w-full max-w-4xl max-h-[88vh] rounded-2xl bg-zinc-900 border border-zinc-800 shadow-large flex flex-col animate-slideIn">
+            <div className="shrink-0 h-11 px-4 flex items-center gap-3 border-b border-zinc-800">
+              <span className="text-xs font-semibold tracking-wide text-zinc-300 truncate">{preview.path}</span>
+              <button onClick={() => setPreview(null)} className="ml-auto h-7 w-7 grid place-items-center rounded-full bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-400">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M3 3L9 9M9 3L3 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>
+              </button>
+            </div>
+            <pre className="flex-1 overflow-auto p-4 text-xs font-mono leading-relaxed whitespace-pre-wrap break-words text-zinc-300">{preview.content.slice(0, 80000)}</pre>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
