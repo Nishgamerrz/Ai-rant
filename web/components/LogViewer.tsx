@@ -1,8 +1,15 @@
 "use client";
 
 export function LogViewer({ steps, runStatus, logTail }: { steps: any[]; runStatus: string; logTail?: string }) {
+  // Filter out noisy post steps like "Post Checkout repository", "Post Restore ..." so last plan isn't checkout
+  const filteredSteps = (steps || []).filter((s: any) => {
+    const n = String(s.name || "");
+    if (n.startsWith("Post ")) return false;
+    if (n === "Complete job") return false;
+    return true;
+  });
   const tail = (logTail || "").slice(-9000);
-  if (!steps?.length && !tail) {
+  if (!filteredSteps?.length && !tail) {
     return (
       <div className="rounded-2xl bg-zinc-900/50 border border-zinc-800 p-6 text-center">
         <div className="h-8 w-8 rounded-xl bg-zinc-800 grid place-items-center mx-auto">
@@ -13,7 +20,7 @@ export function LogViewer({ steps, runStatus, logTail }: { steps: any[]; runStat
       </div>
     );
   }
-  if (!steps?.length && tail) {
+  if (!filteredSteps?.length && tail) {
     return (
       <div className="space-y-3">
         <div className="rounded-2xl bg-zinc-900 border border-zinc-800 overflow-hidden">
@@ -51,7 +58,7 @@ export function LogViewer({ steps, runStatus, logTail }: { steps: any[]; runStat
         </div>
       )}
       <div className="divide-y divide-zinc-800/60 max-h-[320px] overflow-auto">
-        {steps.map((s: any, i: number) => {
+        {filteredSteps.map((s: any, i: number) => {
           const isSuccess = s.conclusion === "success";
           const isFailed = s.conclusion === "failure";
           const isRunning = s.status === "in_progress" || s.status === "queued";

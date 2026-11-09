@@ -3,14 +3,12 @@ import { useEffect, useState } from "react";
 
 type Entry = { name: string; path: string; size?: number; kind: "file" | "dir" };
 
-export function FileExplorer({ runId, onOpenFile, tunnelUrl }: { runId: number | null; onOpenFile: (path: string, content: string) => void; tunnelUrl?: string | null }) {
+export function FileExplorer({ runId, onOpenFile }: { runId: number | null; onOpenFile: (path: string, content: string) => void }) {
   const [artifacts, setArtifacts] = useState<any[]>([]);
   const [files, setFiles] = useState<Entry[] | null>(null);
-  const [liveFiles, setLiveFiles] = useState<Entry[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [activeArtifact, setActiveArtifact] = useState<string | null>(null);
-  const [liveMode, setLiveMode] = useState(false);
 
   async function loadArtifacts() {
     if (!runId) return;
@@ -27,6 +25,9 @@ export function FileExplorer({ runId, onOpenFile, tunnelUrl }: { runId: number |
           setActiveArtifact(String(ws.id));
           loadFiles(String(ws.id));
         }
+      } else if (arts.length && activeArtifact) {
+        // refresh current
+        loadFiles(activeArtifact);
       }
     } catch (e: any) {
       setErr(String(e.message || e));
@@ -54,17 +55,16 @@ export function FileExplorer({ runId, onOpenFile, tunnelUrl }: { runId: number |
         entries.push({ name, path: k, kind: "file", size: (f as any)._data?.uncompressedSize || 0 });
       });
       const priority = (n: string) => {
-        if (n.includes("Map") || n.includes("map")) return 0;
-        if (n.includes("chat")) return 1;
-        if (n.includes("tools")) return 2;
-        if (n.endsWith(".json")) return 3;
-        if (n.endsWith(".txt")) return 4;
-        if (n.endsWith(".png") || n.endsWith(".jpg")) return 5;
-        return 6;
+        if (/map|cam|world/i.test(n)) return 0;
+        if (n.includes("chat") || n.includes("tools")) return 1;
+        if (n.endsWith(".json")) return 2;
+        if (n.endsWith(".py") || n.endsWith(".js") || n.endsWith(".html")) return 3;
+        if (/\.png|\.jpg|\.jpeg|\.mp4/.test(n)) return 4;
+        return 5;
       };
       entries.sort((a, b) => priority(a.name) - priority(b.name) || a.name.localeCompare(b.name));
       setFiles(entries.slice(0, 80));
-      if (entries.length === 0) setErr("Artifact is empty or still uploading.");
+      if (entries.length === 0) setErr("Artifact empty or still uploading — the persistent plan is still writing files. Polling every 5s via direct API.");
     } catch (e: any) {
       setErr(String(e.message || e));
       setFiles([]);
@@ -73,61 +73,19 @@ export function FileExplorer({ runId, onOpenFile, tunnelUrl }: { runId: number |
     }
   }
 
-  async function loadLive() {
-    if (!runId) return;
-    // try live via tunnel if available, else via logs tail inference
-    const liveUrl = tunnelUrl ? `/api/agent/files?run=${runId}&path=.&tunnel=${encodeURIComponent(tunnelUrl)}` : null;
-    if (liveUrl) {
-      try {
-        const r = await fetch(liveUrl, { cache: "no-store" });
-        const j = await r.json().catch(() => null);
-        if (j && j.ok && Array.isArray(j.files)) {
-          const entries: Entry[] = (j.files as string[]).filter((f: string) => !f.startsWith("dir/") && !f.includes("__MACOSX")).map((f: string) => ({
-            name: f.split("/").pop() || f,
-            path: f,
-            kind: "file" as const,
-          }));
-          // priority sort
-          const priority = (n: string) => {
-            if (/map|cam|world/i.test(n)) return 0;
-            if (/chat|tools/i.test(n)) return 1;
-            if (n.endsWith(".json")) return 2;
-            if (n.endsWith(".py") || n.endsWith(".js") || n.endsWith(".html")) return 3;
-            if (/\.(png|jpg|jpeg|mp4)$/i.test(n)) return 4;
-            return 5;
-          };
-          entries.sort((a, b) => priority(a.name) - priority(b.name) || a.name.localeCompare(b.name));
-          setLiveFiles(entries.slice(0, 80));
-          setLiveMode(true);
-          setErr("");
-          return;
-        }
-      } catch {}
-    }
-    // fallback: infer files from live log tail? we already have live log via parent but not here
-    // try artifact fallback already loaded
-    setLiveMode(false);
-  }
-
   useEffect(() => {
     setArtifacts([]);
     setFiles(null);
-    setLiveFiles(null);
     setActiveArtifact(null);
-    setLiveMode(false);
-    if (runId) {
-      loadArtifacts();
-      loadLive();
-    }
+    if (runId) loadArtifacts();
   }, [runId]);
 
-  // poll live files when tunnelUrl present
+  // poll artifact every 8s while run is in_progress (direct API, no tunnel)
   useEffect(() => {
-    if (!runId || !tunnelUrl) return;
-    loadLive();
-    const id = setInterval(loadLive, 3500);
+    if (!runId) return;
+    const id = setInterval(loadArtifacts, 8000);
     return () => clearInterval(id);
-  }, [runId, tunnelUrl]);
+  }, [runId, activeArtifact]);
 
   if (!runId) {
     return (
@@ -136,13 +94,10 @@ export function FileExplorer({ runId, onOpenFile, tunnelUrl }: { runId: number |
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M4 3.5H10L14 7.5V14.5H4V3.5Z" stroke="#71717a" strokeWidth="1.3" strokeLinejoin="round"/><path d="M10 3.5V7.5H14" stroke="#71717a" strokeWidth="1.3" strokeLinejoin="round"/></svg>
         </div>
         <div className="text-sm font-medium text-zinc-300 mt-3">No run selected</div>
-        <div className="text-xs text-zinc-600 mt-1 leading-relaxed">Select a workflow to browse<br/>maps, cams, and generated files.</div>
+        <div className="text-xs text-zinc-600 mt-1 leading-relaxed">Select a workflow to browse<br/>files via direct GitHub API.</div>
       </div>
     );
   }
-
-  const displayLive = liveMode && liveFiles && liveFiles.length > 0;
-  const displayFiles = displayLive ? liveFiles : files;
 
   return (
     <div className="rounded-2xl bg-zinc-900 border border-zinc-800 overflow-hidden shadow-soft">
@@ -151,23 +106,20 @@ export function FileExplorer({ runId, onOpenFile, tunnelUrl }: { runId: number |
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2.5 2H6L9.5 5V10H2.5V2Z" stroke="#a1a1aa" strokeWidth="1.2" strokeLinejoin="round"/><path d="M6 2V5H9.5" stroke="#27272a" strokeWidth="1.2"/></svg>
         </div>
         <span className="text-xs font-semibold tracking-wide text-zinc-200">Files</span>
-        {liveMode && <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-emerald-950/40 border border-emerald-900/50 text-emerald-300 animate-pulse">Live</span>}
-        {!liveMode && artifacts.length > 0 && (
+        <span className="hidden sm:inline-flex text-[11px] px-1.5 py-0.5 rounded-full bg-emerald-950/30 border border-emerald-900/50 text-emerald-300">Direct API</span>
+        {artifacts.length > 0 && (
           <select value={activeArtifact || ""} onChange={(e) => loadFiles(e.target.value)} className="ml-2 h-7 rounded-lg bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 px-2 max-w-[160px]">
             {artifacts.map((a) => (
               <option key={a.id} value={a.id}>{a.name}</option>
             ))}
           </select>
         )}
-        {liveMode && <span className="ml-2 text-[11px] text-zinc-500">{liveFiles?.length} files</span>}
-        <button onClick={() => { loadArtifacts(); loadLive(); }} className="ml-auto h-7 px-2.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-colors">Reload</button>
+        <button onClick={() => loadArtifacts()} className="ml-auto h-7 px-2.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-colors">Reload</button>
       </div>
 
-      {liveMode && (
-        <div className="px-3 py-1.5 bg-emerald-950/20 border-b border-emerald-900/20 text-[11px] text-emerald-300 flex items-center gap-1.5">
-          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" /> Live via tunnel — updating every 3.5s as AI creates files
-        </div>
-      )}
+      <div className="px-3 py-1.5 bg-zinc-900/50 border-b border-zinc-800 text-[11px] text-zinc-500">
+        Direct GitHub API polling every 8s — persistent plan streams files until workflow dies. No Cloudflare tunnel.
+      </div>
 
       <div className="p-2 min-h-[180px] max-h-[420px] overflow-auto">
         {loading && (
@@ -178,11 +130,11 @@ export function FileExplorer({ runId, onOpenFile, tunnelUrl }: { runId: number |
         )}
         {err && !loading && <div className="mx-1 rounded-lg bg-amber-950/20 border border-amber-900/30 text-amber-300 text-xs p-2.5">{err}</div>}
 
-        {!loading && displayFiles && displayFiles.length > 0 && (
+        {!loading && files && files.length > 0 && (
           <div className="space-y-1">
-            {displayFiles.map((f) => {
+            {files.map((f) => {
               const isMap = /map|cam|world/i.test(f.name);
-              const isChat = /chat|tools|tunnel/i.test(f.name);
+              const isChat = /chat|tools/i.test(f.name);
               const isMedia = /\.(png|jpg|jpeg|mp4|webm)$/i.test(f.name);
               const isCode = /\.(py|js|ts|html|json|txt|md)$/i.test(f.name);
               return (
@@ -190,32 +142,7 @@ export function FileExplorer({ runId, onOpenFile, tunnelUrl }: { runId: number |
                   key={f.path}
                   onClick={async () => {
                     try {
-                      if (liveMode && tunnelUrl) {
-                        // try live file fetch via tunnel
-                        const res = await fetch(`/api/agent/files?run=${runId}&path=${encodeURIComponent(f.path)}&tunnel=${encodeURIComponent(tunnelUrl)}`, { cache: "no-store" });
-                        const ct = res.headers.get("content-type") || "";
-                        if (res.ok) {
-                          if (ct.includes("application/json")) {
-                            const j = await res.json().catch(() => null);
-                            if (j && typeof j === "object" && j.files) {
-                              // it's a dir listing, not file
-                            } else {
-                              onOpenFile(f.path, JSON.stringify(j, null, 2).slice(0, 50000));
-                              return;
-                            }
-                          } else {
-                            const txt = await res.text();
-                            if (txt.startsWith('{"ok":false')) {
-                              // fallback to artifact
-                            } else {
-                              onOpenFile(f.path, txt.slice(0, 50000));
-                              return;
-                            }
-                          }
-                        }
-                      }
                       if (!activeArtifact) {
-                        // try artifact fallback if no activeArtifact but artifacts exist
                         if (artifacts[0]) {
                           const res = await fetch(`/api/github/artifact?id=${artifacts[0].id}&json=${encodeURIComponent(f.path)}`, { cache: "no-store" });
                           const ct = res.headers.get("content-type") || "";
@@ -257,18 +184,18 @@ export function FileExplorer({ runId, onOpenFile, tunnelUrl }: { runId: number |
                     <span className="block text-xs font-medium text-zinc-200 truncate group-hover:text-white">{f.name}</span>
                     <span className="block text-[11px] text-zinc-600 truncate">{f.path}</span>
                   </span>
-                  <span className="text-[11px] text-zinc-600 shrink-0">{f.size ? `${(f.size / 1024).toFixed(1)}k` : liveMode ? "live" : ""}</span>
+                  <span className="text-[11px] text-zinc-600 shrink-0">{f.size ? `${(f.size / 1024).toFixed(1)}k` : ""}</span>
                 </button>
               );
             })}
           </div>
         )}
 
-        {!loading && displayFiles && displayFiles.length === 0 && !err && <div className="px-3 py-6 text-center text-xs text-zinc-600">{liveMode ? "No files yet — AI will create them live" : "No files in this artifact yet — the run is still initializing."}</div>}
-        {!loading && !displayFiles && artifacts.length === 0 && !liveMode && <div className="px-3 py-3 text-xs text-zinc-600">No artifacts yet. {tunnelUrl ? "Live files will appear here via tunnel." : "They appear after the first job uploads."}</div>}
+        {!loading && files && files.length === 0 && !err && <div className="px-3 py-6 text-center text-xs text-zinc-600">No files yet — persistent plan is still working. Polling via direct API.</div>}
+        {!loading && !files && artifacts.length === 0 && <div className="px-3 py-3 text-xs text-zinc-600">No artifacts yet. They appear after the persistent plan uploads. Direct API polling active.</div>}
       </div>
 
-      {activeArtifact && !liveMode && (
+      {activeArtifact && (
         <div className="px-3 py-2 border-t border-zinc-800 bg-zinc-950/30 flex gap-2">
           <a href={`/api/github/artifact?id=${activeArtifact}`} target="_blank" className="flex-1 h-8 rounded-xl bg-white text-zinc-900 text-xs font-semibold hover:bg-zinc-100 transition-colors flex items-center justify-center gap-1.5">
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 2.5V9M3 6.5L6 9.5L9 6.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>
@@ -283,11 +210,6 @@ export function FileExplorer({ runId, onOpenFile, tunnelUrl }: { runId: number |
           >
             Open
           </button>
-        </div>
-      )}
-      {liveMode && (
-        <div className="px-3 py-2 border-t border-zinc-800 bg-zinc-950/30 text-[11px] text-zinc-500">
-          Live mode — files stream directly from runner workspace via <code className="bg-zinc-800 px-1 rounded">trycloudflare.com/__nish/files</code>
         </div>
       )}
     </div>

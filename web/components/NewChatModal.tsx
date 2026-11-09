@@ -12,7 +12,6 @@ export function NewChatModal({ open, onClose, onStart }: { open: boolean; onClos
   const [mapDetail, setMapDetail] = useState("dense");
   const [voice, setVoice] = useState("male");
   const [worldTheme, setWorldTheme] = useState("");
-  const [enableTunnel, setEnableTunnel] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -28,7 +27,7 @@ export function NewChatModal({ open, onClose, onStart }: { open: boolean; onClos
         const res = await fetch("/api/github/dispatch", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ kind: "agent", prompt: prompt.trim(), model_quality: model, enable_tunnel: enableTunnel ? "true" : "false" }),
+          body: JSON.stringify({ kind: "agent", prompt: prompt.trim(), model_quality: model }),
         });
         const j = await res.json();
         if (!res.ok) {
@@ -143,13 +142,10 @@ export function NewChatModal({ open, onClose, onStart }: { open: boolean; onClos
                 />
               </div>
               <ModelSelector value={model} onChange={setModel} />
-              <label className="flex items-start gap-3 rounded-xl bg-zinc-950 border border-zinc-800 p-3.5 cursor-pointer hover:border-zinc-700 transition-colors">
-                <input type="checkbox" checked={enableTunnel} onChange={(e) => setEnableTunnel(e.target.checked)} className="mt-0.5 rounded border-zinc-700 bg-zinc-900 text-white focus:ring-0" />
-                <div className="min-w-0">
-                  <div className="text-sm font-medium text-zinc-200">Enable live tunnel</div>
-                  <div className="text-xs text-zinc-500 leading-relaxed">Recommended. Opens a secure Cloudflare tunnel so you can chat with the running agent in real time. Otherwise replies are polled from artifacts.</div>
-                </div>
-              </label>
+              <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-3.5">
+                <div className="text-sm font-medium text-zinc-200">Direct API — no tunnel</div>
+                <div className="text-xs text-zinc-500 leading-relaxed">Runs use direct GitHub API polling. Thinking, tools, and files stream live in one persistent plan until the workflow dies. No Cloudflare needed.</div>
+              </div>
             </>
           ) : (
             <>

@@ -19,16 +19,6 @@ on:
           - hard
           - smart_11b
           - animation_best
-      enable_tunnel:
-        description: 'Open a free Cloudflare tunnel for live Vercel chat (exposes the runner on a https://*.trycloudflare.com URL)'
-        required: false
-        default: false
-        type: boolean
-      task_hint:
-        description: 'Hint for the UI — rbx short or agent (auto-detected if blank)'
-        required: false
-        default: ''
-        type: string
   workflow_call:
     inputs:
       prompt:
@@ -37,14 +27,6 @@ on:
       model_quality:
         required: true
         default: 'hard'
-        type: string
-      enable_tunnel:
-        required: false
-        default: false
-        type: boolean
-      task_hint:
-        required: false
-        default: ''
         type: string
 
 permissions:
@@ -181,32 +163,11 @@ jobs:
           path: ~/.ollama/models
           key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'animation_best' && 'deepseek-r1-8b-v1' || inputs.model_quality == 'smart_11b' && 'qwen3-14b-v1' || inputs.model_quality == 'hard' && 'qwen3-8b-v3' || inputs.model_quality == 'medium' && 'qwen3-8b-v1' || 'qwen3-4b-v1' }}
 
-      - name: Install cloudflared for live tunnel (pre-install so URL appears instantly)
-        if: inputs.enable_tunnel == 'true'
-        run: |
-          if which cloudflared >/dev/null 2>&1; then echo "cloudflared already installed: $(cloudflared --version)"; exit 0; fi
-          echo "Installing cloudflared for live tunnel (robust, handles 504)..."
-          for i in 1 2 3 4 5; do
-            if curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared; then
-              test -s /tmp/cloudflared && [ "$(stat -c%s /tmp/cloudflared 2>/dev/null || stat -f%z /tmp/cloudflared 2>/dev/null || echo 0)" -gt 100000 ] && break
-            fi
-            echo "curl failed $i/5, trying wget..."; 
-            if wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O /tmp/cloudflared; then
-              test -s /tmp/cloudflared && break
-            fi
-            echo "download failed $i/5"; sleep $((i*5)); rm -f /tmp/cloudflared
-          done
-          test -s /tmp/cloudflared || { echo "cloudflared download failed after 5 attempts (GitHub 504?) — continuing without tunnel"; exit 0; }
-          chmod +x /tmp/cloudflared
-          sudo mv /tmp/cloudflared /usr/local/bin/cloudflared
-          cloudflared --version || echo "cloudflared version check failed"
-
       - name: Run NishAgent — web, files, images, commands, sub-agent
         id: agent
         env:
           PROMPT: ${{ inputs.prompt }}
           MODEL_QUALITY: ${{ inputs.model_quality }}
-          ENABLE_TUNNEL: ${{ inputs.enable_tunnel }}
           AI_MODEL: ${{ env.AI_MODEL }}
           AI_FALLBACK_MODEL: ${{ env.AI_FALLBACK_MODEL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -217,12 +178,8 @@ jobs:
           mkdir -p dist/agent_workspace
           python tools/say.py plan "NishAgent starting — model $AI_MODEL (preset $MODEL_QUALITY)"
           python tools/say.py tool "Prompt: $PROMPT"
-          if [ "${ENABLE_TUNNEL}" = "true" ]; then
-            python tools/say.py plan "Cloudflare tunnel requested — the runner will expose a https://*.trycloudflare.com URL for live Vercel chat."
-            python tools/nish_agent.py --prompt "$PROMPT" --model "$MODEL_QUALITY" --tunnel
-          else
-            python tools/nish_agent.py --prompt "$PROMPT" --model "$MODEL_QUALITY"
-          fi
+          # Direct API mode — no Cloudflare tunnel. Live thinking, tools and files stream via GitHub API log tail + artifact polling.
+          python tools/nish_agent.py --prompt "$PROMPT" --model "$MODEL_QUALITY"
           echo "--- agent workspace ---"
           find dist/agent_workspace -type f | head -n 40
           ls -lh dist/agent_chat.json dist/agent_tools.jsonl 2>&1 | head
@@ -233,7 +190,6 @@ jobs:
           mkdir -p dist/preview
           cp -f dist/agent_chat.json dist/preview/agent_chat.json 2>/dev/null || echo "[]" > dist/preview/agent_chat.json
           cp -f dist/agent_tools.jsonl dist/preview/agent_tools.jsonl 2>/dev/null || true
-          cp -f dist/tunnel_url.txt dist/preview/tunnel_url.txt 2>/dev/null || true
           ls -lh dist/preview/ 2>&1 | head
 
       - name: Upload agent artifact (chat + tools + files)
@@ -245,7 +201,6 @@ jobs:
             dist/agent_chat.json
             dist/agent_tools.jsonl
             dist/agent_system.txt
-            dist/tunnel_url.txt
             dist/agent_workspace
             dist/preview/agent_chat.json
           if-no-files-found: warn
@@ -259,29 +214,3 @@ jobs:
           path: dist/agent_workspace
           if-no-files-found: warn
           retention-days: 7
-
-      - name: Keep runner alive for live tunnel / real-time files (idle, no checkout post failure)
-        if: always() && inputs.enable_tunnel == 'true'
-        run: |
-          echo "⏳ Agent finished — keeping runner alive for live file/chat via tunnel (up to 25m, heartbeat every 10s)."
-          if [ -f dist/tunnel_url.txt ]; then echo "Live URL: $(cat dist/tunnel_url.txt)"; echo "Files: /__nish/files  File: /__nish/file?path=...  Chat: /__nish/chat  Tools: /__nish/tools"; else echo "No tunnel file (tunnel not enabled or failed) — still idling so UI can poll final artifacts"; fi
-          ls -R dist/agent_workspace 2>&1 | head -n 120
-          echo "--- last tool lines ---"
-          tail -n 20 dist/agent_tools.jsonl 2>&1 | head -n 20
-          # idle loop - keep runner alive so Vercel can stream live files/chat via tunnel without workflow ending
-          for i in $(seq 1 150); do
-            echo "[keepalive $i/150] $(date -u +%H:%M:%S) — $(find dist/agent_workspace -type f 2>/dev/null | wc -l) files — $(du -sh dist/agent_workspace 2>/dev/null | cut -f1) — live at $(cat dist/tunnel_url.txt 2>/dev/null || echo none)"
-            # refresh preview json for UI polling (optional)
-            cp -f dist/agent_chat.json dist/preview/agent_chat.json 2>/dev/null || true
-            cp -f dist/agent_tools.jsonl dist/preview/agent_tools.jsonl 2>/dev/null || true
-            sleep 10
-          done
-          echo "idle finished — workflow will now complete (post-checkout will run normally, workspace preserved)"
-
-      - name: Publish final live snapshot (chat + tools) after idle
-        if: always()
-        run: |
-          mkdir -p dist/preview
-          cp -f dist/agent_chat.json dist/preview/agent_chat.json 2>/dev/null || echo "[]" > dist/preview/agent_chat.json
-          cp -f dist/agent_tools.jsonl dist/preview/agent_tools.jsonl 2>/dev/null || true
-          cat dist/agent_chat.json 2>&1 | head -n 20

@@ -253,8 +253,8 @@ export default function RbxShortPage() {
           </div>
 
           <div className="rounded-2xl bg-zinc-900/50 border border-zinc-800 p-4">
-            <div className="text-xs font-semibold tracking-wide text-zinc-300">How it works</div>
-            <div className="text-xs text-zinc-500 leading-relaxed mt-1.5">Model, map and camera work is delegated to the sub-agent (Gemini → Groq fallback). You’ll see thinking, plan, and execution live — no need to open GitHub.</div>
+            <div className="text-xs font-semibold tracking-wide text-zinc-300">How it works — direct API</div>
+            <div className="text-xs text-zinc-500 leading-relaxed mt-1.5">No tunnel. Every thought, plan, and tool streams via direct GitHub API polling. The last plan is one persistent box that stays alive until the workflow dies.</div>
           </div>
         </div>
 
@@ -349,6 +349,17 @@ export default function RbxShortPage() {
                 {tab === "execution" && <LogViewer steps={steps} runStatus={status} logTail={liveLog} />}
                 {tab === "intelligence" && (
                   <div className="space-y-3">
+                    {liveLog && (
+                      <div className="rounded-xl bg-zinc-900 border border-zinc-800 overflow-hidden">
+                        <div className="h-8 px-3 flex items-center gap-2 border-b border-zinc-800 bg-zinc-900">
+                          <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
+                          <span className="text-xs font-semibold tracking-wide text-zinc-300">Live — persistent plan · thinking & tools (direct API)</span>
+                          <span className="ml-auto text-[11px] text-zinc-600">{(liveLog.length/1024).toFixed(1)} KB — no tunnel</span>
+                        </div>
+                        <pre className="p-3 text-xs font-mono leading-relaxed whitespace-pre-wrap break-words max-h-[320px] overflow-auto text-zinc-400">{liveLog.slice(-6000)}</pre>
+                        <div className="px-3 py-2 border-t border-zinc-800 bg-zinc-950 text-[11px] text-zinc-500">This persistent plan stays alive until workflow dies, streaming every thought via direct GitHub API polling.</div>
+                      </div>
+                    )}
                     {intelligence.loading ? (
                       <div className="flex items-center gap-2 text-xs text-zinc-500 py-6 justify-center"><span className="h-3 w-3 border border-zinc-700 border-t-zinc-400 rounded-full animate-spin" /> Loading plan…</div>
                     ) : (
