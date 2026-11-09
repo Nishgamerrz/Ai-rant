@@ -39,10 +39,12 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("ROBLOX_OPEN_CLOUD_API_KEY is {key_state}", workflow)
         self.assertIn("Upload native Studio project even if the MP4 cannot use a protected mesh", workflow)
         self.assertIn("steps.studio-experience.outcome == 'success'", workflow)
-        # There is exactly ONE workflow, and it runs every renderer test itself
-        # before the model is downloaded, so a broken tool fails in minutes.
+        # The short workflow runs every renderer test itself before the model is
+        # downloaded, so a broken tool fails in minutes. The repo now ships the
+        # short (main.yml) and the agent (agent.yml) — the agent reuses the same
+        # model stack for web/code/files work.
         workflows = sorted(path.name for path in (ROOT / ".github/workflows").iterdir())
-        self.assertEqual(workflows, ["main.yml"], "the repository must ship one workflow")
+        self.assertEqual(workflows, ["agent.yml", "main.yml"], "the repository must ship the short and the agent workflows")
         self.assertIn("npm run test:avatar-rig", workflow)
         self.assertIn("npm run test:avatar-obj", workflow)
         self.assertIn("npm run test:module-resolution", workflow)

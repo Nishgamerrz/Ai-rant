@@ -186,10 +186,11 @@ class FrameAuditTests(unittest.TestCase):
         self.assertIn("publish_preview", WORKFLOW)
         self.assertIn("media-preview", WORKFLOW)
         self.assertIn("permissions:\n      contents: write", WORKFLOW)
-        # There is only one workflow now, and the branch exists so a run can be
-        # judged from a browser without downloading the video.
-        self.assertEqual(sorted(path.name for path in (ROOT / ".github/workflows").iterdir()),
-                         ["main.yml"])
+        # The preview branch exists so a run can be judged from a browser without
+        # downloading the video. The repo now ships the short (main.yml) and the
+        # agent (agent.yml); both are validated, but previews belong to the short.
+        self.assertIn("main.yml", sorted(path.name for path in (ROOT / ".github/workflows").iterdir()))
+        self.assertIn("agent.yml", sorted(path.name for path in (ROOT / ".github/workflows").iterdir()))
 
     def test_two_comparison_runs_do_not_overwrite_each_others_stills(self):
         # A hard run and a smart_11b run dispatched from the same workflow used to
