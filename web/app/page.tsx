@@ -5,13 +5,14 @@ import { ChatWindow } from "@/components/ChatWindow";
 import { FileExplorer } from "@/components/FileExplorer";
 import { LogViewer } from "@/components/LogViewer";
 import { NewChatModal } from "@/components/NewChatModal";
+import { SubagentTimeline } from "@/components/SubagentTimeline";
 
 export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [selectedRun, setSelectedRun] = useState<number | null>(null);
   const [tunnelUrl, setTunnelUrl] = useState<string | null>(null);
-  const [rightTab, setRightTab] = useState<"files" | "logs">("files");
+  const [rightTab, setRightTab] = useState<"files" | "logs" | "subagent">("files");
   const [preview, setPreview] = useState<{ path: string; content: string } | null>(null);
   const [steps, setSteps] = useState<any[]>([]);
   const [runStatus, setRunStatus] = useState("idle");
@@ -57,8 +58,9 @@ export default function Home() {
             </div>
             <div className="ml-auto flex items-center gap-2">
               <div className="hidden lg:flex items-center gap-1 p-1 rounded-xl bg-zinc-900 border border-zinc-800">
-                <button onClick={() => setRightTab("files")} className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${rightTab === "files" ? "bg-white text-zinc-900 shadow-soft" : "text-zinc-500 hover:text-zinc-300"}`}>Files</button>
-                <button onClick={() => setRightTab("logs")} className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${rightTab === "logs" ? "bg-white text-zinc-900 shadow-soft" : "text-zinc-500 hover:text-zinc-300"}`}>Logs</button>
+                <button onClick={() => setRightTab("files")} className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${rightTab === "files" ? "bg-white text-zinc-900 shadow-soft" : "text-zinc-500 hover:text-zinc-300"}`}>Files</button>
+                <button onClick={() => setRightTab("logs")} className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${rightTab === "logs" ? "bg-white text-zinc-900 shadow-soft" : "text-zinc-500 hover:text-zinc-300"}`}>Logs</button>
+                <button onClick={() => setRightTab("subagent")} className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${rightTab === "subagent" ? "bg-white text-zinc-900 shadow-soft" : "text-zinc-500 hover:text-zinc-300"}`}>Subagent</button>
               </div>
               <button onClick={() => setModalOpen(true)} className="h-9 px-4 rounded-xl bg-white text-zinc-900 font-medium text-sm flex items-center gap-2 hover:bg-zinc-100 transition-colors shadow-soft">
                 <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 2.5V11.5M2.5 7H11.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/></svg>
@@ -78,14 +80,11 @@ export default function Home() {
           {/* Right panel — desktop */}
           <div className="hidden lg:flex w-[380px] shrink-0 border-l border-zinc-800/80 bg-zinc-900/20 flex-col">
             <div className="flex-1 overflow-auto p-3 space-y-3">
-              {rightTab === "files" ? (
-                <FileExplorer runId={selectedRun} onOpenFile={(path, content) => setPreview({ path, content })} />
-              ) : (
-                <LogViewer steps={steps} runStatus={runStatus} />
-              )}
-              {rightTab === "files" && selectedRun && (
-                <LogViewer steps={steps} runStatus={runStatus} />
-              )}
+              {rightTab === "files" && <FileExplorer runId={selectedRun} onOpenFile={(path, content) => setPreview({ path, content })} />}
+              {rightTab === "logs" && <LogViewer steps={steps} runStatus={runStatus} />}
+              {rightTab === "subagent" && <SubagentTimeline runId={selectedRun} kind="agent" />}
+              {rightTab === "files" && selectedRun && <div className="pt-3 border-t border-zinc-800/60"><SubagentTimeline runId={selectedRun} kind="agent" /></div>}
+              {rightTab === "logs" && selectedRun && <div className="pt-3 border-t border-zinc-800/60"><FileExplorer runId={selectedRun} onOpenFile={(path, content) => setPreview({ path, content })} /></div>}
             </div>
           </div>
         </div>
@@ -95,8 +94,11 @@ export default function Home() {
           <div className="flex gap-1 p-1 rounded-xl bg-zinc-900 border border-zinc-800 w-fit">
             <button onClick={() => setRightTab("files")} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${rightTab === "files" ? "bg-white text-zinc-900" : "text-zinc-500"}`}>Files</button>
             <button onClick={() => setRightTab("logs")} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${rightTab === "logs" ? "bg-white text-zinc-900" : "text-zinc-500"}`}>Logs</button>
+            <button onClick={() => setRightTab("subagent")} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${rightTab === "subagent" ? "bg-white text-zinc-900" : "text-zinc-500"}`}>Subagent</button>
           </div>
-          {rightTab === "files" ? <FileExplorer runId={selectedRun} onOpenFile={(p, c) => setPreview({ path: p, content: c })} /> : <LogViewer steps={steps} runStatus={runStatus} />}
+          {rightTab === "files" && <FileExplorer runId={selectedRun} onOpenFile={(p, c) => setPreview({ path: p, content: c })} />}
+          {rightTab === "logs" && <LogViewer steps={steps} runStatus={runStatus} />}
+          {rightTab === "subagent" && <SubagentTimeline runId={selectedRun} kind="agent" />}
         </div>
 
         {/* Preview modal */}

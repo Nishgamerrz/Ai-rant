@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { SubagentTimeline } from "./SubagentTimeline";
 
 type Msg = { role: string; content: string; thought?: string; tool_calls?: any[]; time?: string; tool?: string; output?: any };
 
@@ -122,6 +123,13 @@ export function ChatWindow({ runId, tunnelUrl, liveMode }: { runId: number | nul
           GitHub <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M3 7L7 3M7 3H4M7 3V6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
         </a>
       </div>
+
+      {/* Subagent timeline — mandatory delegation visible */}
+      {runId && (
+        <div className="shrink-0 border-b border-zinc-800/60 bg-zinc-900/30 px-3 py-2">
+          <SubagentTimeline runId={runId} kind="agent" />
+        </div>
+      )}
 
       {/* Tool chips */}
       {tools.length > 0 && (

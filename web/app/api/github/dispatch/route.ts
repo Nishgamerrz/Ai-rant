@@ -35,6 +35,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, workflow: AGENT_WORKFLOW, prompt, model_quality: model });
   } catch (e: any) {
     const msg = String(e?.message || e);
+    if (msg.includes("409") || msg.toLowerCase().includes("already")) {
+      return NextResponse.json({ error: "Workflow already dispatching — GitHub rate-limits to one dispatch per ~20s. Please wait and the new run will appear in the sidebar.", details: msg }, { status: 409 });
+    }
     const status = msg.includes("GITHUB_TOKEN") ? 500 : 502;
     return NextResponse.json({ error: msg }, { status });
   }

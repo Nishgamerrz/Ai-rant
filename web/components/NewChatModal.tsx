@@ -31,8 +31,11 @@ export function NewChatModal({ open, onClose, onStart }: { open: boolean; onClos
           body: JSON.stringify({ kind: "agent", prompt: prompt.trim(), model_quality: model, enable_tunnel: enableTunnel ? "true" : "false" }),
         });
         const j = await res.json();
-        if (!res.ok) throw new Error(j.error || "Dispatch failed");
-        // Poll for new run
+        if (!res.ok) {
+          const is409 = res.status === 409 || String(j.error||"").includes("409") || String(j.error||"").toLowerCase().includes("already");
+          if (!is409) throw new Error(j.error || "Dispatch failed");
+        }
+        // Poll for new run (also handles 409 already-queued case)
         let runId: number | null = null;
         for (let i = 0; i < 10; i++) {
           await new Promise((r) => setTimeout(r, 1500));
@@ -68,7 +71,10 @@ export function NewChatModal({ open, onClose, onStart }: { open: boolean; onClos
           }),
         });
         const j = await res.json();
-        if (!res.ok) throw new Error(j.error || "Dispatch failed");
+        if (!res.ok) {
+          const is409rbx = res.status === 409 || String(j.error||"").includes("409") || String(j.error||"").toLowerCase().includes("already");
+          if (!is409rbx) throw new Error(j.error || "Dispatch failed");
+        }
         let runId: number | null = null;
         for (let i = 0; i < 10; i++) {
           await new Promise((r) => setTimeout(r, 1500));
