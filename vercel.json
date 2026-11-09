@@ -1,9 +1,9 @@
 {
   "framework": "nextjs",
-  "buildCommand": "cd web && npm install && npm run build",
-  "outputDirectory": "web/.next",
-  "installCommand": "cd web && npm install",
-  "devCommand": "cd web && npm run dev",
+  "buildCommand": "npm install && npm run build",
+  "outputDirectory": ".next",
+  "installCommand": "npm install",
+  "devCommand": "npm run dev",
   "regions": ["iad1"],
   "env": {
     "NEXT_TELEMETRY_DISABLED": "1"
