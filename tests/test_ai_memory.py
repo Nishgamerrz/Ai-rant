@@ -111,9 +111,19 @@ class WorkflowMemoryTests(unittest.TestCase):
         self.assertIn("{'role': 'system', 'content': system}", self.text)
 
     def test_the_memory_is_filled_before_the_first_call_and_reused_after(self):
-        self.assertIn("python tools/ai_memory.py \\\n            --set \"story_topic=", self.text)
+        self.assertIn('--set "story_topic=${STORY_TOPIC}"', self.text)
         self.assertIn("--set-file narration=dist/narration.txt", self.text)
         self.assertIn("--add-subagent subagent_results.json", self.text)
+        # The topic is remembered before the story request is even built.
+        self.assertLess(self.text.index('--set "story_topic='),
+                        self.text.index("narration_request.json"))
+
+    def test_each_run_starts_with_an_empty_memory(self):
+        # Run #109 was told "a world where gravity naps" on its first story call
+        # because the memory file still held the previous run's topic.
+        self.assertIn("python tools/ai_memory.py --reset", self.text)
+        self.assertLess(self.text.index("python tools/ai_memory.py --reset"),
+                        self.text.index("story narration"))
 
     def test_the_memory_holds_the_world_before_the_summary(self):
         self.assertIn("ai_memory.add_fact(memory, 'Final world:", self.text)
