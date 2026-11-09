@@ -56,7 +56,7 @@ BOX_BOTTOM = "\u2514"
 # A model start-up on a CPU runner can take minutes before the first token, and a
 # thinking model pauses mid-sentence. One quiet line is useful; a line every
 # fifteen seconds buried the model's actual words, so the note is capped.
-HEARTBEAT_NOTES = 3
+HEARTBEAT_NOTES = 1
 
 
 class TypedConsole:
@@ -253,17 +253,23 @@ class Heartbeat(threading.Thread):
             if self.state == "waiting for the first token":
                 waited = time.time() - self.started
                 if self.resident:
-                    # The weights are already in RAM: this is prefill, not a load.
-                    text = (f"[{self.label}] {waited:.0f}s reading the "
-                            f"{self.prompt_chars:,}-character plan prompt "
-                            f"(model already in memory, no reload)")
+                    # Single quiet note only - large prompts are normal, don't spam
+                    if self.messages == 0 and waited >= 45:
+                        text = (f"[{self.label}] {waited:.0f}s prefill for {self.prompt_chars:,}-char prompt (model in memory)")
+                    else:
+                        # skip further notes, just wait quietly
+                        self.activity = time.time()
+                        continue
                 elif self.resident is False:
-                    text = (f"[{self.label}] still loading the model into memory: "
-                            f"{waited:.0f}s so far (one-time load)")
+                    text = (f"[{self.label}] loading model {waited:.0f}s")
                 else:
-                    text = (f"[{self.label}] no first token yet: {waited:.0f}s so far")
+                    text = (f"[{self.label}] waiting {waited:.0f}s for first token")
             else:
-                text = f"[{self.label}] nothing new for {idle:.0f}s, still working"
+                # only one mid-stream note max
+                if self.messages >= 1:
+                    self.activity = time.time()
+                    continue
+                text = f"[{self.label}] still working {idle:.0f}s"
             self.console.note(f"{text} (quiet note {self.messages + 1}/{self.limit})")
             self.messages += 1
             self.activity = time.time()
@@ -364,13 +370,9 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                        for message in (request.get("messages") or []))
     if not quiet and model_name:
         if resident:
-            print(paint(f"[{label}] {model_name} is already in memory, so this call does "
-                        f"not reload it; it starts by reading its "
-                        f"{prompt_chars:,}-character prompt.", "notice"), flush=True)
+            print(paint(f"[{label}] {model_name} in memory — reading {prompt_chars:,}-char prompt", "notice"), flush=True)
         elif resident is False:
-            print(paint(f"[{label}] {model_name} is not in memory right now, so this call "
-                        f"loads it once (the last step should not have evicted it).",
-                        "warning"), flush=True)
+            print(paint(f"[{label}] {model_name} loading (first load)", "warning"), flush=True)
     beat = None if quiet or heartbeat_seconds <= 0 else Heartbeat(
         label, heartbeat_seconds, console, resident=resident, prompt_chars=prompt_chars)
     if beat:

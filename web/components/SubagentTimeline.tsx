@@ -14,12 +14,72 @@ type SubagentCall = {
   text?: string;
   ok?: boolean;
   error?: string;
+  live?: boolean;
 };
 
-export function SubagentTimeline({ runId, kind }: { runId: number | null; kind: "agent" | "rbx" }) {
+function parseLiveLogForSubagent(tail: string): SubagentCall[] {
+  const calls: SubagentCall[] = [];
+  // Detect subagent tool blocks in live log: look for JSON with "tool":"subagent"
+  const re = /"tool"\s*:\s*"subagent"[\s\S]{0,1200}?"instruction"\s*:\s*"([^"]{8,300})"/g;
+  let m: RegExpExecArray | null;
+  let idx = 0;
+  while ((m = re.exec(tail)) !== null) {
+    const instr = m[1];
+    // try to get topic nearby
+    const chunk = tail.slice(Math.max(0, m.index - 400), m.index + 1500);
+    const topicMatch = chunk.match(/"topic"\s*:\s*"([^"]+)"/);
+    const inputMatch = chunk.match(/"input"\s*:\s*"([^"]{0,200})"/);
+    calls.push({
+      id: `live-sub-${idx++}`,
+      topic: topicMatch ? topicMatch[1] : "code",
+      kind: "subagent",
+      instruction: instr,
+      input: inputMatch ? inputMatch[1] : "",
+      provider: chunk.includes("groq") ? "groq" : chunk.includes("gemini") ? "gemini" : "live",
+      output: "Delegated — waiting for sub-agent reply in log…",
+      live: true,
+      ok: undefined,
+    });
+    if (calls.length >= 6) break;
+  }
+  // Also detect the result line: [tool subagent] -> { ok, text, applied_to }
+  const resRe = /\[tool subagent\][^\n]*->\s*(\{[^\n]{0,2000}\})/g;
+  while ((m = resRe.exec(tail)) !== null) {
+    try {
+      const obj = JSON.parse(m[1]);
+      calls.push({
+        id: `live-res-${idx++}`,
+        topic: obj.topic || "code",
+        kind: "subagent",
+        instruction: obj.instruction || "subagent result",
+        provider: obj.provider || obj.model || "live",
+        seconds: obj.seconds,
+        fileEdited: obj.applied_to,
+        output: obj.text || obj.output || JSON.stringify(obj).slice(0, 3000),
+        ok: obj.ok,
+        live: true,
+      });
+    } catch {}
+    if (calls.length >= 8) break;
+  }
+  return calls.slice(0, 8);
+}
+
+export function SubagentTimeline({ runId, kind, liveLog }: { runId: number | null; kind: "agent" | "rbx"; liveLog?: string }) {
   const [calls, setCalls] = useState<SubagentCall[]>([]);
+  const [liveCalls, setLiveCalls] = useState<SubagentCall[]>([]);
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
+
+  // If liveLog prop provided, parse immediately
+  useEffect(() => {
+    if (liveLog && liveLog.length > 200) {
+      const parsed = parseLiveLogForSubagent(liveLog);
+      if (parsed.length) setLiveCalls(parsed);
+    } else if (!liveLog) {
+      setLiveCalls([]);
+    }
+  }, [liveLog]);
 
   useEffect(() => {
     if (!runId) {
@@ -32,29 +92,45 @@ export function SubagentTimeline({ runId, kind }: { runId: number | null; kind: 
       try {
         if (kind === "agent") {
           const txt = await fetch(`/api/github/artifact?run=${runId}&name=nish-agent-${runId}&json=agent_tools.jsonl`, { cache: "no-store" }).then((r) => r.text()).catch(() => "");
-          if (!txt || cancelled) return;
-          const lines = txt.trim().split("\n").filter(Boolean);
-          const parsed = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-          const subs: SubagentCall[] = [];
-          for (const p of parsed) {
-            if (p.tool === "subagent") {
-              const out = p.output || {};
-              subs.push({
-                id: p.input?.id || `sub-${subs.length}`,
-                topic: p.input?.topic || p.input?.instruction?.slice(0, 20) || "code",
-                kind: "subagent",
-                instruction: p.input?.instruction || p.input?.prompt || "",
-                input: p.input?.input || "",
-                provider: out.model || out.provider || (out.raw?.includes("groq") ? "groq" : out.ok ? "gemini" : "unknown"),
-                seconds: undefined,
-                fileEdited: out.applied_to || undefined,
-                output: out.text || out.output || JSON.stringify(out, null, 2).slice(0, 4000),
-                ok: out.ok,
-                error: out.error,
-              });
+          if (cancelled) return;
+          if (txt && txt.trim() && !txt.includes("Not Found") && !txt.includes("no artifact")) {
+            const lines = txt.trim().split("\n").filter(Boolean);
+            const parsed = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+            const subs: SubagentCall[] = [];
+            for (const p of parsed) {
+              if (p.tool === "subagent") {
+                const out = p.output || {};
+                subs.push({
+                  id: p.input?.id || `sub-${subs.length}`,
+                  topic: p.input?.topic || p.input?.instruction?.slice(0, 20) || "code",
+                  kind: "subagent",
+                  instruction: p.input?.instruction || p.input?.prompt || "",
+                  input: p.input?.input || "",
+                  provider: out.model || out.provider || (out.raw?.includes("groq") ? "groq" : out.ok ? "gemini" : "unknown"),
+                  seconds: out.seconds,
+                  fileEdited: out.applied_to || undefined,
+                  output: out.text || out.output || JSON.stringify(out, null, 2).slice(0, 4000),
+                  ok: out.ok,
+                  error: out.error,
+                });
+              }
+            }
+            if (!cancelled) setCalls(subs);
+            if (subs.length) {
+              setLoading(false);
+              return;
             }
           }
-          if (!cancelled) setCalls(subs);
+          // fallback: live log fetch if artifact empty
+          if (!cancelled && !liveLog) {
+            try {
+              const lr = await fetch(`/api/github/logs?run=${runId}&logs=1`, { cache: "no-store" }).then((r) => r.json()).catch(() => null);
+              if (lr?.logTail) {
+                const parsedLive = parseLiveLogForSubagent(lr.logTail);
+                if (!cancelled && parsedLive.length) setLiveCalls(parsedLive);
+              }
+            } catch {}
+          }
         } else {
           // RBX: try to fetch subagent artifacts from main artifact
           const candidates = [
@@ -104,8 +180,17 @@ export function SubagentTimeline({ runId, kind }: { runId: number | null; kind: 
               }
             } catch {}
           }
-          // Also try to get from logs artifact if available (fallback: parse from job logs? skip)
           if (!cancelled) setCalls(subs);
+          if (!subs.length && !liveLog) {
+            // try live log for rbx as well
+            try {
+              const lr = await fetch(`/api/github/logs?run=${runId}&logs=1`, { cache: "no-store" }).then((r) => r.json()).catch(() => null);
+              if (lr?.logTail) {
+                const parsedLive = parseLiveLogForSubagent(lr.logTail);
+                if (!cancelled && parsedLive.length) setLiveCalls(parsedLive);
+              }
+            } catch {}
+          }
         }
       } catch {}
       if (!cancelled) setLoading(false);
@@ -113,7 +198,9 @@ export function SubagentTimeline({ runId, kind }: { runId: number | null; kind: 
     load();
     const id = setInterval(load, 8000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [runId, kind]);
+  }, [runId, kind, liveLog]);
+
+  const display = calls.length ? calls : liveCalls;
 
   if (!runId) {
     return (
@@ -124,7 +211,7 @@ export function SubagentTimeline({ runId, kind }: { runId: number | null; kind: 
     );
   }
 
-  if (loading && calls.length === 0) {
+  if (loading && display.length === 0) {
     return (
       <div className="rounded-2xl bg-zinc-900 border border-zinc-800 p-4 flex items-center gap-3">
         <span className="h-4 w-4 border-2 border-zinc-700 border-t-zinc-400 rounded-full animate-spin" />
@@ -133,7 +220,7 @@ export function SubagentTimeline({ runId, kind }: { runId: number | null; kind: 
     );
   }
 
-  if (calls.length === 0) {
+  if (display.length === 0) {
     return (
       <div className="rounded-2xl bg-zinc-900 border border-zinc-800 p-4">
         <div className="flex items-center gap-2">
@@ -143,7 +230,7 @@ export function SubagentTimeline({ runId, kind }: { runId: number | null; kind: 
           <span className="text-xs font-semibold tracking-wide text-zinc-400">Subagent · No calls yet</span>
         </div>
         <div className="text-xs text-zinc-600 mt-2 leading-relaxed">
-          The AI hasn’t delegated to the subagent for this run yet. For Short, the first response must include a <code className="bg-zinc-800 px-1 rounded">map/cameras</code> + <code className="bg-zinc-800 px-1 rounded">models</code> task. For Agent, the first message must include a <code className="bg-zinc-800 px-1 rounded">subagent</code> tool call.
+          The AI hasn’t delegated to the subagent for this run yet. Live log is polled every 3.5s — delegation appears here before artifacts upload. For Short, the first response must include a <code className="bg-zinc-800 px-1 rounded">map/cameras</code> + <code className="bg-zinc-800 px-1 rounded">models</code> task. For Agent, the first message must include a <code className="bg-zinc-800 px-1 rounded">subagent</code> tool call.
         </div>
       </div>
     );
@@ -156,17 +243,18 @@ export function SubagentTimeline({ runId, kind }: { runId: number | null; kind: 
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4 6L6 8L8 4" stroke="#a78bfa" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/><circle cx="6" cy="6" r="4.5" stroke="#a78bfa" strokeWidth="1.1" opacity="0.5"/></svg>
         </div>
         <span className="text-xs font-semibold tracking-wide text-zinc-200">Subagent</span>
-        <span className="text-[11px] px-2 py-0.5 rounded-full bg-violet-600 text-white font-medium">{calls.length} {calls.length === 1 ? "task" : "tasks"}</span>
+        <span className="text-[11px] px-2 py-0.5 rounded-full bg-violet-600 text-white font-medium">{display.length} {display.length === 1 ? "task" : "tasks"}</span>
+        {display[0]?.live && <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-amber-950/40 border border-amber-900/50 text-amber-300">live log</span>}
         <span className="ml-auto text-[11px] text-zinc-600 hidden sm:inline">Gemini → Groq fallback · provider · seconds · file</span>
       </div>
       <div className="divide-y divide-zinc-800/60 max-h-[420px] overflow-auto">
-        {calls.map((c, idx) => {
+        {display.map((c, idx) => {
           const isOpen = expanded === c.id;
           return (
             <div key={c.id + idx} className="p-3.5 hover:bg-zinc-800/20 transition-colors">
               <button onClick={() => setExpanded(isOpen ? null : c.id)} className="w-full text-left flex items-start gap-3">
-                <span className={`mt-0.5 h-6 w-6 rounded-lg grid place-items-center shrink-0 border text-xs font-bold ${c.ok === false ? "bg-red-950/30 border-red-900 text-red-400" : "bg-emerald-950/20 border-emerald-900/50 text-emerald-400"}`}>
-                  {c.ok === false ? "×" : "✓"}
+                <span className={`mt-0.5 h-6 w-6 rounded-lg grid place-items-center shrink-0 border text-xs font-bold ${c.ok === false ? "bg-red-950/30 border-red-900 text-red-400" : c.live ? "bg-amber-950/30 border-amber-900 text-amber-300" : "bg-emerald-950/20 border-emerald-900/50 text-emerald-400"}`}>
+                  {c.ok === false ? "×" : c.live ? "◐" : "✓"}
                 </span>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
@@ -174,6 +262,7 @@ export function SubagentTimeline({ runId, kind }: { runId: number | null; kind: 
                     <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-400 font-medium">{c.topic || "generic"} · {c.kind || "answer"}</span>
                     {c.provider && <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-zinc-900 border border-zinc-800 text-zinc-500">{c.provider}</span>}
                     {c.seconds !== undefined && <span className="text-[11px] text-zinc-600">{c.seconds}s</span>}
+                    {c.live && <span className="text-[11px] px-1 py-0.5 rounded bg-amber-950/30 text-amber-300 border border-amber-900/30">streaming</span>}
                   </div>
                   <div className="text-xs font-medium text-zinc-300 mt-1 line-clamp-2 leading-relaxed">{c.instruction || "(no instruction)"}</div>
                   {c.input && <div className="text-[11px] text-zinc-600 truncate mt-1">input: {String(c.input).slice(0, 120)}</div>}
@@ -191,7 +280,7 @@ export function SubagentTimeline({ runId, kind }: { runId: number | null; kind: 
                     {c.input && <div className="mt-2 text-xs font-mono leading-relaxed text-zinc-600 whitespace-pre-wrap break-words bg-zinc-900/50 rounded-lg p-2.5 border border-zinc-800/50">{String(c.input).slice(0, 3000)}</div>}
                   </div>
                   <div className="rounded-xl bg-violet-950/10 border border-violet-900/20 p-3">
-                    <div className="text-[11px] font-semibold tracking-widest text-violet-300 uppercase">Returned</div>
+                    <div className="text-[11px] font-semibold tracking-widest text-violet-300 uppercase">Returned {c.live ? "· live" : ""}</div>
                     <pre className="mt-2 text-xs font-mono leading-relaxed whitespace-pre-wrap break-words text-zinc-300 max-h-[320px] overflow-auto">{(c.output || c.text || "(empty)").slice(0, 8000)}</pre>
                     {c.error && <div className="mt-2 text-xs text-red-400">Error: {c.error}</div>}
                   </div>

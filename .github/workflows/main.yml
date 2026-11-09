@@ -139,6 +139,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          clean: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -1766,6 +1768,12 @@ jobs:
             dist/avatar-assets/source-rbxm/*.rbxm
           if-no-files-found: error
           retention-days: 14
+
+      - name: Copy subagent traces for UI
+        run: |
+          cp -f story_subagent_tasks.json story_subagent_results.json subagent_tasks.json subagent_results.json dist/ 2>/dev/null || true
+          cp -f map_subagent_review.done dist/ 2>/dev/null || true
+          ls -lh dist/*.json 2>&1 | head -n 20
 
       - name: Bundle the final deliverables
         env:

@@ -95,6 +95,7 @@ Available tools — return them as JSON exactly like this (inside ```json):
 Rules:
 - `tool_calls` may be empty if you just want to answer — BUT for this workflow the SUB-AGENT IS MANDATORY AT THE START.
   In your FIRST JSON you MUST include at least one `subagent` call (topic code/models/map etc) for your hardest subtask. The helper is Gemini with a Groq fallback that tries the free best models openai/gpt-oss-120b → openai/gpt-oss-20b → qwen/qwen3-32b → llama-3.3-70b-versatile → llama-3.1-8b-instant, has the full file-rules guide, and returns provider, seconds, whether it edited a file, and FULL text. After it returns you MUST accept (include id in subagent_review and paste its result verbatim) or decline (leave out and build your own replacement) — never re-ask the same task twice and do not leave it empty.
+  Keep each subagent instruction under 300 chars and focused: do NOT ask for an entire 20-page document with 50+ illustrations in one call — ask for a 1-page outline or a single section first, then expand in later rounds. The helper is capped at ~8k tokens and will be cut off if you request a huge doc.
 - `path` is always relative to the workspace root (dist/agent_workspace). Do not use absolute paths or .. .
 - `create_file` creates or overwrites; directories are made as needed.
 - `run_cmd` runs a shell command with 60 s timeout; output is returned. Only use it for real tasks, not to list files (use list_files).
@@ -405,19 +406,126 @@ def main() -> None:
     print(paint(f"[nish-agent] workspace: {WORKSPACE}", "plan"), flush=True)
     print(paint(f"[nish-agent] prompt: {prompt[:240]}", "label"), flush=True)
 
-    # optional tunnel
+    # optional tunnel - live file + chat server
     tunnel_url = ""
+    live_queue = ROOT / "dist" / "__live_queue.jsonl"
     if args.tunnel:
         try:
-            import http.server, threading, socket
-            from urllib.parse import urlparse
-            # tiny server on 8787 that replays workspace files + chat
-            handler = http.server.SimpleHTTPRequestHandler
-            # run in thread
+            import http.server, threading, socket, json as _j
+            from urllib.parse import urlparse, parse_qs
+
+            class LiveHandler(http.server.BaseHTTPRequestHandler):
+                def do_GET(self):
+                    try:
+                        parsed = urlparse(self.path)
+                        if parsed.path == "/__nish/files":
+                            qs = parse_qs(parsed.query)
+                            rel = (qs.get("path") or ["."])[0]
+                            base = safe_path(rel) if rel and rel != "." else WORKSPACE
+                            if not base.exists():
+                                self.send_response(404); self.send_header("Content-Type","application/json"); self.end_headers()
+                                self.wfile.write(_j.dumps({"ok": False, "error": f"no such dir {rel}"}).encode())
+                                return
+                            files = []
+                            if base.is_file():
+                                files = [str(base.relative_to(WORKSPACE))]
+                            else:
+                                for child in sorted(base.rglob("*")):
+                                    try:
+                                        relp = child.relative_to(WORKSPACE)
+                                    except: continue
+                                    if len(relp.parts) > 6: continue
+                                    files.append(("dir/" if child.is_dir() else "") + str(relp))
+                                    if len(files) > 200: break
+                            self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Access-Control-Allow-Origin","*"); self.end_headers()
+                            self.wfile.write(_j.dumps({"ok": True, "path": rel, "files": files, "count": len(files)}).encode())
+                            return
+                        if parsed.path == "/__nish/file":
+                            qs = parse_qs(parsed.query)
+                            rel = (qs.get("path") or [""])[0]
+                            if not rel:
+                                self.send_response(400); self.end_headers(); return
+                            target = safe_path(rel)
+                            if not target.is_file():
+                                self.send_response(404); self.send_header("Content-Type","application/json"); self.end_headers()
+                                self.wfile.write(_j.dumps({"ok": False, "error": f"no file {rel}"}).encode())
+                                return
+                            data = target.read_bytes()
+                            ctype = "text/plain; charset=utf-8"
+                            if target.suffix.lower() in (".png",".jpg",".jpeg"): ctype="image/png"
+                            elif target.suffix.lower()==".json": ctype="application/json"
+                            self.send_response(200); self.send_header("Content-Type", ctype); self.send_header("Access-Control-Allow-Origin","*"); self.end_headers()
+                            self.wfile.write(data)
+                            return
+                        if parsed.path == "/__nish/chat":
+                            hist = load_chat()
+                            self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Access-Control-Allow-Origin","*"); self.end_headers()
+                            self.wfile.write(_j.dumps(hist).encode())
+                            return
+                        if parsed.path == "/__nish/tools":
+                            txt = TOOLS_LOG.read_text(encoding="utf-8") if TOOLS_LOG.is_file() else ""
+                            lines = [ _j.loads(l) for l in txt.strip().split("\n") if l.strip() ] if txt.strip() else []
+                            self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Access-Control-Allow-Origin","*"); self.end_headers()
+                            self.wfile.write(_j.dumps(lines[-40:]).encode())
+                            return
+                        if parsed.path == "/__nish/ping":
+                            self.send_response(200); self.send_header("Content-Type","application/json"); self.end_headers()
+                            self.wfile.write(_j.dumps({"ok": True, "workspace": str(WORKSPACE), "files": len(list(WORKSPACE.rglob("*")))}).encode())
+                            return
+                        # fallback: serve static files from ROOT for Vercel preview
+                        if ".." in parsed.path:
+                            self.send_response(403); self.end_headers(); return
+                        fpath = (ROOT / parsed.path.lstrip("/")).resolve()
+                        try:
+                            fpath.relative_to(ROOT.resolve())
+                        except:
+                            self.send_response(403); self.end_headers(); return
+                        if fpath.is_dir():
+                            fpath = fpath / "index.html"
+                        if fpath.is_file():
+                            self.send_response(200)
+                            self.send_header("Content-Type","text/html" if fpath.suffix==".html" else "text/plain")
+                            self.send_header("Access-Control-Allow-Origin","*"); self.end_headers()
+                            self.wfile.write(fpath.read_bytes())
+                            return
+                        self.send_response(404); self.end_headers()
+                    except Exception as e:
+                        try: self.send_response(500); self.end_headers(); self.wfile.write(str(e).encode())
+                        except: pass
+                def do_POST(self):
+                    try:
+                        parsed = urlparse(self.path)
+                        length = int(self.headers.get("Content-Length") or 0)
+                        body = self.rfile.read(length) if length else b""
+                        if parsed.path in ("/__nish/chat", "/chat", "/api/chat"):
+                            try: data = _j.loads(body.decode() or "{}")
+                            except: data = {}
+                            msg = str(data.get("message") or data.get("prompt") or "").strip()
+                            if not msg:
+                                self.send_response(400); self.send_header("Content-Type","application/json"); self.end_headers()
+                                self.wfile.write(_j.dumps({"ok": False, "error": "message required"}).encode()); return
+                            # append to chat and queue
+                            hist = load_chat()
+                            hist.append({"role": "user", "content": msg, "time": datetime.now(timezone.utc).isoformat(), "via": "live"})
+                            save_chat(hist)
+                            live_queue.parent.mkdir(parents=True, exist_ok=True)
+                            with live_queue.open("a", encoding="utf-8") as f:
+                                f.write(_j.dumps({"message": msg, "time": datetime.now(timezone.utc).isoformat()}) + "\n")
+                            self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Access-Control-Allow-Origin","*"); self.end_headers()
+                            self.wfile.write(_j.dumps({"ok": True, "queued": True, "message": msg[:200]}).encode())
+                            return
+                        self.send_response(404); self.end_headers()
+                    except Exception as e:
+                        try: self.send_response(500); self.end_headers(); self.wfile.write(str(e).encode())
+                        except: pass
+                def log_message(self, format, *args):
+                    # suppress default log, we already print via paint if needed
+                    return
+
             def serve():
-                import http.server
-                os.chdir(str(ROOT))
-                srv = http.server.HTTPServer(("127.0.0.1", 8787), handler)
+                # do NOT chdir globally - handler uses absolute ROOT paths
+                srv = http.server.HTTPServer(("127.0.0.1", 8787), LiveHandler)
+                print(paint("[tunnel] live handler on 127.0.0.1:8787 — /__nish/files, /__nish/file, /__nish/chat", "tool"), flush=True)
                 srv.serve_forever()
             t = threading.Thread(target=serve, daemon=True)
             t.start()
@@ -425,14 +533,14 @@ def main() -> None:
             # try cloudflared
             cf = subprocess.run(["which", "cloudflared"], capture_output=True, text=True)
             if cf.returncode == 0:
-                proc = subprocess.Popen(["cloudflared", "tunnel", "--url", "http://127.0.0.1:8787", "--no-autoupdate"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                # read for URL for up to 20s
+                proc = subprocess.Popen(["cloudflared", "tunnel", "--url", "http://127.0.0.1:8787", "--no-autoupdate"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
                 start = time.time()
                 url = ""
                 while time.time() - start < 20:
                     line = proc.stdout.readline() if proc.stdout else ""
                     if not line:
-                        time.sleep(0.5)
+                        time.sleep(0.3)
+                        if proc.poll() is not None: break
                         continue
                     print(line, end="", flush=True)
                     if "trycloudflare.com" in line:
@@ -443,7 +551,7 @@ def main() -> None:
                             break
                 if url:
                     tunnel_url = url
-                    print(paint(f"[tunnel] live at {url}", "success"), flush=True)
+                    print(paint(f"[tunnel] live at {url} — files/chat live via /__nish/*", "success"), flush=True)
                     TUNNEL_FILE.parent.mkdir(parents=True, exist_ok=True)
                     TUNNEL_FILE.write_text(url + "\n", encoding="utf-8")
                     gh_out = os.environ.get("GITHUB_OUTPUT")
@@ -453,7 +561,6 @@ def main() -> None:
                 else:
                     print(paint("[tunnel] could not extract URL (continuing without live tunnel)", "warning"), flush=True)
             else:
-                # try download
                 print(paint("[tunnel] cloudflared not installed; installing …", "warning"), flush=True)
                 subprocess.run("curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared && chmod +x /tmp/cloudflared && sudo mv /tmp/cloudflared /usr/local/bin/cloudflared", shell=True, timeout=30)
                 print(paint("[tunnel] installed, retry — tunnel URL will be in logs", "tool"), flush=True)
@@ -478,6 +585,11 @@ def main() -> None:
             break
         thought = parsed.get("thought") or ""
         tool_calls = parsed.get("tool_calls") or []
+        # Enforce mandatory subagent on first round
+        if rnd == 1 and not any(str(c.get("tool") or c.get("name") or "").lower() == "subagent" for c in tool_calls):
+            print(paint(f"[{label}] first round missing subagent — injecting mandatory delegation", "warning"), flush=True)
+            fallback_instr = f"Create a focused outline or core code for: {prompt[:150]} — keep under 300 chars, no full doc"
+            tool_calls = [{"tool": "subagent", "instruction": fallback_instr, "input": prompt[:400], "topic": "code"}] + tool_calls
         # log thinking in coloured box (ollama_stream already did)
         print(paint(f"[agent thought] {thought[:220]}", "thinking"), flush=True)
         print(paint(f"[agent] {answer[:400]}", "answer"), flush=True)
@@ -521,6 +633,10 @@ def main() -> None:
 
         # brief pause
         time.sleep(0.3)
+
+    # Tunnel live hint — actual long idle is handled by workflow step after upload
+    if tunnel_url and args.tunnel:
+        print(paint(f"[nish-agent] live at {tunnel_url} — files at /__nish/files , chat at /__nish/chat (POST message) — workflow will stay idle after upload", "success"), flush=True)
 
     # final summary to step summary
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
