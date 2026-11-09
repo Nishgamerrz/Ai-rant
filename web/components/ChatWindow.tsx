@@ -1,6 +1,5 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { kindForLine, stripAnsi } from "@/lib/colors";
 
 type Msg = { role: string; content: string; thought?: string; tool_calls?: any[]; time?: string; tool?: string; output?: any };
 
@@ -9,7 +8,7 @@ export function ChatWindow({ runId, tunnelUrl, liveMode }: { runId: number | nul
   const [tools, setTools] = useState<any[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<string>("idle");
+  const [status, setStatus] = useState("idle");
   const [err, setErr] = useState("");
   const scrollerRef = useRef<HTMLDivElement>(null);
 
@@ -20,12 +19,12 @@ export function ChatWindow({ runId, tunnelUrl, liveMode }: { runId: number | nul
       if (!res.ok) return;
       const data = await res.json();
       if (Array.isArray(data)) setMessages(data);
-      const tRes = await fetch(`/api/github/artifact?run=${runId}&name=nish-agent-${runId}&json=tunnel_url.txt`, { cache: "no-store" }).then((r) => r.text()).catch(() => "");
       // tools jsonl
       const toolsRes = await fetch(`/api/github/artifact?run=${runId}&name=nish-agent-${runId}&json=agent_tools.jsonl`, { cache: "no-store" }).then((r) => r.text()).catch(() => "");
       if (toolsRes) {
         const lines = toolsRes.trim().split("\n").filter(Boolean);
-        setTools(lines.map((l) => { try { return JSON.parse(l); } catch { return { raw: l }; } }));
+        const parsed = lines.map((l) => { try { return JSON.parse(l); } catch { return { raw: l }; } }).slice(-20);
+        setTools(parsed);
       }
     } catch {}
   }
@@ -48,10 +47,7 @@ export function ChatWindow({ runId, tunnelUrl, liveMode }: { runId: number | nul
     }
     fetchChat();
     fetchStatus();
-    const id = setInterval(() => {
-      fetchChat();
-      fetchStatus();
-    }, 4000);
+    const id = setInterval(() => { fetchChat(); fetchStatus(); }, 3500);
     return () => clearInterval(id);
   }, [runId]);
 
@@ -60,25 +56,24 @@ export function ChatWindow({ runId, tunnelUrl, liveMode }: { runId: number | nul
   }, [messages]);
 
   async function send() {
-    if (!input.trim()) return;
+    if (!input.trim() || busy) return;
     const text = input.trim();
     setInput("");
     setBusy(true);
     setErr("");
-    // optimistic
     setMessages((m) => [...m, { role: "user", content: text, time: new Date().toISOString() }]);
     try {
-      if (tunnelUrl && liveMode) {
+      if (tunnelUrl) {
         const res = await fetch("/api/agent/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text, tunnel_url: tunnelUrl }) });
         const j = await res.json();
-        if (!j.ok && j.mode === "batch") {
-          setErr(j.hint || "No live tunnel — watching batch chat.");
+        if (!j.ok) {
+          if (j.mode === "batch") setErr(j.hint || "Live tunnel unavailable — watching batch output.");
+          else setErr(j.error || "Tunnel error");
         } else {
-          setMessages((m) => [...m, { role: "assistant", content: String(j.reply || j.error || "(no reply)"), time: new Date().toISOString() }]);
+          setMessages((m) => [...m, { role: "assistant", content: String(j.reply || "(no reply)"), time: new Date().toISOString() }]);
         }
       } else {
-        // Batch mode: we can't push into a running workflow without tunnel — explain
-        setErr("Live tunnel not enabled for this run. Start a New chat with ☑ Cloudflare tunnel for live replies. Until then, the assistant answers appear by polling the workflow artifact (agent_chat.json) every ~4s while the job runs.");
+        setErr("Live chat requires the Cloudflare tunnel. Start a new workflow with “Enable live tunnel” checked. Meanwhile, the agent’s replies appear automatically every few seconds from the workflow artifact.");
       }
     } catch (e: any) {
       setErr(String(e.message || e));
@@ -89,94 +84,145 @@ export function ChatWindow({ runId, tunnelUrl, liveMode }: { runId: number | nul
 
   if (!runId) {
     return (
-      <div className="flex-1 grid place-items-center p-8 text-center">
-        <div className="max-w-lg">
-          <div className="h-12 w-12 rounded-2xl bg-zinc-800 grid place-items-center mx-auto text-xl">💬</div>
-          <h2 className="mt-4 text-xl font-semibold">No chat selected</h2>
-          <p className="mt-2 text-sm text-zinc-400">Pick a chat from the sidebar, or hit <b className="text-zinc-200">＋ New chat</b> to choose what to create — <b className="text-zinc-200">Agent (search / web / code / files)</b> with model selection (Hard is best for agent, as you asked) or <b className="text-zinc-200">RBX Short</b> — then we dispatch the workflow via <code className="bg-zinc-800 px-1 rounded">GITHUB_TOKEN</code> and you watch the coloured logs + file explorer right here.</p>
-          <div className="mt-4 rounded-xl bg-zinc-900 border border-zinc-800 p-3 text-xs text-zinc-500 text-left">Secure: the token lives only in Vercel env <code className="bg-zinc-800 px-1 rounded">GITHUB_TOKEN</code> and is read server-side in <code className="bg-zinc-800 px-1 rounded">/api/github/*</code>. The browser never sees it.</div>
+      <div className="flex-1 flex items-center justify-center p-8">
+        <div className="max-w-md w-full text-center">
+          <div className="h-14 w-14 rounded-2xl bg-zinc-900 border border-zinc-800 grid place-items-center mx-auto shadow-soft">
+            <svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M7 7H15M7 11H15M7 15H12" stroke="#a1a1aa" strokeWidth="1.4" strokeLinecap="round"/><rect x="3.5" y="2.5" width="15" height="17" rx="2" stroke="#27272a" strokeWidth="1.2"/></svg>
+          </div>
+          <h2 className="mt-4 text-[15px] font-semibold tracking-tight">Select a workflow</h2>
+          <p className="mt-1.5 text-sm leading-relaxed text-zinc-500">Choose a run from the sidebar or create a new one. Live messages, tool activity, and generated files will appear here in real time.</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
+    <div className="flex-1 flex flex-col min-h-0 bg-[#09090b]">
       {/* Header */}
-      <div className="shrink-0 px-4 py-3 border-b border-zinc-800 bg-zinc-950/60 backdrop-blur flex items-center gap-3">
-        <div className="min-w-0">
-          <div className="text-sm font-semibold flex items-center gap-2">
-            Run #{runId}
-            <span className="text-xs px-2 py-0.5 rounded-full bg-zinc-800 border border-zinc-700">{status}</span>
+      <div className="shrink-0 h-14 px-4 flex items-center gap-3 border-b border-zinc-800 bg-zinc-900/40 backdrop-blur">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold tracking-tight">Run #{runId}</span>
+            <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium border ${status.includes("success") ? "bg-emerald-950/40 border-emerald-900 text-emerald-300" : status.includes("failure") ? "bg-red-950/30 border-red-900 text-red-300" : status.includes("in_progress") || status.includes("queued") ? "bg-amber-950/30 border-amber-900 text-amber-300" : "bg-zinc-800 border-zinc-700 text-zinc-400"}`}>
+              {status}
+            </span>
             {tunnelUrl ? (
-              <a href={tunnelUrl} target="_blank" className="text-xs text-violet-300 underline">tunnel live → {tunnelUrl.replace("https://", "").slice(0, 22)}…</a>
+              <span className="hidden sm:inline-flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded-full bg-emerald-950/30 border border-emerald-900/50 text-emerald-300">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" /> Live
+              </span>
             ) : (
-              <span className="text-xs text-zinc-500">batch mode — polling artifact</span>
+              <span className="hidden sm:inline text-[11px] px-2 py-0.5 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-500">Polling</span>
             )}
           </div>
-          <div className="text-xs text-zinc-500">{tools.length ? `${tools.length} tool call(s) · ` : ""}{messages.length} messages · {liveMode ? "live via Cloudflare tunnel when enabled" : "polling dist/agent_chat.json"}</div>
+          <div className="text-[11px] text-zinc-600 flex items-center gap-2">
+            {tunnelUrl ? <a href={tunnelUrl} target="_blank" className="hover:text-zinc-400 transition-colors truncate max-w-[180px]">{tunnelUrl.replace("https://", "")}</a> : <span>Artifact polling · {tools.length} tools · {messages.length} messages</span>}
+          </div>
         </div>
-        <a href={`https://github.com/Nishgamerrz/Ai-rant/actions/runs/${runId}`} target="_blank" className="ml-auto text-xs rounded-lg border border-zinc-700 px-3 py-1.5 hover:bg-zinc-800">Open in GitHub →</a>
+        <a href={`https://github.com/Nishgamerrz/Ai-rant/actions/runs/${runId}`} target="_blank" className="h-8 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-xs font-medium text-zinc-300 hover:text-white transition-colors hidden sm:flex items-center gap-1.5">
+          GitHub <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M3 7L7 3M7 3H4M7 3V6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+        </a>
       </div>
 
       {/* Tool chips */}
       {tools.length > 0 && (
-        <div className="shrink-0 px-4 py-2 border-b border-zinc-900 bg-zinc-950/40 flex gap-1.5 overflow-x-auto">
-          {tools.slice(-12).map((t, i) => (
-            <span key={i} className="text-xs whitespace-nowrap rounded-full bg-violet-950/50 border border-violet-800 text-violet-200 px-2 py-1">{t.tool || "tool"} · {String(t.input?.query || t.input?.path || t.input?.cmd || "").slice(0, 28) || "…"}</span>
+        <div className="shrink-0 px-3 py-2 border-b border-zinc-800/60 bg-zinc-900/20 flex gap-1.5 overflow-x-auto scrollbar-thin">
+          {tools.slice(-10).map((t, i) => (
+            <span key={i} className="shrink-0 inline-flex items-center gap-1.5 text-[11px] font-medium rounded-full bg-zinc-900 border border-zinc-800 text-zinc-400 px-2.5 py-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-violet-500" />
+              {t.tool || "tool"} <span className="text-zinc-600 hidden sm:inline">· {String(t.input?.query || t.input?.path || t.input?.cmd || "").slice(0, 22) || "…"}</span>
+            </span>
           ))}
         </div>
       )}
 
       {/* Messages */}
-      <div ref={scrollerRef} className="flex-1 overflow-auto p-4 space-y-4">
-        {messages.length === 0 && <div className="text-sm text-zinc-600">Waiting for the workflow to start… logs and AI messages appear here with <b className="text-zinc-400">plan next / previous loads</b> and colours (thinking grey, answer cyan, tool violet).</div>}
-        {messages.map((m, i) => {
-          const isUser = m.role === "user";
-          const isTool = m.role === "tool";
-          const isAssist = m.role === "assistant";
-          if (isTool) {
-            const out = typeof m.output === "string" ? m.output : JSON.stringify(m.output, null, 2);
+      <div ref={scrollerRef} className="flex-1 overflow-auto">
+        <div className="max-w-3xl mx-auto w-full p-4 sm:p-6 space-y-4">
+          {messages.length === 0 && (
+            <div className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-900/20 p-6 text-center">
+              <div className="text-sm font-medium text-zinc-300">Waiting for agent</div>
+              <div className="text-xs text-zinc-600 mt-1 leading-relaxed">The workflow is starting. Messages and tool calls will stream here as the model works. If live tunnel is enabled, you can chat in real time.</div>
+            </div>
+          )}
+          {messages.map((m, i) => {
+            const isUser = m.role === "user";
+            const isTool = m.role === "tool";
+            if (isTool) {
+              const out = typeof m.output === "string" ? m.output : JSON.stringify(m.output, null, 2);
+              return (
+                <div key={i} className="rounded-2xl border border-violet-900/30 bg-violet-950/10 overflow-hidden animate-slideIn">
+                  <div className="px-3.5 py-2 bg-violet-950/20 border-b border-violet-900/20 flex items-center gap-2">
+                    <span className="h-6 w-6 rounded-lg bg-violet-600/20 border border-violet-700/30 grid place-items-center">
+                      <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4 4.5L4 7.5M6 3V9M8 4.5V7.5" stroke="#a78bfa" strokeWidth="1.2" strokeLinecap="round"/></svg>
+                    </span>
+                    <span className="text-xs font-semibold tracking-wide text-violet-300">Tool · {m.tool}</span>
+                    <span className="ml-auto text-[11px] text-violet-300/60">output</span>
+                  </div>
+                  <pre className="p-3.5 text-xs font-mono leading-relaxed text-zinc-400 whitespace-pre-wrap break-words max-h-[220px] overflow-auto">{out.slice(0, 3000)}</pre>
+                </div>
+              );
+            }
             return (
-              <div key={i} className="rounded-xl border border-violet-900/40 bg-violet-950/20 p-3">
-                <div className="text-xs text-violet-300 font-semibold">🔧 tool · {m.tool}</div>
-                <pre className="mt-1 text-xs font-mono text-zinc-300 whitespace-pre-wrap break-words max-h-[200px] overflow-auto">{out.slice(0, 2000)}</pre>
+              <div key={i} className={`flex gap-3 ${isUser ? "justify-end" : "justify-start"} animate-slideIn`}>
+                {!isUser && (
+                  <div className="h-8 w-8 rounded-xl bg-zinc-800 border border-zinc-700 grid place-items-center shrink-0 mt-0.5">
+                    <span className="text-[11px] font-bold tracking-wide text-zinc-400">AI</span>
+                  </div>
+                )}
+                <div className={`max-w-[82%] rounded-2xl px-4 py-3 ${isUser ? "bg-white text-zinc-900 shadow-soft" : "bg-zinc-900 border border-zinc-800 text-zinc-100 shadow-soft"}`}>
+                  {m.thought && !isUser && (
+                    <details className="mb-2.5 group">
+                      <summary className="list-none flex items-center gap-1.5 text-[11px] font-semibold tracking-wide text-zinc-500 hover:text-zinc-400 cursor-pointer select-none">
+                        <svg width="10" height="10" viewBox="0 0 10 10" fill="none" className="group-open:rotate-90 transition-transform"><path d="M3 2L7 5L3 8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                        Reasoning
+                      </summary>
+                      <div className="mt-2 rounded-xl bg-zinc-800/50 border border-zinc-800 p-3 text-xs font-mono leading-relaxed text-zinc-400 whitespace-pre-wrap break-words">{String(m.thought).slice(0, 2000)}</div>
+                    </details>
+                  )}
+                  <div className="text-sm leading-relaxed whitespace-pre-wrap break-words">{m.content}</div>
+                  {m.tool_calls && (m.tool_calls as any[]).length > 0 && (
+                    <div className="mt-2.5 flex flex-wrap gap-1.5">
+                      {(m.tool_calls as any[]).map((c: any, j: number) => (
+                        <span key={j} className="text-[11px] font-medium rounded-full bg-zinc-800 border border-zinc-700 text-zinc-400 px-2 py-1">{c.tool || c.name || "tool"}</span>
+                      ))}
+                    </div>
+                  )}
+                  {m.time && <div className={`mt-2 text-[11px] ${isUser ? "text-zinc-500" : "text-zinc-600"}`}>{new Date(m.time).toLocaleTimeString()}</div>}
+                </div>
+                {isUser && <div className="h-8 w-8 rounded-xl bg-white border border-zinc-200 grid place-items-center shrink-0 mt-0.5"><span className="text-xs">●</span></div>}
               </div>
             );
-          }
-          return (
-            <div key={i} className={`flex gap-3 ${isUser ? "justify-end" : "justify-start"}`}>
-              {!isUser && <div className="h-8 w-8 rounded-xl bg-zinc-800 grid place-items-center text-sm shrink-0">{isAssist ? "🤖" : "·"}</div>}
-              <div className={`max-w-[78%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${isUser ? "bg-white text-zinc-900" : "bg-zinc-900 border border-zinc-800 text-zinc-100"}`}>
-                {m.thought && !isUser && (
-                  <details className="mb-2">
-                    <summary className="text-xs text-zinc-500 cursor-pointer">thinking</summary>
-                    <div className="mt-1 text-xs font-mono text-zinc-400 whitespace-pre-wrap">{stripAnsi(m.thought).slice(0, 1200)}</div>
-                  </details>
-                )}
-                <div className="whitespace-pre-wrap break-words">{m.content}</div>
-                {isAssist && m.tool_calls && (m.tool_calls as any[]).length > 0 && <div className="mt-2 flex flex-wrap gap-1">{(m.tool_calls as any[]).map((c: any, j: number) => <span key={j} className="text-xs rounded-full bg-zinc-800 border border-zinc-700 px-2 py-0.5">{c.tool || c.name || "tool"}</span>)}</div>}
-                {m.time && <div className="mt-1 text-xs opacity-60">{new Date(m.time).toLocaleTimeString()}</div>}
-              </div>
-            </div>
-          );
-        })}
-        {err && <div className="rounded-xl border border-amber-800 bg-amber-950/30 text-amber-200 p-3 text-sm">{err}</div>}
+          })}
+          {err && <div className="rounded-2xl border border-amber-900/50 bg-amber-950/20 p-3.5 text-sm leading-relaxed text-amber-200">{err}</div>}
+        </div>
       </div>
 
       {/* Composer */}
-      <div className="shrink-0 p-3 border-t border-zinc-800 bg-zinc-950/60">
-        <div className="flex gap-2">
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-            placeholder={tunnelUrl ? "Message the running agent live (via Cloudflare tunnel)…" : "Live chat needs Cloudflare tunnel — start a new chat with it enabled. Batch chat replies appear by polling."}
-            className="flex-1 rounded-xl bg-zinc-900 border border-zinc-800 px-4 py-3 text-sm text-white placeholder:text-zinc-600"
-          />
-          <button onClick={send} disabled={busy || !input.trim()} className="rounded-xl bg-white text-zinc-900 font-semibold px-5 py-3 text-sm disabled:opacity-50">Send</button>
+      <div className="shrink-0 p-3 sm:p-4 border-t border-zinc-800 bg-zinc-900/30">
+        <div className="max-w-3xl mx-auto">
+          <div className="flex gap-2">
+            <div className="flex-1 relative">
+              <input
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+                placeholder={tunnelUrl ? "Send a message to the live agent…" : "Live chat requires tunnel — new workflow with tunnel enabled for real-time"}
+                className="w-full h-11 rounded-2xl bg-zinc-900 border border-zinc-800 focus:border-zinc-700 focus:bg-zinc-900 outline-none px-4 pr-12 text-sm text-white placeholder:text-zinc-600 transition-colors"
+              />
+              <span className="absolute right-3 top-3 text-zinc-600">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 3.5V12.5M3.5 8H12.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" opacity="0.5"/></svg>
+              </span>
+            </div>
+            <button onClick={send} disabled={busy || !input.trim()} className="h-11 px-5 rounded-2xl bg-white hover:bg-zinc-100 text-zinc-900 font-medium text-sm disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-2 shrink-0">
+              {busy ? <span className="h-4 w-4 border-2 border-zinc-300 border-t-zinc-900 rounded-full animate-spin" /> : <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7H11M11 7L7 3M11 7L7 11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+              Send
+            </button>
+          </div>
+          <div className="mt-2 flex items-center gap-2 text-[11px] text-zinc-600">
+            <span>⏎ send · ⇧⏎ newline</span>
+            <span className="hidden sm:inline">· {liveMode && tunnelUrl ? "Connected via Cloudflare tunnel" : "Polling artifact"}</span>
+          </div>
         </div>
-        <div className="mt-2 text-xs text-zinc-600">Press Enter to send · Shift+Enter for newline · Communication uses <code className="bg-zinc-800 px-1 rounded">GITHUB_TOKEN</code> server-side and a free <code className="bg-zinc-800 px-1 rounded">*.trycloudflare.com</code> tunnel when enabled; all tool use is logged to <code className="bg-zinc-800 px-1 rounded">dist/agent_tools.jsonl</code> and shown in the chips above.</div>
       </div>
     </div>
   );

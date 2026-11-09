@@ -2,17 +2,35 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Dark grey studio theme — matches the spec "very good dark gui grey gui" */
 :root { color-scheme: dark; }
-html, body { height: 100%; }
-body { background: #0e0e10; color: #e8e8ea; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
-* { scrollbar-width: thin; scrollbar-color: #3a3a40 #121214; }
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: #2c2c32; border-radius: 8px; }
-::-webkit-scrollbar-track { background: #121214; }
 
-/* ANSI log colours — mirrors tools/console_style.py so logs look identical live */
-.log-thinking { color: #d1d5db; }
+* { scrollbar-width: thin; scrollbar-color: #27272a #0a0a0b; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: #27272a; border-radius: 9999px; }
+::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+::-webkit-scrollbar-track { background: transparent; }
+
+html, body { height: 100%; }
+html { scroll-behavior: smooth; }
+body {
+  background: #09090b;
+  color: #fafafa;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Subtle grid + vignette for premium feel */
+.bg-grid {
+  background-image:
+    linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+/* ANSI log colours — mirrors tools/console_style.py */
+.log-thinking { color: #a1a1aa; }
 .log-answer   { color: #22d3ee; }
 .log-label    { color: #93c5fd; }
 .log-notice   { color: #fde68a; }
@@ -21,8 +39,31 @@ body { background: #0e0e10; color: #e8e8ea; font-family: Inter, ui-sans-serif, s
 .log-error    { color: #fca5a5; }
 .log-tool     { color: #c4b5fd; }
 .log-plan     { color: #93c5fd; }
-.log-thought  { color: #9ca3af; }
-.log-frame    { color: #6b7280; }
+.log-thought  { color: #71717a; }
+.log-frame    { color: #52525b; }
+
+/* Animations */
+@keyframes pulse-subtle { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+@keyframes slideIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+
+.animate-slideIn { animation: slideIn 0.2s ease-out; }
+.animate-pulse-subtle { animation: pulse-subtle 1.8s ease-in-out infinite; }
+
+/* Glass */
+.glass {
+  background: rgba(24, 24, 27, 0.6);
+  backdrop-filter: blur(12px) saturate(1.2);
+  -webkit-backdrop-filter: blur(12px) saturate(1.2);
+}
+.glass-strong {
+  background: rgba(24, 24, 27, 0.85);
+  backdrop-filter: blur(16px) saturate(1.2);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+}
+
+/* Focus */
+*:focus-visible { outline: 2px solid #7c3aed; outline-offset: 2px; }
 
 /* Selection */
-::selection { background: #2a2a30; }
+::selection { background: rgba(124, 58, 237, 0.3); }
