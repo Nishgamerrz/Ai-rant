@@ -98,6 +98,42 @@ class PageScriptTests(unittest.TestCase):
     def test_the_cast_cannot_walk_through_the_walls(self):
         self.assertIn("roomBoundsFrom(DATA.plan.interior)", self.script)
 
+    def test_the_camera_helpers_only_get_names_the_page_declares(self):
+        """Run #111 died at the preflight with `cameraBlockers is not defined`.
+
+        The camera refactor for indoor scenes rewrote the two calls and dropped
+        the `const cameraBlockers=...` line that fed them. Nothing caught it
+        locally: the page is a string inside a Node file, so `node --check` only
+        proves it parses, and the name was only read inside the browser. A bare
+        identifier handed to one of the camera helpers must therefore be declared
+        by the page itself.
+        """
+        declared = set(re.findall(r"\b(?:const|let|var|class|function)\s+([A-Za-z_$][\w$]*)", self.script))
+        self.assertIn("cameraBlockers", declared, "the page must build the camera blocker list")
+        bare = set()
+        for helper in ("chooseSafeCamera(", "chooseFaceCamera("):
+            for match in re.finditer(re.escape(helper), self.script):
+                depth, index, current = 1, match.end(), ""
+                while index < len(self.script) and depth:
+                    char = self.script[index]
+                    if char in "([{":
+                        depth += 1
+                    elif char in ")]}":
+                        depth -= 1
+                        if depth == 0:
+                            bare.add(current.strip())
+                            break
+                    if depth == 1 and char == ",":
+                        bare.add(current.strip())
+                        current = ""
+                    else:
+                        current += char
+                    index += 1
+        bare = {name for name in bare if re.fullmatch(r"[A-Za-z_$][\w$]*", name)}
+        self.assertIn("cameraBlockers", bare)
+        missing = sorted(name for name in bare if name not in declared)
+        self.assertEqual(missing, [], f"the page reads names it never declares: {missing}")
+
 
 class RigidRigTests(unittest.TestCase):
     @classmethod
