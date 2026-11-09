@@ -181,6 +181,26 @@ jobs:
           path: ~/.ollama/models
           key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'animation_best' && 'deepseek-r1-8b-v1' || inputs.model_quality == 'smart_11b' && 'qwen3-14b-v1' || inputs.model_quality == 'hard' && 'qwen3-8b-v3' || inputs.model_quality == 'medium' && 'qwen3-8b-v1' || 'qwen3-4b-v1' }}
 
+      - name: Install cloudflared for live tunnel (pre-install so URL appears instantly)
+        if: inputs.enable_tunnel == 'true'
+        run: |
+          if which cloudflared >/dev/null 2>&1; then echo "cloudflared already installed: $(cloudflared --version)"; exit 0; fi
+          echo "Installing cloudflared for live tunnel (robust, handles 504)..."
+          for i in 1 2 3 4 5; do
+            if curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared; then
+              test -s /tmp/cloudflared && [ "$(stat -c%s /tmp/cloudflared 2>/dev/null || stat -f%z /tmp/cloudflared 2>/dev/null || echo 0)" -gt 100000 ] && break
+            fi
+            echo "curl failed $i/5, trying wget..."; 
+            if wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O /tmp/cloudflared; then
+              test -s /tmp/cloudflared && break
+            fi
+            echo "download failed $i/5"; sleep $((i*5)); rm -f /tmp/cloudflared
+          done
+          test -s /tmp/cloudflared || { echo "cloudflared download failed after 5 attempts (GitHub 504?) — continuing without tunnel"; exit 0; }
+          chmod +x /tmp/cloudflared
+          sudo mv /tmp/cloudflared /usr/local/bin/cloudflared
+          cloudflared --version || echo "cloudflared version check failed"
+
       - name: Run NishAgent — web, files, images, commands, sub-agent
         id: agent
         env:
