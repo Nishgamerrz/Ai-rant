@@ -76,7 +76,7 @@ export function FileExplorer({ runId, onOpenFile, tunnelUrl }: { runId: number |
   async function loadLive() {
     if (!runId) return;
     // try live via tunnel if available, else via logs tail inference
-    const liveUrl = tunnelUrl ? `/api/agent/files?run=${runId}&path=.` : null;
+    const liveUrl = tunnelUrl ? `/api/agent/files?run=${runId}&path=.&tunnel=${encodeURIComponent(tunnelUrl)}` : null;
     if (liveUrl) {
       try {
         const r = await fetch(liveUrl, { cache: "no-store" });
@@ -192,7 +192,7 @@ export function FileExplorer({ runId, onOpenFile, tunnelUrl }: { runId: number |
                     try {
                       if (liveMode && tunnelUrl) {
                         // try live file fetch via tunnel
-                        const res = await fetch(`/api/agent/files?run=${runId}&path=${encodeURIComponent(f.path)}`, { cache: "no-store" });
+                        const res = await fetch(`/api/agent/files?run=${runId}&path=${encodeURIComponent(f.path)}&tunnel=${encodeURIComponent(tunnelUrl)}`, { cache: "no-store" });
                         const ct = res.headers.get("content-type") || "";
                         if (res.ok) {
                           if (ct.includes("application/json")) {

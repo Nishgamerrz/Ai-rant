@@ -94,8 +94,8 @@ Available tools — return them as JSON exactly like this (inside ```json):
 
 Rules:
 - `tool_calls` may be empty if you just want to answer — BUT for this workflow the SUB-AGENT IS MANDATORY AT THE START.
-  In your FIRST JSON you MUST include at least one `subagent` call (topic code/models/map etc) for your hardest subtask. The helper is Gemini with a Groq fallback that tries the free best models openai/gpt-oss-120b → openai/gpt-oss-20b → qwen/qwen3-32b → llama-3.3-70b-versatile → llama-3.1-8b-instant, has the full file-rules guide, and returns provider, seconds, whether it edited a file, and FULL text. After it returns you MUST accept (include id in subagent_review and paste its result verbatim) or decline (leave out and build your own replacement) — never re-ask the same task twice and do not leave it empty.
-  Keep each subagent instruction under 300 chars and focused: do NOT ask for an entire 20-page document with 50+ illustrations in one call — ask for a 1-page outline or a single section first, then expand in later rounds. The helper is capped at ~8k tokens and will be cut off if you request a huge doc.
+  In your FIRST JSON you MUST include at least one `subagent` call (topic code/models/map etc) for your hardest subtask. The helper is Gemini with a Groq fallback that tries the free best models llama-3.3-70b-versatile → qwen/qwen3-32b → llama-4-maverick → deepseek-r1-distill → openai/gpt-oss-120b → openai/gpt-oss-20b → llama-3.1-8b-instant (auto-retries with larger 16k window if cut), has the full file-rules guide, and returns provider, seconds, whether it edited a file, and FULL text. After it returns you MUST accept (include id in subagent_review and paste its result verbatim) or decline (leave out and build your own replacement) — never re-ask the same task twice and do not leave it empty.
+  Keep each subagent instruction under 300 chars and focused: do NOT ask for an entire 20-page document with 50+ illustrations in one call — ask for a 1-page outline or a single section first, then expand in later rounds. The helper is capped at ~8k tokens (Groq now 8192→16384, Gemini 8192→16384) and will retry once if cut, but still keep requests focused.
 - `path` is always relative to the workspace root (dist/agent_workspace). Do not use absolute paths or .. .
 - `create_file` creates or overwrites; directories are made as needed.
 - `run_cmd` runs a shell command with 60 s timeout; output is returned. Only use it for real tasks, not to list files (use list_files).
@@ -250,7 +250,7 @@ def do_subagent(instruction: str, inp: str, topic: str) -> dict:
             try:
                 data = _json.loads(op.read_text(encoding="utf-8"))
                 r = (data.get("results") or [{}])[0]
-                return {"ok": bool(r.get("ok")), "text": (r.get("text") or "")[:8000], "model": data.get("model"), "raw": out[:2000]}
+                return {"ok": bool(r.get("ok")), "text": (r.get("text") or "")[:16000], "model": data.get("model"), "raw": out[:4000]}
             except Exception as exc:
                 return {"ok": False, "error": str(exc), "raw": out[:2000]}
         return {"ok": False, "error": "no output", "raw": out[:2000]}
@@ -333,7 +333,7 @@ def run_one_round(model: str, prompt: str, history: list[dict], label: str, enab
         elif turn.get("role") == "assistant":
             messages.append({"role": "assistant", "content": turn["content"]})
         elif turn.get("role") == "tool":
-            messages.append({"role": "user", "content": f"Tool result for {turn.get('tool')}: {json.dumps(turn.get('output'), ensure_ascii=False)[:7000]}"})
+            messages.append({"role": "user", "content": f"Tool result for {turn.get('tool')}: {json.dumps(turn.get('output'), ensure_ascii=False)[:12000]}"})
     messages.append({"role": "user", "content": prompt})
     req = {
         "model": model,
@@ -341,7 +341,7 @@ def run_one_round(model: str, prompt: str, history: list[dict], label: str, enab
         "think": True,
         "stream": False,
         "keep_alive": "60m",
-        "options": {"temperature": 0.9, "num_predict": 4096, "num_ctx": 8192},
+        "options": {"temperature": 0.9, "num_predict": 8192, "num_ctx": 16384},
         "format": {"type": "object", "properties": {"thought": {"type": "string"}, "answer": {"type": "string"}, "tool_calls": {"type": "array", "items": {"type": "object"}}}, "required": ["answer"]},
     }
     # For local models that don't respect format strictly, we allow freeform too — parse fallback handles it.
@@ -562,8 +562,51 @@ def main() -> None:
                     print(paint("[tunnel] could not extract URL (continuing without live tunnel)", "warning"), flush=True)
             else:
                 print(paint("[tunnel] cloudflared not installed; installing …", "warning"), flush=True)
-                subprocess.run("curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared && chmod +x /tmp/cloudflared && sudo mv /tmp/cloudflared /usr/local/bin/cloudflared", shell=True, timeout=30)
-                print(paint("[tunnel] installed, retry — tunnel URL will be in logs", "tool"), flush=True)
+                ok=False
+                for attempt in range(1,5):
+                    # robust curl with retry-all-errors and fallback to wget; handles 504 gateway from GitHub
+                    res = subprocess.run("curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared || wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O /tmp/cloudflared; test -s /tmp/cloudflared && chmod +x /tmp/cloudflared && sudo mv /tmp/cloudflared /usr/local/bin/cloudflared", shell=True, timeout=60)
+                    if pathlib.Path("/usr/local/bin/cloudflared").exists() and pathlib.Path("/usr/local/bin/cloudflared").stat().st_size > 100000:
+                        ok=True
+                        break
+                    print(paint(f"[tunnel] install attempt {attempt} failed (curl 504?), retrying in {attempt*5}s", "warning"), flush=True)
+                    time.sleep(attempt*5)
+                    # cleanup partial
+                    try: pathlib.Path("/tmp/cloudflared").unlink(missing_ok=True)
+                    except: pass
+                if ok:
+                    print(paint("[tunnel] cloudflared installed, starting tunnel now…", "success"), flush=True)
+                    cf2 = subprocess.run(["which", "cloudflared"], capture_output=True, text=True)
+                    if cf2.returncode == 0:
+                        proc2 = subprocess.Popen(["cloudflared", "tunnel", "--url", "http://127.0.0.1:8787", "--no-autoupdate"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                        start2 = time.time()
+                        url2 = ""
+                        while time.time() - start2 < 20:
+                            line = proc2.stdout.readline() if proc2.stdout else ""
+                            if not line:
+                                time.sleep(0.3)
+                                if proc2.poll() is not None: break
+                                continue
+                            print(line, end="", flush=True)
+                            if "trycloudflare.com" in line:
+                                import re as _re2
+                                m2 = _re2.search(r"https://[a-zA-Z0-9.-]+\.trycloudflare\.com", line)
+                                if m2:
+                                    url2 = m2.group(0)
+                                    break
+                        if url2:
+                            tunnel_url = url2
+                            print(paint(f"[tunnel] live at {url2} — files/chat live via /__nish/* (after install)", "success"), flush=True)
+                            TUNNEL_FILE.parent.mkdir(parents=True, exist_ok=True)
+                            TUNNEL_FILE.write_text(url2 + "\n", encoding="utf-8")
+                            gh_out2 = os.environ.get("GITHUB_OUTPUT")
+                            if gh_out2:
+                                with open(gh_out2, "a", encoding="utf-8") as f:
+                                    f.write(f"tunnel_url={url2}\n")
+                        else:
+                            print(paint("[tunnel] still could not extract URL after install", "warning"), flush=True)
+                else:
+                    print(paint("[tunnel] cloudflared install failed after 3 attempts", "error"), flush=True)
         except Exception as exc:
             print(paint(f"[tunnel] failed: {exc} (continuing)", "warning"), flush=True)
 
@@ -619,7 +662,7 @@ def main() -> None:
                     out = TOOLS[tool](call)
                 except Exception as exc:
                     out = {"ok": False, "error": str(exc)}
-                print(paint(f"[tool {tool}] -> {json.dumps(out, ensure_ascii=False)[:400]}", "plan"), flush=True)
+                print(paint(f"[tool {tool}] -> {json.dumps(out, ensure_ascii=False)[:2000]}", "plan"), flush=True)
             log_tool(tool, call, out)
             results.append({"tool": tool, "input": call, "output": out})
 
@@ -629,7 +672,7 @@ def main() -> None:
         save_chat(history)
 
         # build next prompt as summary of results
-        current_prompt = "Tool results:\n" + json.dumps(results, ensure_ascii=False, indent=2) + "\n\nContinue the task. If you are done, reply with no tool_calls and a final summary. If you still need to do work, return the next tool_calls."
+        current_prompt = "Tool results:\\n" + json.dumps(results, ensure_ascii=False, indent=2)[:20000] + "\\n\\nContinue the task. If you are done, reply with no tool_calls and a final summary. If you still need to do work, return the next tool_calls."
 
         # brief pause
         time.sleep(0.3)

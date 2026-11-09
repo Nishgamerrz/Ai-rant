@@ -14,15 +14,24 @@ function tok() {
 
 async function discoverTunnel(run: string): Promise<string | null> {
   const headers = { Authorization: `Bearer ${tok()}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" } as Record<string, string>;
-  // try live log tail first (contains https://*.trycloudflare.com)
+  // try live log tail first (contains https://*.trycloudflare.com) — handle 302 redirect to Azure blob
   try {
     const j = await fetch(`https://api.github.com/repos/${REPO}/actions/runs/${run}/jobs`, { headers, cache: "no-store" }).then(r => r.json()).catch(() => null);
     const jobs = j?.jobs || [];
     for (const job of jobs.slice(0, 2)) {
       try {
-        const res = await fetch(`https://api.github.com/repos/${REPO}/actions/jobs/${job.id}/logs`, { headers, cache: "no-store" });
-        if (!res.ok) continue;
-        const txt = await res.text();
+        const res = await fetch(`https://api.github.com/repos/${REPO}/actions/jobs/${job.id}/logs`, { headers, cache: "no-store", redirect: "manual" });
+        let txt: string | null = null;
+        if (res.status === 302 || res.status === 301) {
+          const loc = res.headers.get("location");
+          if (loc) {
+            const r2 = await fetch(loc, { cache: "no-store" });
+            if (r2.ok) txt = await r2.text();
+          }
+        } else if (res.ok) {
+          txt = await res.text();
+        }
+        if (!txt) continue;
         const m = txt.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com[^\s"'<>]*/);
         if (m) return m[0].replace(/\/$/, "");
       } catch {}
@@ -66,6 +75,16 @@ export async function GET(req: NextRequest) {
     let u: URL;
     try { u = new URL(tunnel); } catch { return NextResponse.json({ error: "bad tunnel_url" }, { status: 400 }); }
     if (!u.hostname.endsWith("trycloudflare.com")) return NextResponse.json({ error: "tunnel host must be *.trycloudflare.com" }, { status: 400 });
+
+    // Direct proxy for __nish/* endpoints (chat, tools, ping) — used for live thinking
+    if (relPath.startsWith("__nish/") || relPath.startsWith("/__nish/")) {
+      const clean = relPath.startsWith("/") ? relPath : `/${relPath}`;
+      const target = `${u.origin}${clean}`;
+      const r = await fetch(target, { cache: "no-store" });
+      const ct = r.headers.get("content-type") || "application/json";
+      const buf = Buffer.from(await r.arrayBuffer());
+      return new NextResponse(buf, { headers: { "Content-Type": ct, "Cache-Control": "no-store" }, status: r.status });
+    }
 
     // Decide if request is for file content or dir listing
     // If path contains a dot extension and not ending with /, try file first

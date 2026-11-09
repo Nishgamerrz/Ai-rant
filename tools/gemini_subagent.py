@@ -325,15 +325,17 @@ def call_gemini(prompt: str, *, api_key: str, model: str = DEFAULT_MODEL,
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_KEY_ENV = "GROQ_API_KEY"
 GROQ_MODEL_VAR = "GROQ_MODEL"
-DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
-# Free Groq models from the playground — best first. These are the cloud models
-# the user highlighted (Reasoning: GPT OSS 120B / 20B, Qwen 3 32B; Tool Use / Text:
-# same family) plus the trusted lama fallbacks. If one is retired/saturated the
-# next is tried, so a single deprecation/429 never leaves the run without a
-# helper. The sub-agent always tries Groq BEFORE Gemini when Gemini is in
-# back-off, and every model gets the same file-rules guide.
-GROQ_MODEL_CHOICES = ("openai/gpt-oss-120b", "openai/gpt-oss-20b",
-                      "qwen/qwen3-32b", "llama-3.3-70b-versatile",
+DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+# Free Groq models — best first for no-cutoff, long replies. Prioritize
+# large-context, non-reasoning instruct models that handle 8k+ output reliably.
+# Reasoning models (gpt-oss-*) can burn tokens on hidden thought and truncate
+# early, so they are fallbacks after the instruct family. If one is retired or
+# 429 the next is tried, so no run loses a task.
+GROQ_MODEL_CHOICES = ("llama-3.3-70b-versatile",
+                      "qwen/qwen3-32b",
+                      "meta-llama/llama-4-maverick-17b-128e-instruct",
+                      "deepseek-r1-distill-llama-70b",
+                      "openai/gpt-oss-120b", "openai/gpt-oss-20b",
                       "llama-3.1-8b-instant")
 
 
@@ -347,44 +349,57 @@ def groq_model(requested: str = "") -> str:
 
 
 def call_groq(prompt: str, *, api_key: str, model: str = "", timeout: float = 120.0,
-              url: str | None = None) -> str:
+              url: str | None = None, max_tokens: int = 8192) -> str:
     """One Groq (OpenAI-compatible) chat call - the fallback when Gemini is out.
 
     A retired model answers 404/decommissioned; that is reported as such so the
     caller can try the next free model instead of failing the whole task.
+    If the reply was cut at the token ceiling (finish_reason=length) we retry
+    once with double the ceiling before returning a truncated answer.
     """
     if not api_key:
         raise GroqUnavailable("no Groq API key configured")
     endpoint = url or GROQ_ENDPOINT
     model = groq_model(model)
-    body = json.dumps({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.4,
-        "max_tokens": 4096,
-        "stream": False,
-    }).encode("utf-8")
-    request = urllib.request.Request(
-        endpoint, data=body,
-        headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {api_key}",
-                 "User-Agent": "Ai-rant-short-render/1.0"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8", "replace"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")[:300]
-        raise GroqUnavailable(f"Groq HTTP {exc.code}: {detail}") from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise GroqUnavailable(f"Groq {type(exc).__name__}: {exc}") from exc
-    try:
-        text = str(payload["choices"][0]["message"]["content"] or "").strip()
-    except (KeyError, IndexError, TypeError):
-        text = ""
-    if not text:
-        raise GroqUnavailable("the Groq reply contained no text")
-    return text
+    for attempt in range(2):
+        body = json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.4,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }).encode("utf-8")
+        request = urllib.request.Request(
+            endpoint, data=body,
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {api_key}",
+                     "User-Agent": "Ai-rant-short-render/1.0"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:300]
+            raise GroqUnavailable(f"Groq HTTP {exc.code}: {detail}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise GroqUnavailable(f"Groq {type(exc).__name__}: {exc}") from exc
+        try:
+            text = str(payload["choices"][0]["message"]["content"] or "").strip()
+            finish = str(payload["choices"][0].get("finish_reason") or "").lower()
+        except (KeyError, IndexError, TypeError):
+            text, finish = "", ""
+        if not text:
+            raise GroqUnavailable("the Groq reply contained no text")
+        # truncated at ceiling -> retry once with larger window
+        if finish == "length" and max_tokens < 16384 and attempt == 0:
+            max_tokens = min(16384, max_tokens * 2)
+            print(f"[gemini sub-agent] Groq cut at {payload['choices'][0].get('finish_reason')} — retrying {model} with max_tokens={max_tokens}", flush=True)
+            continue
+        if finish == "length":
+            # still length after retry -> warn but return what we have (better than failing)
+            print(f"[gemini sub-agent] Groq still at length after retry — returning {len(text)} chars (may be truncated)", flush=True)
+        return text
+    raise GroqUnavailable("no answer after retries")
 
 
 def retired_groq_model(exc: Exception) -> bool:

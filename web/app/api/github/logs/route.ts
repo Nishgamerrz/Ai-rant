@@ -16,19 +16,30 @@ function token() {
 async function fetchJobLogTail(jobId: number, tok: string, maxChars = 48000): Promise<string | null> {
   try {
     const headers = { Authorization: `Bearer ${tok}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" } as Record<string, string>;
-    // This endpoint 302s to an Azure blob (productionresultssa.../job-logs.txt). fetch follows redirect.
+    // This endpoint 302s to an Azure blob (productionresultssa.../job-logs.txt).
+    // In Vercel we can follow, but handle manual redirect for robustness (sandbox blocks Azure).
     const res = await fetch(`https://api.github.com/repos/${REPO}/actions/jobs/${jobId}/logs`, {
       headers,
       cache: "no-store",
-      // follow redirects (default) - Vercel can fetch azure blob, sandbox cannot but we handle gracefully
+      redirect: "manual",
     });
-    if (!res.ok) {
-      // 404 until job has logs, or 302 that failed to follow due to network
+    let text: string | null = null;
+    if (res.status === 302 || res.status === 301) {
+      const loc = res.headers.get("location");
+      if (!loc) return null;
+      try {
+        const r2 = await fetch(loc, { cache: "no-store" });
+        if (!r2.ok) return null;
+        text = await r2.text();
+      } catch {
+        return null;
+      }
+    } else if (res.ok) {
+      text = await res.text();
+    } else {
       return null;
     }
-    const text = await res.text();
     if (!text) return null;
-    // Keep tail only - full logs can be 500KB+
     if (text.length <= maxChars) return text;
     return text.slice(-maxChars);
   } catch {

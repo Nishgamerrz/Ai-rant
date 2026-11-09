@@ -14,6 +14,30 @@ export async function GET(req: NextRequest) {
     const run = new URL(req.url).searchParams.get("run");
     if (!run) return NextResponse.json({ error: "run required" }, { status: 400 });
     const headers = { Authorization: `Bearer ${tok()}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" } as Record<string, string>;
+    // First try live log (instant, before artifact upload) — handle 302 redirect
+    try {
+      const jRes = await fetch(`https://api.github.com/repos/${REPO}/actions/runs/${run}/jobs`, { headers, cache: "no-store" });
+      if (jRes.ok) {
+        const j = await jRes.json();
+        for (const job of (j.jobs || []).slice(0,2)) {
+          try {
+            const res = await fetch(`https://api.github.com/repos/${REPO}/actions/jobs/${job.id}/logs`, { headers, cache: "no-store", redirect: "manual" });
+            let txt: string | null = null;
+            if (res.status === 302 || res.status === 301) {
+              const loc = res.headers.get("location");
+              if (loc) {
+                const r2 = await fetch(loc, { cache: "no-store" });
+                if (r2.ok) txt = await r2.text();
+              }
+            } else if (res.ok) txt = await res.text();
+            if (txt) {
+              const m = txt.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com[^\s"'<>]*/);
+              if (m) return NextResponse.json({ tunnel_url: m[0].replace(/\/$/, ""), source: "live-log" });
+            }
+          } catch {}
+        }
+      }
+    } catch {}
     const res = await fetch(`https://api.github.com/repos/${REPO}/actions/runs/${run}/artifacts`, { headers, cache: "no-store" });
     if (!res.ok) return NextResponse.json({ error: await res.text() }, { status: 502 });
     const data = await res.json();

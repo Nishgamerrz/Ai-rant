@@ -102,11 +102,34 @@ export function ChatWindow({ runId, tunnelUrl, liveMode }: { runId: number | nul
         const parsed = parseLiveLogTail(j.logTail);
         if (parsed.msgs.length) setLiveMsgs(parsed.msgs);
       }
-      // if live endpoint also returned tunnel_url, surface it via error hint when not in liveMode
-      if (j.tunnel_url && !tunnelUrl) {
-        // don't set state here (prop is from parent), but show hint
-      }
     } catch {}
+    // Also try live chat history directly via tunnel if available (instant, not waiting for artifact or log tail)
+    if (tunnelUrl) {
+      try {
+        const r = await fetch(`/api/agent/files?run=${runId}&path=__nish/chat&tunnel=${encodeURIComponent(tunnelUrl)}`, { cache: "no-store" });
+        if (r.ok) {
+          const ct = r.headers.get("content-type") || "";
+          let data: any = null;
+          if (ct.includes("json")) data = await r.json().catch(() => null);
+          else {
+            const txt = await r.text();
+            try { data = JSON.parse(txt); } catch { data = null; }
+          }
+          if (Array.isArray(data) && data.length) {
+            const last = data as Msg[];
+            setLiveMsgs(last.slice(-12));
+            // also update tools from live if needed
+            try {
+              const tr = await fetch(`/api/agent/files?run=${runId}&path=__nish/tools&tunnel=${encodeURIComponent(tunnelUrl)}`, { cache: "no-store" });
+              if (tr.ok) {
+                const tj = await tr.json().catch(() => null);
+                if (Array.isArray(tj) && tj.length) setTools(tj.slice(-20) as any);
+              }
+            } catch {}
+          }
+        }
+      } catch {}
+    }
   }
 
   useEffect(() => {
@@ -122,7 +145,7 @@ export function ChatWindow({ runId, tunnelUrl, liveMode }: { runId: number | nul
     fetchLive();
     const id = setInterval(() => { fetchChat(); fetchLive(); }, 3500);
     return () => clearInterval(id);
-  }, [runId]);
+  }, [runId, tunnelUrl]);
 
   useEffect(() => {
     scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight, behavior: "smooth" });
