@@ -205,9 +205,13 @@ def main() -> int:
     parser.add_argument("--no-system", action="store_true",
                         help="update the memory only, do not write the system prompt")
     parser.add_argument("--show", action="store_true")
+    parser.add_argument("--reset", action="store_true",
+                        help="start this run with an empty memory (never inherit last run)")
     args = parser.parse_args()
 
-    memory = load(args.memory)
+    # A run must never inherit the previous run's topic: run #109's first story call
+    # was told "a world where gravity naps" while it was writing the bedroom story.
+    memory = empty_memory() if args.reset else load(args.memory)
     for item in args.set:
         if "=" in item:
             name, value = item.split("=", 1)

@@ -26,6 +26,23 @@ PLATFORM = 320.0
 # The cast acts in this lane; nothing tall may be built here or it will cross the lens.
 CAST_LANE = {"x": 20.0, "z_min": 4.0, "z_max": 54.0, "headroom": 8.5}
 DEFAULT_CAST_POSITIONS = [[0, 0, 24], [-3, 0, 24], [3, 0, 24], [-6, 0, 29], [6, 0, 29], [0, 0, 34]]
+# An indoor scene is a room: the old 20-stud-wide, 50-stud-long cast lane swallowed
+# every piece of furniture (and, outdoors, deleted all the story props), so a room
+# gets a lane the size of the acting space instead.
+OUTDOOR_CAST_LANE = dict(CAST_LANE)
+
+
+def use_room_lane(room):
+    """Switch the review to room rules: tight acting lane, no plaza decor."""
+    width = float(room.get("width", 34.0))
+    depth = float(room.get("depth", 34.0))
+    height = float(room.get("height", 11.0))
+    CAST_LANE.update({
+        "x": max(4.0, min(7.0, width * 0.26)),
+        "z_min": room["centre_z"] - min(5.0, depth * 0.2),
+        "z_max": room["centre_z"] + min(5.0, depth * 0.2),
+        "headroom": min(8.5, height * 0.85),
+    })
 
 
 def snap(value, low, high, step=GRID):
@@ -124,6 +141,8 @@ def review_pass(plan, report):
         person["position"] = [x, 0, z]
     for person in placements:
         for other in kept:
+            if other.get("shell") or other["position"][1] - other["size"][1] / 2 < 0.6:
+                continue      # the floor and skirting belong under the cast's feet
             if (abs(person["position"][0] - other["position"][0]) < other["size"][0] / 2 + 2.5
                     and abs(person["position"][2] - other["position"][2]) < other["size"][2] / 2 + 2.5
                     and other["position"][1] - other["size"][1] / 2 < 3):
@@ -144,8 +163,11 @@ def clean_camera_shots(plan, report):
     shots = plan.get("camera_shots") or []
     placements = plan.get("character_placements") or []
     names = [str(person.get("username", "")) for person in placements]
-    solids = [prop for prop in plan.get("props", [])
-              if prop.get("physics") != "dynamic" and prop["size"][1] >= 2.5]
+    interior = isinstance(plan.get("interior"), dict)
+    # In a room the walls ARE the picture; pushing the camera "out of geometry"
+    # pushed it through the plaster and the render showed open sky.
+    solids = [] if interior else [prop for prop in plan.get("props", [])
+                                  if prop.get("physics") != "dynamic" and prop["size"][1] >= 2.5]
     duration = float(plan.get("duration") or (shots[-1]["time"] if shots else 30.0))
     fixed = []
     for index, shot in enumerate(shots):
@@ -178,6 +200,20 @@ def clean_camera_shots(plan, report):
             position[2] += direction[1] / length * 2.0
             position[1] += 1.5
             report["lifted_camera_shots"] += 1
+        room = plan.get("interior")
+        if isinstance(room, dict):
+            # Inside a room the camera must stay between the walls: the wall-avoid
+            # loop can push it through plaster, and the render then shows "outside".
+            half_x = float(room.get("width", 34.0)) / 2 - 2.0
+            half_z = float(room.get("depth", 34.0)) / 2 - 2.0
+            centre_z = float(room.get("centre_z", 24.0))
+            top = float(room.get("height", 11.0)) - 1.5
+            position[0] = max(-half_x, min(half_x, position[0]))
+            position[2] = max(centre_z - half_z, min(centre_z + half_z, position[2]))
+            position[1] = max(3.0, min(top, position[1]))
+            target[0] = max(-half_x, min(half_x, target[0]))
+            target[2] = max(centre_z - half_z, min(centre_z + half_z, target[2]))
+            target[1] = max(2.0, min(float(room.get("height", 11.0)) - 1.0, target[1]))
         if not shot.get("transition") in {"smooth", "snap"}:
             shot["transition"] = "smooth"
         framing = str(shot.get("framing", "auto") or "auto").lower()
@@ -300,6 +336,11 @@ def main():
     plan = json.loads(args.map.read_text(encoding="utf-8"))
     if args.duration:
         plan["duration"] = float(args.duration)
+    room = plan.get("interior")
+    if isinstance(room, dict):
+        use_room_lane(room)
+        print(f"Interior review: tight acting lane, no plaza decor, cameras kept inside "
+              f"the {float(room.get('width', 0)):.0f}x{float(room.get('depth', 0)):.0f} room.")
     totals: dict[str, int] = {}
     history = []
     for index in range(max(1, args.passes)):
@@ -311,7 +352,7 @@ def main():
         plan = review_pass(plan, report)
         plan = clean_camera_shots(plan, report)
         plan = review_face_timeline(plan, report)
-        if args.target_parts:
+        if args.target_parts and not isinstance(plan.get("interior"), dict):
             plan = top_up(plan, args.target_parts, report)
         report["pass"] = index + 1
         report["parts_before"] = before
@@ -340,7 +381,8 @@ def main():
           f"{summary['camera_shots']} clean camera shots, "
           f"{totals.get('dropped_camera_blockers', 0)} camera blockers removed, "
           f"{totals.get('lifted_camera_shots', 0)} camera fixes.")
-    if summary["final_parts"] < 100:
+    part_floor = 60 if isinstance(plan.get("interior"), dict) else 100
+    if summary["final_parts"] < part_floor:
         raise SystemExit("the reviewed map lost too many Parts; the blueprint needs regeneration")
     return 0
 

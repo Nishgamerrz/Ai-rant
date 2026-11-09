@@ -1305,6 +1305,9 @@ def validate(plan, duration=90, usernames=(), min_props=16, visual_request=""):
         }
         # Keep the declared model so the expansion step can build a whole house,
         # tree, bench or stall from one anchor instead of a bare block.
+        if prop.get("shell"):
+            # Floor / walls / ceiling: the review pass must never delete these.
+            clean_prop["shell"] = True
         model = normalize_model(prop.get("model", prop.get("kind")))
         if model:
             clean_prop["model"] = model
@@ -1339,6 +1342,697 @@ def validate(plan, duration=90, usernames=(), min_props=16, visual_request=""):
         "face_expressions": normalize_face_expressions(plan.get("face_expressions"), duration, usernames),
         "character_placements": normalize_character_placements(plan.get("character_placements"), usernames, visual_request),
     }
+
+
+# ---------------------------------------------------------------------------
+# INTERIOR MODE
+#
+# A story set in a cramped bedroom was rendered as an open 640-stud world with a
+# workshop wall 100 studs away: no room, no walls, no ceiling - just outside.
+# When scene_mode says the scene is indoors, the anchors are pulled into a real
+# room, furniture-sized, and a deterministic shell (floor, four walls, ceiling,
+# door, window, skirting) is added so the video always shows an inside.
+# ---------------------------------------------------------------------------
+ROOM_CENTRE_Z = 24.0
+INTERIOR_MAX_PROPS = 900
+
+
+def interior_room(size="small"):
+    """(width, depth, height) of the room the cast stands in."""
+    return {"tiny": (26.0, 26.0, 10.0), "small": (34.0, 34.0, 11.0),
+            "medium": (44.0, 44.0, 13.0)}.get(str(size).lower(), (34.0, 34.0, 11.0))
+
+
+def fit_anchors_to_room(anchors, room):
+    """Pull every AI anchor inside the room and shrink buildings to furniture."""
+    width, depth, height = room
+    half_x, half_z = width / 2 - 2.0, depth / 2 - 2.0
+    z_min, z_max = ROOM_CENTRE_Z - half_z, ROOM_CENTRE_Z + half_z
+    fitted = []
+    for anchor in anchors:
+        prop = dict(anchor)
+        sx, sy, sz = (list(prop.get("size") or [4, 4, 4]) + [4, 4, 4])[:3]
+        # A 34-stud "workshop" is not furniture: cap it, keep its proportions.
+        cap_x, cap_z = width * 0.45, depth * 0.45
+        scale = min(1.0, cap_x / max(1.0, float(sx)), cap_z / max(1.0, float(sz)))
+        sx, sz = round(max(1.0, float(sx) * scale) * 2) / 2, round(max(1.0, float(sz) * scale) * 2) / 2
+        sy = round(min(float(sy), height - 2.0) * 2) / 2
+        x = float((prop.get("position") or [0, 0, 0])[0])
+        z = float((prop.get("position") or [0, 0, 0])[2])
+        # Keep the cast lane (the close-up space in front of the cast) clear.
+        if abs(x) < 20 and 4 <= z <= 54:
+            x = half_x if x >= 0 else -half_x
+        x = max(-half_x, min(half_x, x))
+        z = max(z_min, min(z_max, z))
+        prop["position"] = [round(x * 2) / 2, round(max(0.5, min(height / 2, abs(sy) / 2)) * 2) / 2,
+                            round(z * 2) / 2]
+        prop["size"] = [sx, sy, sz]
+        prop["physics"] = "static"
+        # A building model inside a room would expand into walls and a roof.
+        if str(prop.get("model") or "").lower() in BUILDING_MODELS:
+            prop["model"] = "furniture"
+        fitted.append(prop)
+    return fitted
+
+
+def room_shell(plan, room):
+    """Floor, ceiling, four walls with a real doorway and window, skirting, rug."""
+    width, depth, height = room
+    thickness = 0.5
+    half_x, half_z = width / 2, depth / 2
+    z0 = ROOM_CENTRE_Z
+    floor_color = list(plan.get("floor_color") or [156, 120, 86])
+    wall_color = list(plan.get("wall_color") or [206, 196, 178])
+    accent = list(plan.get("accent_color") or [90, 140, 200])
+    sky = list(plan.get("ground_color") or [150, 190, 225])
+    used = {str(prop.get("name", "")).casefold() for prop in plan.get("props", [])}
+    parts = []
+
+    def add(name, shape, material, position, size, color):
+        base, suffix = name, 2
+        while name.casefold() in used:
+            name = f"{base} {suffix}"
+            suffix += 1
+        used.add(name.casefold())
+        parts.append({
+            "name": name, "shape": shape, "material": material,
+            "position": [round(v * 2) / 2 for v in position],
+            "size": [round(max(0.5, v) * 2) / 2 for v in size],
+            "color": [int(c) for c in color], "physics": "static", "shell": True,
+        })
+
+    # Floor top sits at Y=0.2 so the cast stands on it and rugs can sit on top.
+    add("Room Floor", "Block", "Wood", [0, 0.1, z0], [width, 0.2, depth], floor_color)
+    add("Room Ceiling", "Block", "SmoothPlastic", [0, height + thickness / 2, z0],
+        [width, thickness, depth], [232, 228, 220])
+    back_z = z0 + half_z + thickness / 2
+    front_z = z0 - half_z - thickness / 2
+    # Side walls are inset by half a stud so the corners do not overlap the
+    # back/front walls (the review pass drops any part that does).
+    add("Room Wall Left", "Block", "SmoothPlastic", [-half_x - thickness / 2, height / 2, z0],
+        [thickness, height, depth - 1.0], wall_color)
+    add("Room Wall Right", "Block", "SmoothPlastic", [half_x + thickness / 2, height / 2, z0],
+        [thickness, height, depth - 1.0], wall_color)
+    # Back wall with a window opening: two side pieces, a header and a sill piece.
+    window_width, window_height = min(9.0, width * 0.4), min(5.0, height * 0.45)
+    window_centre_y = height * 0.62
+    shoulder = max(1.0, (width - window_width) / 2)
+    for index, offset in enumerate((-(window_width / 2 + shoulder / 2),
+                                    window_width / 2 + shoulder / 2)):
+        add(f"Room Wall Back {index + 1}", "Block", "SmoothPlastic",
+            [offset, height / 2, back_z], [shoulder, height, thickness], wall_color)
+    add("Room Wall Back Header", "Block", "SmoothPlastic",
+        [0, window_centre_y + window_height / 2 + (height - window_centre_y - window_height / 2) / 2,
+         back_z],
+        [window_width, max(1.0, height - window_centre_y - window_height / 2), thickness], wall_color)
+    add("Room Wall Back Sill", "Block", "SmoothPlastic",
+        [0, (window_centre_y - window_height / 2) / 2, back_z],
+        [window_width, max(1.0, window_centre_y - window_height / 2), thickness], wall_color)
+    # Glass in the opening, sky board behind it: a bright view, never an open sky.
+    add("Room Window Glass", "Block", "Glass", [0, window_centre_y, back_z],
+        [window_width, window_height, 0.2], [196, 226, 240])
+    add("Room Sky Through Window", "Block", "SmoothPlastic",
+        [0, window_centre_y, back_z + 1.5], [window_width + 4.0, window_height + 3.0, 0.4], sky)
+    add("Room Window Sill", "Block", "Wood", [0, window_centre_y - window_height / 2 - 0.3,
+                                              back_z - 0.6],
+        [window_width + 1.0, 0.4, 1.4], [190, 158, 120])
+    # Front wall with a doorway gap, and the door itself.
+    door_width, door_height = min(6.0, width * 0.28), min(8.5, height * 0.82)
+    shoulder = max(1.0, (width - door_width) / 2)
+    for index, offset in enumerate((-(door_width / 2 + shoulder / 2),
+                                    door_width / 2 + shoulder / 2)):
+        add(f"Room Front Wall {index + 1}", "Block", "SmoothPlastic",
+            [offset, height / 2, front_z], [shoulder, height, thickness], wall_color)
+    add("Room Front Wall Header", "Block", "SmoothPlastic",
+        [0, door_height + (height - door_height) / 2, front_z],
+        [door_width, max(1.0, height - door_height), thickness], wall_color)
+    add("Room Door", "Block", "Wood", [0, door_height / 2, front_z],
+        [door_width - 1.0, door_height - 1.0, 0.5], [150, 104, 66])
+    # Skirting and rug sit on top of the floor, clear of the walls.
+    for side, label in ((-1, "Left"), (1, "Right")):
+        add(f"Room Skirting {label}", "Block", "Wood", [side * (half_x - 0.3), 0.4, z0],
+            [0.5, 0.8, depth - 2.0], [150, 110, 78])
+    add("Room Rug", "Block", "SmoothPlastic", [-half_x * 0.45, 0.35, z0 + 1.5],
+        [max(7.0, width * 0.4), 0.2, max(6.0, depth * 0.32)], accent)
+    add("Room Ceiling Light", "Ball", "Neon", [0, height - 1.0, z0 - 2.0],
+        [1.6, 1.0, 1.6], [255, 236, 190])
+    parts[-1]["light"] = {"kind": "Point", "color": [255, 236, 190], "brightness": 3.0,
+                          "range": 34.0}
+    return parts
+
+
+def _overlaps(a, b):
+    """Same tolerance the review pass uses, so nothing it sees is dropped later."""
+    for axis in (0, 2):
+        gap = abs(a["position"][axis] - b["position"][axis])
+        if gap >= (a["size"][axis] + b["size"][axis]) / 2 - 0.05:
+            return False
+    low = min(a["position"][1] - a["size"][1] / 2, b["position"][1] - b["size"][1] / 2)
+    high = max(a["position"][1] + a["size"][1] / 2, b["position"][1] + b["size"][1] / 2)
+    return high - low < (a["size"][1] + b["size"][1]) / 2 * 1.35
+
+
+def resolve_overlaps(parts, room):
+    """Nudge (or drop) any part the review pass would otherwise delete.
+
+    Hand-placed furniture can clash with a wall by a stud; rather than let the
+    review pass quietly delete the wardrobe, slide it along its wall until it
+    fits. Returns (kept, dropped_names).
+    """
+    width, depth, height = room
+    half_x, half_z = width / 2, depth / 2
+    z0 = ROOM_CENTRE_Z
+    kept, dropped = [], []
+    offsets = [(0.0, 0.0)]
+    for step in (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0):
+        offsets.extend([(step, 0.0), (-step, 0.0), (0.0, step), (0.0, -step),
+                        (step, step), (-step, -step), (step, -step), (-step, step)])
+    for part in parts:
+        x, y, z = part["position"]
+        sx, sy, sz = part["size"]
+        placed = None
+        for dx, dz in offsets:
+            candidate = {**part, "position": [round((x + dx) * 2) / 2, y, round((z + dz) * 2) / 2]}
+            cx, cz = candidate["position"][0], candidate["position"][2]
+            if not (-half_x - 0.5 <= cx - sx / 2 and cx + sx / 2 <= half_x + 0.5):
+                continue
+            if not (z0 - half_z - 0.5 <= cz - sz / 2 and cz + sz / 2 <= z0 + half_z + 0.5):
+                continue
+            if part.get("shell") and (dx or dz):
+                continue   # walls and floor never move
+            if any(_overlaps(candidate, other) for other in kept):
+                continue
+            placed = candidate
+            break
+        if placed is None:
+            dropped.append(part["name"])
+            continue
+        kept.append(placed)
+    return kept, dropped
+
+
+def furnish_room(plan, room):
+    """Real furniture, sized and placed for this room (never plaza decor)."""
+    width, depth, height = room
+    hx, hz = width / 2, depth / 2
+    z0 = ROOM_CENTRE_Z
+    wood = [170, 124, 84]
+    dark_wood = [138, 98, 66]
+    linen = [246, 244, 238]
+    blanket_left = [122, 156, 206]
+    blanket_right = [206, 142, 128]
+    used = {str(prop.get("name", "")).casefold() for prop in plan.get("props", [])}
+    parts = []
+
+    def add(name, shape, material, position, size, color):
+        base, suffix = name, 2
+        while name.casefold() in used:
+            name = f"{base} {suffix}"
+            suffix += 1
+        used.add(name.casefold())
+        parts.append({"name": name, "shape": shape, "material": material,
+                      "position": [round(v * 2) / 2 for v in position],
+                      "size": [round(max(0.5, v) * 2) / 2 for v in size],
+                      "color": [int(c) for c in color], "physics": "static"})
+
+    def bed(label, cx, cz, bed_width, bed_length, blanket, bunk=False):
+        """A bed with frame, mattress, pillow and blanket - the story prop that matters."""
+        # A bunk bed only exists when the ceiling leaves room for the upper bunk.
+        bunk = bunk and height >= 11.0
+        top = 4.4 if bunk else 1.1
+        add(f"{label} Frame", "Block", "Wood", [cx, top, cz],
+            [bed_width, 0.5, bed_length], dark_wood)
+        for dx in (-bed_width / 2 + 0.4, bed_width / 2 - 0.4):
+            for dz in (-bed_length / 2 + 0.4, bed_length / 2 - 0.4):
+                post_top = (4.4 + 3.4) if bunk else 4.4
+                add(f"{label} Post", "Block", "Wood", [cx + dx, post_top / 2, cz + dz],
+                    [0.5, post_top, 0.5], dark_wood)
+        add(f"{label} Mattress", "Block", "SmoothPlastic",
+            [cx, top + 0.75, cz], [bed_width - 0.6, 1.0, bed_length - 0.6], linen)
+        add(f"{label} Pillow", "Block", "SmoothPlastic",
+            [cx, top + 1.4, cz + bed_length / 2 - 1.4],
+            [max(1.5, bed_width - 2.0), 0.5, 1.8], [252, 250, 246])
+        add(f"{label} Blanket", "Block", "SmoothPlastic",
+            [cx, top + 1.3, cz - bed_length / 4],
+            [max(1.5, bed_width - 0.8), 0.4, bed_length / 2], blanket)
+        if bunk:
+            upper = top + 3.4
+            add(f"{label} Upper Bunk", "Block", "Wood",
+                [cx, upper, cz], [bed_width, 0.5, bed_length], dark_wood)
+            add(f"{label} Upper Mattress", "Block", "SmoothPlastic",
+                [cx, upper + 0.75, cz], [bed_width - 0.6, 1.0, bed_length - 0.6], linen)
+            add(f"{label} Upper Pillow", "Block", "SmoothPlastic",
+                [cx, upper + 1.4, cz + bed_length / 2 - 1.4],
+                [max(1.5, bed_width - 2.0), 0.5, 1.8], [252, 250, 246])
+            add(f"{label} Ladder", "Block", "Wood",
+                [cx + bed_width / 2, top + 2.0, cz - bed_length / 2 + 1.4],
+                [0.4, 4.0, 0.4], dark_wood)
+            for step in range(3):
+                add(f"{label} Ladder Step {step + 1}", "Block", "Wood",
+                    [cx + bed_width / 2, top + 0.8 + step * 1.1, cz - bed_length / 2 + 1.4],
+                    [1.2, 0.3, 0.4], dark_wood)
+            add(f"{label} Guard Rail", "Block", "Wood",
+                [cx, upper + 1.0, cz - bed_length / 2 + 0.8],
+                [bed_width, 0.4, 0.4], dark_wood)
+
+    # Bunk bed on the left, second bed on the right: two brothers, one room.
+    bed("Bunk Bed", -hx + 3.2, z0 + hz - 6.5, min(5.2, hx * 0.5), min(9.0, hz * 0.8),
+        blanket_left, bunk=True)
+    bed("Second Bed", hx - 3.4, z0 + hz - 7.0, min(5.0, hx * 0.5), min(8.0, hz * 0.75),
+        blanket_right)
+    # Nightstand with a lamp between the beds.
+    stand_x, stand_z = -hx + 3.0, z0 + hz - 13.0
+    add("Nightstand", "Block", "Wood", [stand_x, 1.3, stand_z], [2.5, 2.6, 2.5], wood)
+    add("Nightstand Drawer", "Block", "Wood", [stand_x, 1.6, stand_z - 1.35],
+        [2.0, 0.8, 0.3], [210, 176, 138])
+    add("Nightstand Lamp Base", "Cylinder", "Metal", [stand_x, 3.0, stand_z],
+        [0.8, 0.8, 0.8], [176, 178, 184])
+    add("Nightstand Lamp Shade", "Cylinder", "Neon", [stand_x, 3.9, stand_z],
+        [1.6, 1.2, 1.6], [255, 236, 178])
+    parts[-1]["light"] = {"kind": "Point", "color": [255, 236, 178],
+                          "brightness": 1.6, "range": 20.0}
+    # Desk + chair against the right wall, in front of the beds.
+    desk_x, desk_z = hx - 2.4, z0 - hz + max(5.0, depth * 0.22)
+    add("Desk Top", "Block", "Wood", [desk_x, 2.6, desk_z], [2.6, 0.4, 5.0], wood)
+    for dz in (-2.0, 2.0):
+        add(f"Desk Leg {1 if dz < 0 else 2}", "Block", "Wood",
+            [desk_x, 1.3, desk_z + dz], [0.4, 2.6, 0.4], dark_wood)
+    add("Desk Lamp", "Cylinder", "Neon", [desk_x + 0.6, 3.6, desk_z + 1.6],
+        [0.9, 1.6, 0.9], [255, 232, 180])
+    add("Desk Chair Seat", "Block", "Wood", [desk_x - 2.0, 1.5, desk_z],
+        [1.8, 0.4, 1.8], dark_wood)
+    add("Desk Chair Back", "Block", "Wood", [desk_x - 2.7, 2.6, desk_z],
+        [0.4, 2.2, 1.8], dark_wood)
+    add("Homework Books", "Block", "SmoothPlastic", [desk_x, 2.95, desk_z - 1.2],
+        [1.4, 0.3, 1.0], [200, 96, 92])
+    add("Pencil Cup", "Cylinder", "SmoothPlastic", [desk_x + 0.7, 3.1, desk_z - 0.4],
+        [0.7, 0.9, 0.7], [96, 132, 200])
+    # Wardrobe against the back wall, left of the window.
+    add("Wardrobe", "Block", "Wood", [-hx + 3.4, height * 0.38, z0 + hz - 1.2],
+        [3.6, height * 0.75, 1.8], [156, 112, 78])
+    add("Wardrobe Door Left", "Block", "Wood", [-hx + 2.5, height * 0.38, z0 + hz - 2.2],
+        [1.5, height * 0.68, 0.2], [176, 132, 96])
+    add("Wardrobe Door Right", "Block", "Wood", [-hx + 4.3, height * 0.38, z0 + hz - 2.2],
+        [1.5, height * 0.68, 0.2], [176, 132, 96])
+    # Bookshelf right of the window, and a plant in the corner.
+    add("Bookshelf", "Block", "Wood", [hx - 2.6, height * 0.36, z0 + hz - 1.2],
+        [3.4, height * 0.7, 1.4], [162, 120, 86])
+    for shelf in range(3):
+        add(f"Bookshelf Row {shelf + 1}", "Block", "SmoothPlastic",
+            [hx - 2.6, 1.4 + shelf * 2.2, z0 + hz - 1.9],
+            [2.8, 0.9, 0.3], [[188, 92, 88], [92, 132, 188], [214, 176, 96]][shelf])
+    add("Plant Pot", "Cylinder", "SmoothPlastic", [-hx + 1.4, 0.8, z0 - hz + 2.2],
+        [1.6, 1.6, 1.6], [188, 120, 92])
+    add("Plant Leaves", "Ball", "Grass", [-hx + 1.4, 2.9, z0 - hz + 2.2],
+        [3.0, 2.8, 3.0], [104, 168, 96])
+    # Toy chest, slippers, clock, posters and curtains: the room reads as lived in.
+    add("Toy Chest", "Block", "Wood", [hx - 2.4, 1.1, z0 - hz + 2.4],
+        [3.0, 2.2, 2.2], [176, 132, 92])
+    add("Toy Chest Lid", "Block", "Wood", [hx - 2.4, 2.35, z0 - hz + 2.4],
+        [3.2, 0.3, 2.4], [148, 108, 74])
+    add("Slippers Left", "Block", "SmoothPlastic", [-hx + 5.0, 0.3, z0 - hz + 5.5],
+        [1.0, 0.4, 1.8], [210, 150, 160])
+    add("Slippers Right", "Block", "SmoothPlastic", [-hx + 6.2, 0.3, z0 - hz + 5.8],
+        [1.0, 0.4, 1.8], [210, 150, 160])
+    add("Wall Clock", "Block", "SmoothPlastic", [hx * 0.55, height * 0.72, z0 + hz - 0.4],
+        [2.2, 2.2, 0.4], [248, 246, 240])
+    for index, (wall_x, wall_z) in enumerate(((-hx + 0.3, z0 - hz + 7.0),
+                                              (-hx + 0.3, z0 + hz - 9.5),
+                                              (hx - 0.3, z0 - 3.0))):
+        add(f"Wall Poster {index + 1}", "Block", "SmoothPlastic", [wall_x, height * 0.6, wall_z],
+            [0.2, 3.0, 2.2], [[236, 176, 96], [140, 196, 236], [208, 140, 196]][index])
+    for side in (-1, 1):
+        add(f"Curtain {1 if side < 0 else 2}", "Block", "SmoothPlastic",
+            [side * 5.2, height * 0.62, z0 + hz - 0.7], [1.8, 5.6, 0.5],
+            [150, 122, 186])
+    add("Curtain Rod", "Block", "Metal", [0, height * 0.87, z0 + hz - 0.7],
+        [11.0, 0.3, 0.3], [176, 178, 184])
+    # A sealed room is lit by its own lamps, not by the sun outside: two more warm
+    # point lights keep the walls, beds and faces readable in the render.
+    for index, (lx, lz) in enumerate(((-hx * 0.55, z0 + hz * 0.55), (hx * 0.55, z0 - hz * 0.5))):
+        add(f"Room Lamp Glow {index + 1}", "Ball", "Neon", [lx, height - 2.2, lz],
+            [1.2, 1.2, 1.2], [255, 238, 198])
+        parts[-1]["light"] = {"kind": "Point", "color": [255, 238, 198], "brightness": 2.2,
+                              "range": 30.0}
+    return parts
+
+
+def room_details(room, existing=()):
+    """Small lived-in detail so the room reads as a real place on camera."""
+    width, depth, height = room
+    hx, hz = width / 2, depth / 2
+    z0 = ROOM_CENTRE_Z
+    used = {str(prop.get("name", "")).casefold() for prop in existing}
+    parts = []
+
+    def add(name, shape, material, position, size, color):
+        base, suffix = name, 2
+        while name.casefold() in used:
+            name = f"{base} {suffix}"
+            suffix += 1
+        used.add(name.casefold())
+        parts.append({"name": name, "shape": shape, "material": material,
+                      "position": [round(v * 2) / 2 for v in position],
+                      "size": [round(max(0.5, v) * 2) / 2 for v in size],
+                      "color": [int(c) for c in color], "physics": "static"})
+
+    # Ceiling beams: the line that makes the top of the room read on camera.
+    for index in range(3):
+        add(f"Ceiling Beam {index + 1}", "Block", "Wood",
+            [0, height - 0.35, z0 - hz + 4.0 + index * (depth - 8.0) / 2],
+            [width - 1.0, 0.5, 0.8], [168, 128, 92])
+    add("Window Sill Books", "Block", "SmoothPlastic", [0, height * 0.62 - 1.0,
+                                                       z0 + hz - 1.0],
+        [3.0, 1.2, 0.5], [188, 92, 88])
+    # Door handle and hinges.
+    add("Door Handle", "Ball", "Metal", [1.9, 4.2, z0 - hz + 0.1],
+        [0.6, 0.6, 0.6], [214, 198, 120])
+    add("Door Hinge Top", "Block", "Metal", [-2.4, 7.0, z0 - hz + 0.2],
+        [0.5, 0.6, 0.4], [180, 184, 190])
+    add("Door Hinge Bottom", "Block", "Metal", [-2.4, 1.8, z0 - hz + 0.2],
+        [0.5, 0.6, 0.4], [180, 184, 190])
+    add("Doormat", "Block", "SmoothPlastic", [0, 0.2, z0 - hz + 3.0],
+        [4.5, 0.2, 2.0], [120, 132, 150])
+    # Books, cushions, clock and clutter around the beds and desk.
+    book_colors = ([196, 96, 92], [92, 132, 196], [214, 176, 96], [110, 170, 120])
+    for index in range(5):
+        add(f"Shelf Book {index + 1}", "Block", "SmoothPlastic",
+            [hx - 3.6, 2.0, z0 + hz - 2.2 - index * 0.7],
+            [1.6, 1.8, 0.6], book_colors[index % len(book_colors)])
+    add("Bed Cushion", "Block", "SmoothPlastic", [-hx + 3.4, 3.4, z0 + hz - 4.4],
+        [2.2, 0.8, 1.6], [236, 208, 150])
+    add("Second Bed Cushion", "Block", "SmoothPlastic", [hx - 3.2, 2.6, z0 + hz - 5.0],
+        [2.0, 0.8, 1.4], [180, 210, 236])
+    add("Alarm Clock", "Block", "SmoothPlastic", [-hx + 3.0, 3.1, z0 + hz - 12.0],
+        [1.2, 0.9, 0.6], [232, 120, 110])
+    add("Backpack", "Block", "SmoothPlastic", [-hx + 1.6, 1.1, z0 - hz + 3.4],
+        [1.8, 2.2, 1.4], [96, 128, 186])
+    add("Water Glass", "Cylinder", "Glass", [-hx + 3.6, 3.2, z0 + hz - 13.6],
+        [0.7, 1.0, 0.7], [190, 226, 240])
+    add("Sock Left", "Block", "SmoothPlastic", [-hx + 6.6, 0.2, z0 + hz - 3.0],
+        [0.8, 0.4, 1.6], [242, 240, 236])
+    add("Sock Right", "Block", "SmoothPlastic", [-hx + 7.8, 0.2, z0 + hz - 2.2],
+        [0.8, 0.4, 1.6], [242, 240, 236])
+    # Fairy lights along the back wall: warm point lights, capped by validate().
+    for index in range(6):
+        x = -hx + 4.0 + index * (width - 8.0) / 5
+        add(f"Fairy Light {index + 1}", "Ball", "Neon",
+            [x, height * 0.9, z0 + hz - 1.0], [0.6, 0.6, 0.6], [255, 228, 168])
+        parts[-1]["light"] = {"kind": "Point", "color": [255, 228, 168],
+                             "brightness": 0.7, "range": 10.0}
+    return parts
+
+
+def merge_room_props(plan, room, room_parts):
+    """Keep the AI's own props where they fit, on top of the built room."""
+    width, depth, height = room
+    hx, hz = width / 2, depth / 2
+    z0 = ROOM_CENTRE_Z
+    kept = list(room_parts)
+    acting_x, acting_z_min, acting_z_max = min(hx * 0.62, 8.0), z0 - 5.0, z0 + 5.0
+    used = {prop["name"].casefold() for prop in kept}
+    for prop in plan.get("props") or []:
+        sx, sy, sz = (list(prop.get("size") or [2, 2, 2]) + [2, 2, 2])[:3]
+        sx, sz = min(sx, width - 3.0), min(sz, depth - 3.0)
+        sy = min(sy, height - 2.0)
+
+        def fits(px, py, pz):
+            if abs(px) + sx / 2 > hx - 0.5 or abs(pz - z0) + sz / 2 > hz - 0.5:
+                return False
+            if py - sy / 2 < 0.2 or py + sy / 2 > height - 0.5:
+                return False
+            if abs(px) < acting_x and acting_z_min < pz < acting_z_max and py - sy / 2 < 3.0:
+                return False
+            candidate = {"position": [px, py, pz], "size": [sx, sy, sz]}
+            return not any(_overlaps(candidate, other) for other in kept)
+
+        candidates = [(prop["position"][0], prop["position"][1], prop["position"][2])]
+        # Free slots along the walls: the trophy / poster / toy the AI wrote about
+        # survives instead of being thrown away for overlapping a bed.
+        if min(sx, sy, sz) <= 1.2 and max(sy, sz) >= 2.0:      # wall-mounted
+            for side in (-1, 1):
+                for offset in range(-int(hz) + 2, int(hz) - 1, 2):
+                    candidates.append((side * (hx - 0.5), height * 0.62, z0 + offset))
+        for side in (-1, 1):
+            for offset in range(-int(hx) + 2, int(hx) - 1, 2):
+                candidates.append((side * (hx - 0.9 - sx / 2), sy / 2 + 0.1, z0 + offset))
+            for offset in range(-int(hz) + 2, int(hz) - 1, 2):
+                candidates.append((offset, sy / 2 + 0.1, z0 + side * (hz - 0.9 - sz / 2)))
+        placement = next((slot for slot in candidates if fits(*slot)), None)
+        if placement is None:
+            continue
+        name, suffix = prop["name"], 2
+        while name.casefold() in used:
+            name = f"{prop['name']} {suffix}"
+            suffix += 1
+        used.add(name.casefold())
+        kept.append({**prop, "name": name[:40], "size": [sx, sy, sz],
+                     "position": [round(v * 2) / 2 for v in placement]})
+    return kept
+
+
+def arrange_cast(plan, room, usernames=()):
+    """Keep the cast close together inside a room.
+
+    Portrait 9:16 has a narrow horizontal field of view: brothers standing six
+    studs apart in a 26-stud room cannot share a frame from any wall, so one of
+    them ends up outside every shot. A room scenes brings them within ~2 studs of
+    each other and steps them back from the camera.
+    """
+    width, depth, height = room
+    z0 = ROOM_CENTRE_Z
+    people = [person for person in plan.get("character_placements") or []]
+    if not people:
+        people = [{"username": name, "role": "lead" if index == 0 else "supporting"}
+                  for index, name in enumerate(usernames)]
+    spread = min(4.5, width * 0.16)
+    if len(people) == 1:
+        offsets = [0.0]
+    else:
+        offsets = [-spread / 2 + spread * index / (len(people) - 1)
+                   for index in range(len(people))]
+    depth_step = min(1.5, depth * 0.06)
+    placed = []
+    for index, person in enumerate(people):
+        placed.append({**person,
+                       "position": [round(offsets[index] * 2) / 2, 0,
+                                    round((z0 + depth_step * (index % 2)) * 2) / 2]})
+    plan["character_placements"] = placed
+    return plan
+
+
+def view_coverage(plan, position, target, fov_degrees=42.0, samples=(12, 20),
+                  aspect=9.0 / 16.0):
+    """What fills the frame from this camera: room, cast, furniture... or open sky.
+
+    A pure-maths ray cast (no renderer): the same perspective the short uses, one
+    ray per sample pixel, nearest axis-aligned box wins. 'sky' means a ray hit
+    nothing at all - the outdoor look that ruined run #109.
+    """
+    parts = list(plan.get("props") or [])
+    boxes = [{"position": part["position"], "size": part["size"],
+              "name": part.get("name", "")} for part in parts]
+    for person in plan.get("character_placements") or []:
+        px, _, pz = person.get("position") or [0, 0, 0]
+        boxes.append({"position": [px, 2.6, pz], "size": [2.4, 5.2, 1.4],
+                      "name": "CAST " + str(person.get("username", ""))})
+
+    def normalise(vector):
+        length = math.sqrt(sum(value * value for value in vector)) or 1.0
+        return [value / length for value in vector]
+
+    forward = normalise([target[axis] - position[axis] for axis in range(3)])
+    right = normalise([forward[1] * 0.0 + forward[2] * 1.0, 0.0,
+                       -forward[0] * 1.0 + forward[1] * 0.0])
+    if math.sqrt(sum(value * value for value in right)) < 0.2:
+        right = [1.0, 0.0, 0.0]
+    right = normalise(right)
+    up = normalise([right[1] * forward[2] - right[2] * forward[1],
+                    right[2] * forward[0] - right[0] * forward[2],
+                    right[0] * forward[1] - right[1] * forward[0]])
+    up = [-value for value in up]          # screen up, not down
+    tan_half = math.tan(math.radians(fov_degrees) / 2)
+
+    counts = {"sky": 0, "cast": 0, "room": 0, "furniture": 0}
+    for iy in range(samples[1]):
+        for ix in range(samples[0]):
+            ndc_x = ((ix + 0.5) / samples[0] * 2 - 1) * tan_half * aspect
+            ndc_y = (1 - (iy + 0.5) / samples[1] * 2) * tan_half
+            direction = normalise([forward[axis] + right[axis] * ndc_x + up[axis] * ndc_y
+                                   for axis in range(3)])
+            nearest, nearest_name = None, ""
+            for box in boxes:
+                entry, exit_ = 0.001, 1e9
+                for axis in range(3):
+                    low = box["position"][axis] - box["size"][axis] / 2
+                    high = box["position"][axis] + box["size"][axis] / 2
+                    delta = direction[axis]
+                    if abs(delta) < 1e-9:
+                        if position[axis] < low or position[axis] > high:
+                            entry, exit_ = 2, 1
+                            break
+                        continue
+                    t1 = (low - position[axis]) / delta
+                    t2 = (high - position[axis]) / delta
+                    entry = max(entry, min(t1, t2))
+                    exit_ = min(exit_, max(t1, t2))
+                    if entry > exit_:
+                        break
+                if entry <= exit_ and (nearest is None or entry < nearest):
+                    nearest, nearest_name = entry, box["name"]
+            if nearest is None:
+                counts["sky"] += 1
+            elif nearest_name.startswith("CAST"):
+                counts["cast"] += 1
+            elif nearest_name.startswith("Room "):
+                counts["room"] += 1
+            else:
+                counts["furniture"] += 1
+    total = samples[0] * samples[1]
+    return {key: round(value / total, 3) for key, value in counts.items()}
+
+
+def room_camera_slots(room):
+    """Corner and side slots inside the room, used to rescue a blocked shot."""
+    width, depth, height = room
+    hx, hz = width / 2 - 1.6, depth / 2 - 1.6
+    z0 = ROOM_CENTRE_Z
+    slots = []
+    for y in (min(height - 1.5, 5.6), min(height - 1.5, height * 0.86)):
+        for sx in (-1, 1):
+            for sz in (-1, 1):
+                slots.append([sx * hx, y, z0 + sz * hz])
+        slots.append([0.0, y, z0 - hz])
+        slots.append([0.0, y, z0 + hz])
+    return slots
+
+
+def repair_blocked_shots(plan, room, report):
+    """If a lamp or a bed hides the cast, move that camera to a free slot."""
+    shots = plan.get("camera_shots") or []
+    for shot, entry in zip(shots, report):
+        if entry["cast"] >= 0.10 and entry["sky"] <= 0.02:
+            continue
+        best_coverage, best_position = entry, list(shot["position"])
+        for slot in room_camera_slots(room):
+            coverage = view_coverage(plan, slot, shot["target"])
+            if coverage["sky"] > 0.02:
+                continue
+            if coverage["cast"] > best_coverage["cast"]:
+                best_coverage, best_position = coverage, slot
+        if best_position != list(shot["position"]):
+            shot["position"] = [round(value, 2) for value in best_position]
+            entry.update(best_coverage)
+            entry["camera"] = shot["position"]
+            entry["repaired"] = True
+    return plan, report
+
+
+def interior_view_report(plan):
+    """Per-shot coverage of the finished interior plan (printed for the run log)."""
+    report = []
+    for shot in plan.get("camera_shots") or []:
+        coverage = view_coverage(plan, shot["position"], shot["target"])
+        report.append({"time": shot.get("time"), "framing": shot.get("framing"),
+                       "camera": shot["position"], **coverage})
+    return report
+
+
+def interior_camera_shots(cast, room, duration, usernames=()):
+    """Camera plan that stays inside the room and still reads as a film."""
+    width, depth, height = room
+    hx, hz = width / 2 - 2.2, depth / 2 - 2.2
+    z0 = ROOM_CENTRE_Z
+    eye = min(height - 1.5, 5.2)
+    names = [str(name) for name in usernames if str(name)]
+    first = names[0] if names else "normal"
+    second_name = names[1] if len(names) > 1 else first
+    lead = cast[0] if cast else [0, 0, z0]
+    second = cast[1] if len(cast) > 1 else [lead[0] + 4, 0, lead[2] + 1]
+    lx, lz = float(lead[0]), float(lead[2])
+    sx, sz = float(second[0]), float(second[2])
+
+    def face(person_x, person_z, from_x, from_z):
+        """A camera 2-3 studs in front of a head, inside the room."""
+        return [max(-hx, min(hx, person_x + from_x)), min(height - 1.5, 5.4),
+                max(z0 - hz, min(z0 + hz, person_z + from_z))]
+
+
+    shots = [
+        # 1. Establishing: front corner of the room, walls + ceiling + floor in frame.
+        (0.0, [-hx, min(height - 2.5, 7.2), z0 - hz], [lx, 4.2, lz], first,
+         "smooth", "wide", 2.6),
+        # 2. Two-shot from the front, cast centred.
+        (0.10, [0.0, eye, z0 - hz * 0.85], [(lx + sx) / 2, 4.4, (lz + sz) / 2], first,
+         "smooth", "auto", 2.6),
+        # 3. Face close-up on the lead, inside the room.
+        (0.20, face(lx, lz, 1.7, -2.0), [lx, 4.9, lz], first, "snap", "face", 2.6),
+        # 4. Side angle from the left wall (sees the bunk bed).
+        (0.30, [-hx, min(height - 2.0, 5.6), z0 + hz * 0.5], [0.0, 4.2, z0], first,
+         "smooth", "auto", 2.6),
+        # 5. Face close-up on the second brother.
+        (0.40, face(sx, sz, -1.7, -2.0), [sx, 4.9, sz], second_name,
+         "snap", "face", 2.6),
+        # 6. Over-the-shoulder from behind the lead, looking at the second.
+        (0.50, [lx + 1.4, min(height - 1.6, 5.6), min(z0 + hz, lz + 2.8)], [sx, 4.3, sz],
+         first, "smooth", "close", 2.6),
+        # 7. Wide from the back corner, looking down across the beds at the cast.
+        (0.60, [hx, min(height - 1.8, 6.8), z0 + hz], [lx, 3.6, lz], first,
+         "smooth", "wide", 2.6),
+        # 8. Low angle from the floor: dramatic, still inside.
+        (0.70, [min(hx, lx + 3.2), 3.2, max(z0 - hz, lz - 3.4)], [lx, 5.0, lz], first,
+         "snap", "auto", 2.6),
+        # 9. Air shot from the ceiling corner, bed + cast in frame.
+        (0.80, [-hx * 0.7, height - 1.5, z0 + hz * 0.7], [lx, 3.0, lz + 1.5], first,
+         "smooth", "auto", 2.6),
+        # 10. Final two-shot from the front, both brothers in frame and warm.
+        (0.90, [(lx + sx) / 2, 5.0, max(z0 - hz, min(lz, sz) - 7.0)],
+         [(lx + sx) / 2, 4.4, (lz + sz) / 2], first, "snap", "auto", 2.6),
+    ]
+    shots[-1] = (1.0,) + tuple(shots[-1][1:])
+    output = []
+    for fraction, position, target, focus, transition, framing, face_distance in shots:
+        output.append({
+            "time": round(duration * fraction, 2),
+            # X stays within the side walls, Y between floor and ceiling, Z within
+            # the front and back walls - every shot is taken from inside the room.
+            "position": [round(max(-hx, min(hx, position[0])), 2),
+                         round(max(3.0, min(height - 1.5, position[1])), 2),
+                         round(max(z0 - hz, min(z0 + hz, position[2])), 2)],
+            "target": [round(v, 2) for v in target],
+            "focus_username": focus, "transition": transition,
+            "framing": framing, "face_distance": face_distance,
+        })
+    return output
+
+
+def clamp_cameras_to_room(plan, room):
+    """Keep every camera inside the room: no shot from outside or above the roof."""
+    width, depth, height = room
+    half_x, half_z = width / 2 - 2.0, depth / 2 - 2.0
+    for shot in plan.get("camera_shots") or []:
+        position = list(shot.get("position") or [0, 0, 0])
+        target = list(shot.get("target") or [0, 0, 0])
+        position[0] = max(-half_x, min(half_x, float(position[0])))
+        position[1] = max(3.0, min(height - 1.5, float(position[1])))
+        position[2] = max(ROOM_CENTRE_Z - half_z, min(ROOM_CENTRE_Z + half_z, float(position[2])))
+        target[0] = max(-half_x, min(half_x, float(target[0])))
+        target[1] = max(2.0, min(height - 1.0, float(target[1])))
+        target[2] = max(ROOM_CENTRE_Z - half_z, min(ROOM_CENTRE_Z + half_z, float(target[2])))
+        # A face close-up needs the camera 2-3.4 studs from the head, never inside it.
+        if str(shot.get("framing")) == "face":
+            dx, dy, dz = (target[0] - position[0], target[1] - position[1],
+                          target[2] - position[2])
+            span = max(0.001, (dx * dx + dy * dy + dz * dz) ** 0.5)
+            need = float(shot.get("face_distance") or 2.6)
+            if span < need:
+                scale = need / span
+                position = [target[0] - dx * scale, target[1] - dy * scale,
+                            target[2] - dz * scale]
+                position[1] = max(3.0, min(height - 1.5, position[1]))
+        shot["position"] = [round(v, 2) for v in position]
+        shot["target"] = [round(v, 2) for v in target]
+    return plan
 
 
 def lua_string(value):
@@ -1459,6 +2153,11 @@ def main():
     parser.add_argument("--target-props", type=int, default=3000, help="minimum furnished world Parts after deterministic expansion (1260=standard, 3000=dense, 5000=ultra)")
     parser.add_argument("--usernames", type=Path, help="JSON file containing the ordered Roblox cast")
     parser.add_argument("--story-topic", default="", help="explicit user request used to gate optional avatar-body effects")
+    parser.add_argument("--interior", nargs="?", const="small", default="",
+                        help="the scene happens inside a room: tiny|small|medium (default small). "
+                             "Pulls every prop inside the room and adds floor/walls/ceiling/door/window.")
+    parser.add_argument("--scene-mode", choices=["auto", "interior", "outdoor"], default="",
+                        help="let tools/scene_mode.py decide (auto) or force a mode")
     args = parser.parse_args()
     source, destination, duration = args.source, args.destination, args.duration
     usernames = json.loads(args.usernames.read_text(encoding="utf-8")) if args.usernames else []
@@ -1487,10 +2186,73 @@ def main():
             print(f"Invalid AI map plan ({exc}); using the themed fallback map.", file=sys.stderr)
             raw_plan = procedural_fallback_plan(args.theme, args.story, duration, usernames)
             source_label = "theme/story procedural fallback"
+    # A story that happens in a room must be rendered in a room: the mode comes
+    # from --scene-mode/--interior, and defaults to the story's own words.
+    interior_size = (args.interior or "").strip()
+    if args.scene_mode == "interior" and not interior_size:
+        interior_size = "small"
+    if args.scene_mode == "auto" or (not interior_size and not args.scene_mode):
+        from scene_mode import detect as detect_scene
+        narration_text = ""
+        try:
+            narration_text = Path("dist/narration.txt").read_text(encoding="utf-8")
+        except OSError:
+            pass
+        decided = detect_scene(args.story_topic or args.theme, narration_text)
+        if decided["mode"] == "interior":
+            interior_size = interior_size or decided["size"]
+            print(f"Interior scene ({decided['reason']}): building a real room, not an open map.",
+                  file=sys.stderr)
+    if args.scene_mode == "outdoor":
+        interior_size = ""
     try:
         anchors = validate(raw_plan, duration, usernames, args.min_props, args.story_topic)
-        plan = expand_plan(anchors, args.target_props)
-        plan = validate(plan, duration, usernames, args.target_props, args.story_topic)
+        room = interior_room(interior_size) if interior_size else None
+        if room:
+            # Indoor scenes are built as a room: no open world, no landmark buildings,
+            # no plaza decor. The AI's own props become furniture, then floor, walls,
+            # ceiling, door and window are added, and furniture fills the room.
+            anchors = {**anchors, "props": fit_anchors_to_room(anchors.get("props") or [], room)}
+            shell = room_shell(anchors, room)
+            furniture = furnish_room(anchors, room)
+            details = room_details(room, shell + furniture)
+            # The builder, not the later review pass, decides what fits: anything
+            # that would be deleted for overlapping is slid along a wall instead.
+            room_parts, dropped = resolve_overlaps(shell + furniture + details, room)
+            plan = {**anchors, "props": merge_room_props(anchors, room, room_parts)}
+            if dropped:
+                print(f"Interior build: dropped {len(dropped)} part(s) that cannot fit "
+                      f"({', '.join(dropped[:6])}).", file=sys.stderr)
+            plan = arrange_cast(plan, room, usernames)
+            cast = [[person["position"][0], 0, person["position"][2]]
+                    for person in plan.get("character_placements") or []]
+            plan["camera_shots"] = interior_camera_shots(cast, room, duration, usernames)
+            plan["name"] = str(plan.get("name") or "Story Room")[:48]
+        else:
+            plan = expand_plan(anchors, args.target_props)
+        # A room holds a roomful of furniture, not a 1260-Part city: the density
+        # target belongs to open worlds.
+        density = min(args.target_props, INTERIOR_MAX_PROPS) if room else args.target_props
+        required = args.min_props if room else max(args.min_props, density)
+        plan = validate(plan, duration, usernames, required, args.story_topic)
+        if room:
+            # validate() re-normalises cameras; keep them inside the room afterwards.
+            plan = clamp_cameras_to_room(plan, room)
+            plan["interior"] = {"width": room[0], "depth": room[1], "height": room[2],
+                               "centre_z": ROOM_CENTRE_Z}
+            print(f"Interior build: {len(plan['props'])} Parts in a "
+                  f"{room[0]:.0f}x{room[1]:.0f}x{room[2]:.0f} stud room.", file=sys.stderr)
+            coverage = interior_view_report(plan)
+            plan, coverage = repair_blocked_shots(plan, room, coverage)
+            plan["interior_view"] = coverage
+            for entry in coverage:
+                print(f"  camera t={entry['time']:>6} {str(entry['framing']):5} "
+                      f"sky {entry['sky'] * 100:4.1f}%  cast {entry['cast'] * 100:4.1f}%  "
+                      f"room {entry['room'] * 100:4.1f}%  furniture "
+                      f"{entry['furniture'] * 100:4.1f}%", file=sys.stderr)
+            if any(entry["sky"] > 0.02 for entry in coverage):
+                print("Warning: a camera can see past the room walls; keeping it closer to "
+                      "the cast.", file=sys.stderr)
     except ValueError as exc:
         raise SystemExit(f"Could not construct a valid furnished world: {exc}") from exc
     json_path = destination if args.json_only else destination.with_suffix(".json")

@@ -669,7 +669,9 @@ jobs:
           PROMPT
           # The run's shared memory, sent as the real "system" role: who the model is,
           # that the workflow is not the user, and everything decided so far.
-          python tools/ai_memory.py \
+          # Start this run's memory from scratch: a stale file must never tell the
+          # story about last run's topic.
+          python tools/ai_memory.py --reset \
             --set "story_topic=${STORY_TOPIC}" --set "duration=${DURATION_SECONDS}" \
             --set "duration_label=${DURATION_LABEL}" --set "cast=${CAST_NAMES}" \
             --set "world_theme=${WORLD_THEME:-}" --set "model=${AI_MODEL}" \
@@ -879,12 +881,23 @@ jobs:
           SHOT_MAX=$(( SHOT_COUNT + 4 < 24 ? SHOT_COUNT + 4 : 24 ))
           WEB_RESEARCH=$(jq -c . dist/web_research.json 2>/dev/null || echo '[]')
           python tools/say.py plan "Camera storyboard: ${SHOT_COUNT}-${SHOT_MAX} shots, AI-timed face expression beats, at least 3 face close-ups."
+          # Run #109 told a bedroom story and rendered an open-air world: nothing ever
+          # asked for a room. Decide from the story itself whether this scene happens
+          # INSIDE, and if so say so at the top of the plan prompt and in the builder.
+          SCENE_JSON=$(python tools/scene_mode.py --topic "$STORY_TOPIC" --narration dist/narration.txt \
+            --github-env "$GITHUB_ENV" --prompt-out scene_prompt.txt --json)
+          WORLD_MODE=$(printf '%s' "$SCENE_JSON" | jq -r '.mode // "outdoor"')
+          export WORLD_MODE
+          SCENE_BLOCK=$(cat scene_prompt.txt)
+          export SCENE_BLOCK
+          python tools/say.py plan "Scene mode: ${WORLD_MODE} $(printf '%s' "$SCENE_JSON" | jq -r '.reason')"
           cat > map_prompt.txt <<PROMPT
           The web is NOT searched for you by default: nothing is scraped unless you ask. If a real-world fact would genuinely make this story better (a real place, a real tradition, a real object), return search_queries and the workflow runs those searches and sends you the facts. If you do not need any, return "search_queries":[] and no search happens. Do not repeat a query you already asked. If you notice you are repeating yourself or re-planning the same thing, say so briefly and return the best complete plan you have.
           You have full creative authority over this video and may do anything at any time: invent characters, props, buildings, colours, materials, emotions, camera moves, cut timing and expression timing however you think makes the best YouTube-Shorts-style Roblox story short. If you need current real-world facts at any point, add "search_queries": ["…"] to your JSON and the workflow will run those web searches and ask you again with the results.
           Think through the complete story and invent/design the entire playable, detailed Roblox Studio world plus a cinematic camera plan with animated faces.
           Story/topic: "${STORY_TOPIC}"
           Story narration: "${NARRATION}"
+          ${SCENE_BLOCK}
           User's visual-theme cue: "${WORLD_THEME:-AUTO FROM STORY}"
           If the cue is AUTO FROM STORY, invent a distinctive, coherent theme from the story/topic. Otherwise, treat the user's cue as a required design constraint: preserve its meaning in the world theme, architecture, landmarks, palette, materials, props, lighting, and atmosphere. For example, a daylight cue means a clearly bright, naturally sunlit daytime world; do not turn it into a night/neon scene. Never replace a supplied theme with a different story-derived theme or generic city unless it genuinely fits the user's cue.
           Story usernames in order (first is lead): ${CAST_NAMES:-none supplied}. The Studio experience loads public R15 avatars at runtime without visible username labels or overlays. Add an avatar-body visual effect (such as a number, scar, tattoo, badge, or symbol) only when the user's story/topic explicitly requests that effect; otherwise add none.
@@ -1292,7 +1305,7 @@ jobs:
 
             validation_status=0
             python tools/build_story_map.py map_response.json dist/Roblox_Story_Map.json "$DURATION_SECONDS" \
-              --json-only --strict --min-props 8 --target-props "$TARGET_PROPS" --usernames dist/characters.json --story-topic "$STORY_TOPIC" \
+              --json-only --strict --min-props 8 --target-props "$TARGET_PROPS" --usernames dist/characters.json --story-topic "$STORY_TOPIC" --scene-mode "${WORLD_MODE:-auto}" \
               > map_validation.log 2>&1 || validation_status=$?
             if [ "$validation_status" -eq 0 ]; then
               cat map_validation.log
@@ -1327,7 +1340,7 @@ jobs:
             FALLBACK_STORY="${STORY_TOPIC}. $(cat dist/narration.txt)"
             python tools/build_story_map.py map_response.json dist/Roblox_Story_Map.json "$DURATION_SECONDS" \
               --json-only --fallback --theme "$WORLD_THEME" --story "$FALLBACK_STORY" \
-              --target-props "$TARGET_PROPS" --usernames dist/characters.json --story-topic "$STORY_TOPIC"
+              --target-props "$TARGET_PROPS" --usernames dist/characters.json --story-topic "$STORY_TOPIC" --scene-mode "${WORLD_MODE:-auto}"
             echo "Theme/story procedural fallback" > dist/map_source.txt
           fi
           python - <<'PY'
