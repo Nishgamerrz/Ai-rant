@@ -254,9 +254,13 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("test:avatar-rig", renderer_package["scripts"])
         self.assertIn("test:avatar-obj", renderer_package["scripts"])
         self.assertIn("test:module-resolution", renderer_package["scripts"])
-        self.assertIn("function animateActor(actor,t)", renderer)
+        self.assertIn("function animateActor(actor, t)", renderer)
         self.assertIn("actor.root.rotation.y", renderer)
-        self.assertIn("deterministic, collision-free paths", renderer)
+        # The cast is blocked from a camera-cut schedule (actor_motion.mjs) instead
+        # of sliding round a tiny sine circle in place.
+        self.assertIn("planMarks", renderer)
+        self.assertIn("/actor_motion.mjs", renderer)
+        self.assertIn("idleAvatarRig", renderer)
         self.assertIn("await RAPIER.init()", renderer)
         self.assertIn("physicsWorld.step();physicsWorld.step();", renderer)
         self.assertIn("dynamicPropInstances", renderer)

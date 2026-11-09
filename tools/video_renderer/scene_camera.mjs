@@ -48,6 +48,27 @@ function underOverhang(position, blockers) {
   });
 }
 
+/**
+ * A shot is only usable if it is taken from inside the room. Without this the
+ * search below happily placed a camera 14-42 studs away - outside a 26-stud
+ * bedroom - and the indoor scene rendered from the garden.
+ */
+function insideRoom(position, bounds) {
+  if (!bounds) return true;
+  return position[0] >= bounds.minX && position[0] <= bounds.maxX
+    && position[2] >= bounds.minZ && position[2] <= bounds.maxZ
+    && position[1] >= bounds.minY && position[1] <= bounds.maxY;
+}
+
+function clampToRoom(position, bounds) {
+  if (!bounds) return position;
+  return [
+    clamp(position[0], bounds.minX, bounds.maxX),
+    clamp(position[1], bounds.minY, bounds.maxY),
+    clamp(position[2], bounds.minZ, bounds.maxZ),
+  ];
+}
+
 function clearView(target, position, blockers) {
   // Keep a generous safety margin: a camera merely grazing a wall used to fill
   // the frame with an unexplained dark slab instead of the character.
@@ -59,7 +80,7 @@ function clearView(target, position, blockers) {
 }
 
 /** Keep the camera outside map geometry and preserve an unobstructed view of its target. */
-export function chooseSafeCamera(target, desired, blockers, minDistance = 14, maxDistance = 42) {
+export function chooseSafeCamera(target, desired, blockers, minDistance = 14, maxDistance = 42, bounds = null) {
   const raw = desired.map((value, axis) => value - target[axis]);
   const rawDistance = Math.hypot(...raw) || 1;
   const distance = clamp(rawDistance, minDistance, maxDistance);
@@ -73,8 +94,9 @@ export function chooseSafeCamera(target, desired, blockers, minDistance = 14, ma
     target[2] + Math.cos(elevation) * Math.sin(angle) * radius,
   ];
 
-  const initial = makeCandidate(yaw, pitch, distance);
-  if (clearView(target, initial, blockers)) return initial;
+  const initial = bounds ? clampToRoom(makeCandidate(yaw, pitch, distance), bounds)
+    : makeCandidate(yaw, pitch, distance);
+  if (insideRoom(initial, bounds) && clearView(target, initial, blockers)) return initial;
 
   let best = null;
   let bestCost = Infinity;
@@ -89,7 +111,10 @@ export function chooseSafeCamera(target, desired, blockers, minDistance = 14, ma
     for (const elevation of elevations) {
       if (elevation < MIN_ELEVATION) continue;
       for (const degrees of angles) {
-        const candidate = makeCandidate(yaw + degrees * Math.PI / 180, elevation, radius);
+        const candidate = bounds
+          ? clampToRoom(makeCandidate(yaw + degrees * Math.PI / 180, elevation, radius), bounds)
+          : makeCandidate(yaw + degrees * Math.PI / 180, elevation, radius);
+        if (!insideRoom(candidate, bounds)) continue;
         if (!clearView(target, candidate, blockers)) continue;
         const cost = Math.hypot(candidate[0] - desired[0], candidate[1] - desired[1], candidate[2] - desired[2]);
         if (cost < bestCost) {
@@ -104,6 +129,11 @@ export function chooseSafeCamera(target, desired, blockers, minDistance = 14, ma
 
   // The map can contain a closed/tall cluster; rise above it rather than place
   // the camera inside a wall or leave the avatar completely occluded.
+  if (bounds) {
+    // Indoors there is no roofline to climb over: sit as far back as the room
+    // allows, aimed straight at the subject.
+    return clampToRoom([target[0] + minDistance * 0.6, target[1] + 2.2, target[2] - minDistance * 0.8], bounds);
+  }
   const roofline = blockers.reduce((max, box) => Math.max(max, box.position[1] + box.size[1] / 2), 8);
   // This last-resort over-the-roof shot is the only place allowed to leave the
   // elevation floor, because it is still better than a wall in the lens.
@@ -116,7 +146,7 @@ export function chooseSafeCamera(target, desired, blockers, minDistance = 14, ma
  * beat, so the camera must get within a couple of studs without clipping into
  * the head, a wall, or the character's own shoulders.
  */
-export function chooseFaceCamera(target, desired, blockers, distance = 2.5) {
+export function chooseFaceCamera(target, desired, blockers, distance = 2.5, bounds = null) {
   const raw = desired.map((value, axis) => value - target[axis]);
   const rawDistance = Math.hypot(...raw) || 1;
   const yaw = Math.atan2(raw[2], raw[0]);
@@ -127,6 +157,7 @@ export function chooseFaceCamera(target, desired, blockers, distance = 2.5) {
     target[2] + Math.cos(elevation) * Math.sin(angle) * radius,
   ];
   const allowed = (position) => {
+    if (!insideRoom(position, bounds)) return false;
     if (position[1] < target[1] - 1.2) return false;
     if (blockers.some((box) => inside(position, box, 0.75))) return false;
     return !blockers.some((box) => segmentHitsBox(target, position, box, 0.35));
@@ -141,7 +172,7 @@ export function chooseFaceCamera(target, desired, blockers, distance = 2.5) {
     }
   }
   // Never leave the face unreadable: fall back to a clean medium shot.
-  return chooseSafeCamera(target, desired, blockers, 7, 16);
+  return chooseSafeCamera(target, desired, blockers, bounds ? 3 : 7, bounds ? 9 : 16, bounds);
 }
 
 export { segmentHitsBox };

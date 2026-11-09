@@ -281,6 +281,8 @@ jobs:
           npm run test:module-resolution
           npm run test:camera
           npm run test:avatar-rig
+          npm run test:avatar-rigid
+          npm run test:actor-motion
           npm run test:avatar-obj
           npm run test:face
           npm run test:avatar-glb
