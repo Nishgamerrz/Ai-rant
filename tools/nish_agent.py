@@ -677,9 +677,100 @@ def main() -> None:
         # brief pause
         time.sleep(0.3)
 
-    # Tunnel live hint — actual long idle is handled by workflow step after upload
-    if tunnel_url and args.tunnel:
-        print(paint(f"[nish-agent] live at {tunnel_url} — files at /__nish/files , chat at /__nish/chat (POST message) — workflow will stay idle after upload", "success"), flush=True)
+    # Persistent live mode — this Run NishAgent step stays as the last plan until workflow dies,
+    # streaming thinking/tools/files via direct GitHub API (log tail + artifact). This replaces the separate
+    # Keep runner alive step and the Post Checkout noise — the last visible plan is now the AI itself.
+    try:
+        print(paint("[nish-agent live] entering persistent live mode — this plan will stay active until workflow timeout, streaming via direct GitHub API (no Cloudflare needed)...", "success"), flush=True)
+        # prepare live queue offset (messages sent from website via tunnel if enabled, otherwise just heartbeat)
+        seen_lines = 0
+        if live_queue.is_file():
+            try:
+                seen_lines = len([l for l in live_queue.read_text(encoding="utf-8").splitlines() if l.strip()])
+            except:
+                seen_lines = 0
+        for live_i in range(600):  # 600*10s = 100m, fits 120m timeout
+            # check for new live messages queued via /__nish/chat (tunnel or local)
+            if live_queue.is_file():
+                try:
+                    lines = [l for l in live_queue.read_text(encoding="utf-8").splitlines() if l.strip()]
+                    if len(lines) > seen_lines:
+                        new = lines[seen_lines:]
+                        seen_lines = len(lines)
+                        for raw in new:
+                            try:
+                                import json as _jl
+                                data = _jl.loads(raw)
+                            except:
+                                continue
+                            msg = str(data.get("message") or data.get("prompt") or "").strip()
+                            if not msg:
+                                continue
+                            print(paint(f"[live message] {msg[:300]}", "tool"), flush=True)
+                            # append as user and run one more AI round inside this same plan
+                            history.append({"role": "user", "content": msg, "time": datetime.now(timezone.utc).isoformat(), "via": "live"})
+                            save_chat(history)
+                            label = f"nish-agent live {live_i+1}"
+                            try:
+                                answer2, parsed2 = run_one_round(model, msg, history[:-1], label, True)
+                            except Exception as e:
+                                print(paint(f"[live] model call failed: {e}", "error"), flush=True)
+                                continue
+                            thought2 = (parsed2 or {}).get("thought") or ""
+                            tool_calls2 = (parsed2 or {}).get("tool_calls") or []
+                            answer2 = (parsed2 or {}).get("answer") or answer2 or ""
+                            print(paint(f"[agent thought] {thought2[:260]}", "thinking"), flush=True)
+                            print(paint(f"[agent] {answer2[:500]}", "answer"), flush=True)
+                            history.append({"role": "assistant", "content": answer2, "thought": thought2, "tool_calls": tool_calls2, "time": datetime.now(timezone.utc).isoformat()})
+                            save_chat(history)
+                            if tool_calls2:
+                                results2 = []
+                                for call in tool_calls2[:6]:
+                                    tool = str(call.get("tool") or call.get("name") or "").strip().lower()
+                                    if tool in ("web_search", "search"): tool = "search_web"
+                                    if tool in ("write_file", "save_file"): tool = "create_file"
+                                    if tool in ("exec", "shell", "bash"): tool = "run_cmd"
+                                    if tool in ("image", "generate_image"): tool = "create_image"
+                                    if tool not in TOOLS:
+                                        out = {"ok": False, "error": f"unknown tool {tool}"}
+                                        print(paint(f"[tool {tool}] unknown", "error"), flush=True)
+                                    else:
+                                        print(paint(f"[tool {tool}] {json.dumps(call)[:240]}", "tool"), flush=True)
+                                        try:
+                                            out = TOOLS[tool](call)
+                                        except Exception as exc:
+                                            out = {"ok": False, "error": str(exc)}
+                                        print(paint(f"[tool {tool}] -> {json.dumps(out, ensure_ascii=False)[:2200]}", "plan"), flush=True)
+                                    log_tool(tool, call, out)
+                                    results2.append({"tool": tool, "input": call, "output": out})
+                                for r in results2:
+                                    history.append({"role": "tool", "tool": r["tool"], "output": r["output"], "time": datetime.now(timezone.utc).isoformat()})
+                                save_chat(history)
+                            # refresh preview for direct API polling (no tunnel needed)
+                            try:
+                                (ROOT / "dist" / "preview").mkdir(parents=True, exist_ok=True)
+                                (ROOT / "dist" / "preview" / "agent_chat.json").write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+                                if TOOLS_LOG.is_file():
+                                    (ROOT / "dist" / "preview" / "agent_tools.jsonl").write_text(TOOLS_LOG.read_text(encoding="utf-8"), encoding="utf-8")
+                            except Exception:
+                                pass
+                except Exception as e:
+                    print(paint(f"[live] queue check failed: {e}", "warning"), flush=True)
+            if live_i % 6 == 0:
+                print(paint(f"[nish-agent live] heartbeat {live_i}/600 — {len(list(WORKSPACE.rglob('*')))} files — {len(history)} messages — {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC — direct API polling active", "plan"), flush=True)
+                try:
+                    (ROOT / "dist" / "preview").mkdir(parents=True, exist_ok=True)
+                    (ROOT / "dist" / "preview" / "agent_chat.json").write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+                    if TOOLS_LOG.is_file():
+                        (ROOT / "dist" / "preview" / "agent_tools.jsonl").write_text(TOOLS_LOG.read_text(encoding="utf-8"), encoding="utf-8")
+                except Exception:
+                    pass
+            time.sleep(10)
+        print(paint("[nish-agent live] persistent mode finished — workflow will now complete and upload artifacts", "success"), flush=True)
+    except Exception as exc:
+        print(paint(f"[live] persistent loop ended: {exc}", "warning"), flush=True)
+
+    # legacy tunnel hint (now direct API)
 
     # final summary to step summary
     summary = os.environ.get("GITHUB_STEP_SUMMARY")

@@ -21,16 +21,13 @@ export async function POST(req: NextRequest) {
       await dispatchWorkflow(SHORT_WORKFLOW, inputs);
       return NextResponse.json({ ok: true, workflow: SHORT_WORKFLOW, inputs });
     }
-    // Agent
+    // Agent — direct API mode, no tunnel
     const prompt = String(body.prompt || body.story_topic || "").trim();
     if (!prompt) return NextResponse.json({ error: "prompt required" }, { status: 400 });
     const model = String(body.model_quality || body.model || "hard");
-    const enable_tunnel = String(body.enable_tunnel ?? body.enableTunnel ?? "false");
     await dispatchWorkflow(AGENT_WORKFLOW, {
       prompt,
       model_quality: model,
-      enable_tunnel: enable_tunnel === "true" ? "true" : "false",
-      task_hint: String(body.task_hint || kind || ""),
     });
     return NextResponse.json({ ok: true, workflow: AGENT_WORKFLOW, prompt, model_quality: model });
   } catch (e: any) {

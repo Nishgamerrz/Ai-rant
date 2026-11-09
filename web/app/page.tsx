@@ -11,7 +11,6 @@ export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [selectedRun, setSelectedRun] = useState<number | null>(null);
-  const [tunnelUrl, setTunnelUrl] = useState<string | null>(null);
   const [rightTab, setRightTab] = useState<"files" | "logs" | "subagent">("files");
   const [preview, setPreview] = useState<{ path: string; content: string } | null>(null);
   const [steps, setSteps] = useState<any[]>([]);
@@ -26,19 +25,11 @@ export default function Home() {
       if (j.run) {
         const st = j.run.status + (j.run.conclusion ? " · " + j.run.conclusion : "");
         setRunStatus(st);
-        // auto-switch to logs for brand-new in_progress runs where files are empty
         if (j.run.status === "in_progress" || j.run.status === "queued") {
-          // keep user choice but default new runs to logs
           setRightTab((prev) => prev);
         }
       }
       if (j.logTail) setLiveLog(j.logTail);
-      if (j.tunnel_url) setTunnelUrl(j.tunnel_url);
-      else {
-        const t = await fetch(`/api/agent/tunnel?run=${selectedRun}`, { cache: "no-store" }).then((r) => r.json()).catch(() => null);
-        if (t?.tunnel_url) setTunnelUrl(t.tunnel_url);
-        else if (!j.tunnel_url) setTunnelUrl(null);
-      }
     } catch {}
   }
 
@@ -46,11 +37,9 @@ export default function Home() {
     if (!selectedRun) {
       setSteps([]);
       setRunStatus("idle");
-      setTunnelUrl(null);
       setLiveLog("");
       return;
     }
-    // new run -> show live execution by default (user can switch to files/subagent after)
     setRightTab("logs");
     pollLogs();
     const id = setInterval(pollLogs, 3500);
@@ -70,7 +59,7 @@ export default function Home() {
             </button>
             <div className="min-w-0 hidden sm:block">
               <h1 className="text-sm font-semibold tracking-tight leading-none">Agent Workspace</h1>
-              <p className="text-xs text-zinc-500 leading-none mt-1">Real-time workflow chat · artifacts · live tunnel</p>
+              <p className="text-xs text-zinc-500 leading-none mt-1">Real-time workflow chat · direct GitHub API · no tunnel</p>
             </div>
             <div className="ml-auto flex items-center gap-2">
               <div className="hidden lg:flex items-center gap-1 p-1 rounded-xl bg-zinc-900 border border-zinc-800">
@@ -90,17 +79,17 @@ export default function Home() {
         <div className="flex-1 flex min-h-0">
           {/* Chat */}
           <div className="flex-1 flex flex-col min-w-0">
-            <ChatWindow runId={selectedRun} tunnelUrl={tunnelUrl} liveMode={Boolean(tunnelUrl)} />
+            <ChatWindow runId={selectedRun} />
           </div>
 
           {/* Right panel — desktop */}
           <div className="hidden lg:flex w-[380px] shrink-0 border-l border-zinc-800/80 bg-zinc-900/20 flex-col">
             <div className="flex-1 overflow-auto p-3 space-y-3">
-              {rightTab === "files" && <FileExplorer runId={selectedRun} tunnelUrl={tunnelUrl} onOpenFile={(path, content) => setPreview({ path, content })} />}
+              {rightTab === "files" && <FileExplorer runId={selectedRun} onOpenFile={(path, content) => setPreview({ path, content })} />}
               {rightTab === "logs" && <LogViewer steps={steps} runStatus={runStatus} logTail={liveLog} />}
               {rightTab === "subagent" && <SubagentTimeline runId={selectedRun} kind="agent" liveLog={liveLog || undefined} />}
               {rightTab === "files" && selectedRun && <div className="pt-3 border-t border-zinc-800/60"><SubagentTimeline runId={selectedRun} kind="agent" liveLog={liveLog || undefined} /></div>}
-              {rightTab === "logs" && selectedRun && <div className="pt-3 border-t border-zinc-800/60"><FileExplorer runId={selectedRun} tunnelUrl={tunnelUrl} onOpenFile={(path, content) => setPreview({ path, content })} /></div>}
+              {rightTab === "logs" && selectedRun && <div className="pt-3 border-t border-zinc-800/60"><FileExplorer runId={selectedRun} onOpenFile={(path, content) => setPreview({ path, content })} /></div>}
             </div>
           </div>
         </div>
@@ -112,7 +101,7 @@ export default function Home() {
             <button onClick={() => setRightTab("logs")} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${rightTab === "logs" ? "bg-white text-zinc-900" : "text-zinc-500"}`}>Logs</button>
             <button onClick={() => setRightTab("subagent")} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${rightTab === "subagent" ? "bg-white text-zinc-900" : "text-zinc-500"}`}>Subagent</button>
           </div>
-          {rightTab === "files" && <FileExplorer runId={selectedRun} tunnelUrl={tunnelUrl} onOpenFile={(p, c) => setPreview({ path: p, content: c })} />}
+          {rightTab === "files" && <FileExplorer runId={selectedRun} onOpenFile={(p, c) => setPreview({ path: p, content: c })} />}
           {rightTab === "logs" && <LogViewer steps={steps} runStatus={runStatus} logTail={liveLog} />}
           {rightTab === "subagent" && <SubagentTimeline runId={selectedRun} kind="agent" liveLog={liveLog || undefined} />}
         </div>
@@ -142,7 +131,6 @@ export default function Home() {
           if (rid) {
             setSelectedRun(rid);
           } else {
-            // fallback: poll for newest
             setTimeout(async () => {
               try {
                 const j = await fetch("/api/github/runs?kind=agent&per_page=3", { cache: "no-store" }).then((r) => r.json());
