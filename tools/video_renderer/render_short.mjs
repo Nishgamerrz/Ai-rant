@@ -434,6 +434,11 @@ function buildHtml(data) {
   // not be pushed outside one (which is how an indoor scene rendered as "outside").
   const roomBounds=roomBoundsFrom(DATA.plan.interior);
   window.roomBounds=roomBounds;
+  // What the camera is not allowed to sit inside or stare through. Generic
+  // scenery, not the camera maths, decides this: anything tall enough to hide a
+  // person. Thin slabs (the floor, a ceiling) are not blockers - a ceiling would
+  // otherwise veto every camera inside a room, since all of them are under it.
+  const cameraBlockers=mapProps.filter(p=>p.physics!=='dynamic'&&p.size[1]>=2.5);
   function actorPointIsClear(x,z,occupied){
     for(const p of mapProps){
       const [px,py,pz]=p.position,[sx,sy,sz]=p.size;
