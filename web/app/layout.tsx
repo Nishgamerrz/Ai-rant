@@ -1,5 +1,6 @@
 import "./globals.css";
 import type { Metadata } from "next";
+import { AuthGate } from "@/components/AuthGate";
 
 export const metadata: Metadata = {
   title: "NishAgent — AI Studio",
@@ -10,7 +11,9 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className="dark">
-      <body className="min-h-screen bg-ink text-zinc-100 antialiased">{children}</body>
+      <body className="min-h-screen bg-ink text-zinc-100 antialiased">
+        <AuthGate>{children}</AuthGate>
+      </body>
     </html>
   );
 }
