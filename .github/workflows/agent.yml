@@ -46,62 +46,75 @@ jobs:
       AI_TPS_WINDOW: '90'
       AI_PROJECTED_SECONDS: '1500'
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          clean: false
+      # Manual checkout — no `actions/checkout` so there is no `Post Checkout repository` step at all.
+      # RDP workflow you showed has zero `uses:` and therefore zero Post steps; we do the same here.
+      - name: Checkout repository (no Post)
+        run: |
+          set -e
+          echo "Manual checkout (like RDP — no Post Checkout repository) for ${{ github.repository }} @ ${{ github.sha }} (${{ github.ref_name }})"
+          if [ -d .git ]; then
+            echo "git already present, reusing"
+            git status --porcelain | head -n 20 || true
+          else
+            # Clone the exact ref that triggered the run — shallow, no LFS, no post-action cleanup
+            # Use the automatic GITHUB_TOKEN so private forks would also work
+            REPO="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+            # Try to fetch the exact sha first (works for push/dispatch), fallback to branch name
+            rm -rf /tmp/_manual_clone
+            git clone --depth 1 --branch "${{ github.ref_name }}" "$REPO" /tmp/_manual_clone 2>&1 | head -n 20 || \
+              git clone --depth 50 "$REPO" /tmp/_manual_clone
+            cd /tmp/_manual_clone
+            git fetch --depth 1 origin "${{ github.sha }}" 2>&1 | head -n 20 || true
+            git checkout "${{ github.sha }}" 2>&1 | head -n 20 || git checkout "${{ github.ref_name }}" 2>&1 | head -n 20 || true
+            # Copy into GITHUB_WORKSPACE (which is empty at this point)
+            shopt -s dotglob || true
+            # workspace is /home/runner/work/Ai-rant/Ai-rant == $GITHUB_WORKSPACE
+            cp -r /tmp/_manual_clone/. "$GITHUB_WORKSPACE"/ 2>&1 | head -n 20 || cp -r /tmp/_manual_clone/* "$GITHUB_WORKSPACE"/ || true
+            rm -rf /tmp/_manual_clone
+            cd "$GITHUB_WORKSPACE"
+          fi
+          echo "--- checked out ---"
+          git log --oneline -3 || true
+          ls -la | head -n 30
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      # No `actions/setup-python` — runner already has 3.11, and that action adds its own Post step.
+      - name: Set up Python (system)
+        run: |
+          python3 --version
+          pip3 --version
+          python --version || true
+          which python && ls -la $(which python) || true
 
       - name: Install agent dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y curl jq zstd
-          python -m pip install --upgrade pip
-          python -m pip install --quiet ddgs pillow reportlab pyyaml
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --quiet --break-system-packages ddgs pillow reportlab pyyaml || python3 -m pip install --quiet ddgs pillow reportlab pyyaml || pip install --quiet ddgs pillow reportlab pyyaml
+          python3 -c "import PIL, yaml, reportlab; print('deps ok')"
 
       - name: Reclaim disk for the selected model
         id: disk-space
         env:
           MODEL_QUALITY: ${{ inputs.model_quality }}
         run: |
-          python tools/say.py plan "Runner storage before cleanup:"
+          python3 tools/say.py plan "Runner storage before cleanup:"
           df -h "$GITHUB_WORKSPACE"
-          sudo rm -rf /usr/local/lib/android/sdk /usr/share/dotnet /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/share/boost
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
-          rm -rf "$HOME/.cache/pip" "$HOME/.npm/_cacache"
+          sudo rm -rf /usr/local/lib/android/sdk /usr/share/dotnet /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/share/boost 2>/dev/null || true
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+          rm -rf "$HOME/.cache/pip" "$HOME/.npm/_cacache" 2>/dev/null || true
           df -h "$GITHUB_WORKSPACE"
           AVAILABLE_KB=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}')
           AVAILABLE_GIB=$((AVAILABLE_KB / 1024 / 1024))
-          python tools/say.py plan "Free: ${AVAILABLE_GIB} GiB"
-          CACHE_RESTORE_ALLOWED=true
-          case "$MODEL_QUALITY" in
-            fast|medium) REQUIRED_GIB=8 ;;
-            hard) REQUIRED_GIB=8 ;;
-            animation_best) REQUIRED_GIB=14 ;;
-            smart_11b) REQUIRED_GIB=20 ;;
-            *) REQUIRED_GIB=10 ;;
-          esac
-          [ "$AVAILABLE_GIB" -ge "$REQUIRED_GIB" ] || { echo "Need ${REQUIRED_GIB} GiB free" >&2; exit 1; }
-          [ "$AVAILABLE_GIB" -ge $((REQUIRED_GIB+4)) ] || CACHE_RESTORE_ALLOWED=false
-          echo "cache_restore_allowed=$CACHE_RESTORE_ALLOWED" >> "$GITHUB_OUTPUT"
+          python3 tools/say.py plan "Free: ${AVAILABLE_GIB} GiB"
 
-      - name: Restore cached model
-        id: model-cache
-        if: steps.disk-space.outputs.cache_restore_allowed == 'true'
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.ollama/models
-          key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'animation_best' && 'deepseek-r1-8b-v1' || inputs.model_quality == 'smart_11b' && 'qwen3-14b-v1' || inputs.model_quality == 'hard' && 'qwen3-8b-v3' || inputs.model_quality == 'medium' && 'qwen3-8b-v1' || 'qwen3-4b-v1' }}
+      # No cache restore/save — RDP has no cache steps and thus no Post cache steps.
+      # Ollama models are pulled fresh each run (like RDP pulls Tailscale each run).
 
       - name: Download the selected AI model
         env:
           MODEL_QUALITY: ${{ inputs.model_quality }}
-          MODEL_CACHE_HIT: ${{ steps.model-cache.outputs.cache-hit }}
         run: |
           mkdir -p dist dist/agent_workspace dist/preview
           MODEL_LOG=dist/model-setup.log
@@ -147,21 +160,11 @@ jobs:
           esac
           echo "AI_NUM_CTX=$OLLAMA_CTX" >> "$GITHUB_ENV"
           echo "OLLAMA_THINKING=true" >> "$GITHUB_ENV"
-          if [ "$MODEL_CACHE_HIT" = "true" ]; then
-            echo "Model cache hit for $SELECTED_MODEL"
-          fi
           ollama pull "$SELECTED_MODEL" || { echo "pull $SELECTED_MODEL failed"; exit 1; }
           ollama pull "$AI_FALLBACK_MODEL" || true
           ollama show "$SELECTED_MODEL" >/dev/null
           sudo mkdir -p /usr/local/lib/ollama
           df -h "$GITHUB_WORKSPACE"
-
-      - name: Save and cache the model weights
-        if: steps.disk-space.outputs.cache_restore_allowed == 'true' && steps.model-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.ollama/models
-          key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'animation_best' && 'deepseek-r1-8b-v1' || inputs.model_quality == 'smart_11b' && 'qwen3-14b-v1' || inputs.model_quality == 'hard' && 'qwen3-8b-v3' || inputs.model_quality == 'medium' && 'qwen3-8b-v1' || 'qwen3-4b-v1' }}
 
       - name: Run NishAgent — web, files, images, commands, sub-agent
         id: agent
@@ -176,10 +179,9 @@ jobs:
           GROQ_MODEL: ${{ vars.GROQ_MODEL }}
         run: |
           mkdir -p dist/agent_workspace
-          python tools/say.py plan "NishAgent starting — model $AI_MODEL (preset $MODEL_QUALITY)"
-          python tools/say.py tool "Prompt: $PROMPT"
-          # Direct API mode — no Cloudflare tunnel. Live thinking, tools and files stream via GitHub API log tail + artifact polling.
-          python tools/nish_agent.py --prompt "$PROMPT" --model "$MODEL_QUALITY"
+          python3 tools/say.py plan "NishAgent starting — model $AI_MODEL (preset $MODEL_QUALITY)"
+          python3 tools/say.py tool "Prompt: $PROMPT"
+          python3 tools/nish_agent.py --prompt "$PROMPT" --model "$MODEL_QUALITY"
           echo "--- agent workspace ---"
           find dist/agent_workspace -type f | head -n 40
           ls -lh dist/agent_chat.json dist/agent_tools.jsonl 2>&1 | head
