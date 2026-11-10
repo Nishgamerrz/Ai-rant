@@ -56,7 +56,7 @@ BOX_BOTTOM = "\u2514"
 # A model start-up on a CPU runner can take minutes before the first token, and a
 # thinking model pauses mid-sentence. One quiet line is useful; a line every
 # fifteen seconds buried the model's actual words, so the note is capped.
-HEARTBEAT_NOTES = 1
+HEARTBEAT_NOTES = 3
 
 
 class TypedConsole:
@@ -244,31 +244,20 @@ class Heartbeat(threading.Thread):
         self._finished.set()
 
     def run(self) -> None:
-        while not self._finished.wait(min(5.0, self.interval)):
+        while not self._finished.wait(self.interval):
             if self.messages >= self.limit:
                 return
             idle = time.time() - self.activity
-            if idle < self.interval:
+            if idle < self.interval - 0.05:
                 continue
             if self.state == "waiting for the first token":
-                waited = time.time() - self.started
-                if self.resident:
-                    # Single quiet note only - large prompts are normal, don't spam
-                    if self.messages == 0 and waited >= 45:
-                        text = (f"[{self.label}] {waited:.0f}s prefill for {self.prompt_chars:,}-char prompt (model in memory)")
-                    else:
-                        # skip further notes, just wait quietly
-                        self.activity = time.time()
-                        continue
+                if self.resident is True:
+                    text = f"[{self.label}] already in memory, no reload — reading {self.prompt_chars:,}-character plan prompt"
                 elif self.resident is False:
-                    text = (f"[{self.label}] loading model {waited:.0f}s")
+                    text = f"[{self.label}] still loading the model into memory"
                 else:
-                    text = (f"[{self.label}] waiting {waited:.0f}s for first token")
+                    text = f"[{self.label}] no first token yet"
             else:
-                # only one mid-stream note max
-                if self.messages >= 1:
-                    self.activity = time.time()
-                    continue
                 text = f"[{self.label}] still working {idle:.0f}s"
             self.console.note(f"{text} (quiet note {self.messages + 1}/{self.limit})")
             self.messages += 1
