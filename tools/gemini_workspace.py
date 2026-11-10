@@ -77,14 +77,15 @@ character_placements, camera_shots, face_expressions, search_queries.
               cafe, station, temple, market, hall, library, museum, bakery,
               restaurant, clinic, workshop, cottage, castle, tree, plant, bench,
               lamp, stall, fence, rock, statue or vehicle. A model building is
-              turned into walls, a stepped gable roof, glass windows and glass
-              inside, a counter, tables, shelves, a rug and ceiling light, potted
+              turned into a hollow enterable shell — interior floor, real walls with doorway/window openings, a stepped gable roof, glass windows and glass
+              inside, a counter, tables/chairs, shelves with books, rugs and many warm decorative Point lights (ceiling light, pendant, wall sconces, fairy string lights, table/floor lamps, cove strip) so the hollow house glows inside, plus many potted
               plants, plants on the window sill and vines with leaves on the
-              facade. A tree becomes a trunk, branches, leaf clusters and fallen
+              facade — dense and fully furnished many times inside, not an empty box. A tree becomes a trunk, branches, leaf clusters and fallen
               leaves; a plant a pot, soil and leaves; a bench a seat, back and
               legs; a stall a counter, awning, poles and produce. Always set it.
               Building anchors should be 18-40 studs wide, 10-22 tall, 16-34 deep
-              so the interior has room for furniture; a tree 6-14 wide, 6-18 tall.
+              so the hollow interior has room for dense furniture and many decorative lights; a tree 6-14 wide, 6-18 tall.
+              Every building expands into a hollow enterable shell (interior floor, four Brick walls with doorway/window openings, stepped gable roof, glass windows + glass display/partition, plus a fully furnished dense interior: counter, tables/chairs, shelves with books, rugs, sofa, cabinets, bookshelf, sideboard, many potted plants, wall art, and many warm Point decorative lights — ceiling light, hanging pendant, wall sconces, fairy string lights, table lamps, floor lamp, cove strip — so the hollow house glows inside and reads as fully lived-in, not one solid block).
     shape     one of: Block, Ball, Cylinder, Wedge (a triangle - roofs, ramps,
               sails, kites), Prism (a tent/triangular prism), CornerWedge (a hip
               roof), Cone, Pyramid, Torus, Ring, Hemisphere (a dome), Truss (a
