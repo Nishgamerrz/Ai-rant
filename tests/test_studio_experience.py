@@ -11,6 +11,86 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW_TEXT = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+MODEL_SETUP_START = WORKFLOW_TEXT.index("- name: Download the selected AI model for story and world/camera planning")
+MODEL_SETUP_END = WORKFLOW_TEXT.index("- name: Save selected Ollama model cache", MODEL_SETUP_START)
+MODEL_SETUP = WORKFLOW_TEXT[MODEL_SETUP_START:MODEL_SETUP_END]
+
+
+class OllamaModelSetupTests(unittest.TestCase):
+    """A restored model must work offline; transient registry failures get retries."""
+
+    def test_local_cache_is_checked_before_any_registry_pull(self):
+        local_check = MODEL_SETUP.index('if ollama show "$model" >/dev/null 2>&1; then')
+        registry_pull = MODEL_SETUP.index('if ollama pull "$model"; then')
+        self.assertLess(local_check, registry_pull)
+        self.assertIn("skipping the registry", MODEL_SETUP)
+        self.assertNotIn('ollama pull "$SELECTED_MODEL"', MODEL_SETUP)
+
+    def test_a_missing_model_retries_transient_registry_failures(self):
+        self.assertIn("for pull_attempt in 1 2 3 4; do", MODEL_SETUP)
+        self.assertIn("retry_wait=$((10 * pull_attempt))", MODEL_SETUP)
+        self.assertIn('sleep "$retry_wait"', MODEL_SETUP)
+        self.assertIn('ollama show "$model" >/dev/null 2>&1', MODEL_SETUP)
+
+    def test_fallback_is_really_pulled_and_can_degrade_without_blocking_primary(self):
+        self.assertIn('AI_FALLBACK_MODEL="$FALLBACK_MODEL"', MODEL_SETUP)
+        self.assertIn('if ! ensure_model_available "$SELECTED_MODEL" selected; then', MODEL_SETUP)
+        self.assertIn('if ! ensure_model_available "$AI_FALLBACK_MODEL" fallback; then', MODEL_SETUP)
+        self.assertIn('AI_FALLBACK_MODEL="$SELECTED_MODEL"', MODEL_SETUP)
+        self.assertIn('echo "AI_FALLBACK_MODEL=$AI_FALLBACK_MODEL" >> "$GITHUB_ENV"', MODEL_SETUP)
+        self.assertNotIn('if [ -n "${AI_FALLBACK_MODEL:-}" ]', MODEL_SETUP)
+
+    def test_ollama_startup_poll_does_not_log_expected_connection_refusals(self):
+        self.assertIn('curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1', MODEL_SETUP)
+
+    @staticmethod
+    def _ensure_function():
+        start = MODEL_SETUP.index("          ensure_model_available() {")
+        end_marker = '\n          }\n          python tools/say.py success "Selected model cache restored'
+        end = MODEL_SETUP.index(end_marker, start) + len("\n          }")
+        block = MODEL_SETUP[start:end]
+        return "\n".join(line[10:] if line.startswith("          ") else line
+                           for line in block.splitlines())
+
+    def test_cached_model_short_circuits_without_a_registry_call(self):
+        script = self._ensure_function() + """
+python() { :; }
+sleep() { echo 'unexpected wait' >&2; return 1; }
+pull_calls=0
+ollama() {
+  if [ "$1" = show ]; then return 0; fi
+  if [ "$1" = pull ]; then pull_calls=$((pull_calls + 1)); return 88; fi
+  return 2
+}
+ensure_model_available qwen3:8b selected
+test "$pull_calls" -eq 0
+"""
+        result = subprocess.run(["bash", "-e", "-c", script], cwd=ROOT,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+
+    def test_registry_outage_gets_four_pulls_then_returns_failure(self):
+        script = self._ensure_function() + """
+python() { :; }
+sleep() { sleep_calls=$((sleep_calls + 1)); }
+pull_calls=0
+sleep_calls=0
+ollama() {
+  if [ "$1" = show ]; then return 1; fi
+  if [ "$1" = pull ]; then pull_calls=$((pull_calls + 1)); return 22; fi
+  return 2
+}
+if ensure_model_available qwen3:4b fallback; then
+  echo 'unexpected success' >&2
+  exit 2
+fi
+test "$pull_calls" -eq 4
+test "$sleep_calls" -eq 3
+"""
+        result = subprocess.run(["bash", "-e", "-c", script], cwd=ROOT,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
 
 
 class StudioExperienceTests(unittest.TestCase):

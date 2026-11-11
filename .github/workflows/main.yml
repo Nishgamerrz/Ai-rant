@@ -426,10 +426,10 @@ jobs:
             OLLAMA_KEEP_ALIVE=60m OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_NUM_PARALLEL=1 \
             ollama serve > ollama.log 2>&1 &
           for attempt in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then break; fi
+            if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then break; fi
             sleep 2
           done
-          if ! curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then
+          if ! curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
             echo "Ollama is not answering on port 11434; last 40 lines of its log:" >&2
             tail -n 40 ollama.log >&2 || true
             echo "## Ollama did not start" >> "$GITHUB_STEP_SUMMARY"
@@ -498,15 +498,63 @@ jobs:
             qwen3:4b|qwen3:1.7b) FALLBACK_MODEL=qwen3:8b ;;
             *) FALLBACK_MODEL=qwen3:4b ;;
           esac
-          echo "AI_FALLBACK_MODEL=$FALLBACK_MODEL" >> "$GITHUB_ENV"
-          python tools/say.py success "Selected model cache restored: ${MODEL_CACHE_HIT:-false}; pulling only $SELECTED_MODEL if its weights are not already present."
-          ollama pull "$SELECTED_MODEL"
-          # Safety net: the stream helper can switch to this model if the selected
-          # one cannot load or answer, so it must already be on disk.
-          if [ -n "${AI_FALLBACK_MODEL:-}" ] && [ "$AI_FALLBACK_MODEL" != "$SELECTED_MODEL" ]; then
-            python tools/say.py plan "Pulling the fallback model $AI_FALLBACK_MODEL so a mid-run switch never fails."
-            ollama pull "$AI_FALLBACK_MODEL"
+          # GITHUB_ENV is only applied to later steps, so keep the fallback in this
+          # shell too; otherwise this step silently skipped preparing it.
+          AI_FALLBACK_MODEL="$FALLBACK_MODEL"
+          ensure_model_available() {
+            local model="$1"
+            local purpose="$2"
+            local pull_attempt pull_status retry_wait
+            # A restored Ollama cache is already usable offline. `ollama pull`
+            # still contacts the remote registry for its manifest, so never call
+            # it when the requested tag is already installed locally.
+            if ollama show "$model" >/dev/null 2>&1; then
+              python tools/say.py success "$purpose model $model is already installed locally; skipping the registry."
+              return 0
+            fi
+            # Registry manifests can transiently return HTTP 503 even when the
+            # model cache was successfully restored. Back off and retry before
+            # declaring that a required model is unavailable.
+            for pull_attempt in 1 2 3 4; do
+              python tools/say.py plan "Pulling $purpose model $model (attempt $pull_attempt of 4)."
+              if ollama pull "$model"; then
+                if ollama show "$model" >/dev/null 2>&1; then return 0; fi
+              else
+                pull_status=$?
+                python tools/say.py warning "Ollama could not pull $model on attempt $pull_attempt (exit $pull_status)."
+              fi
+              # A completed/cached model may be usable even if the registry call
+              # itself failed while checking its manifest.
+              if ollama show "$model" >/dev/null 2>&1; then
+                python tools/say.py success "$model is available locally despite the pull response; continuing without another registry request."
+                return 0
+              fi
+              if [ "$pull_attempt" -lt 4 ]; then
+                retry_wait=$((10 * pull_attempt))
+                python tools/say.py plan "Retrying the Ollama registry request in ${retry_wait}s."
+                sleep "$retry_wait"
+              fi
+            done
+            return 1
+          }
+          python tools/say.py success "Selected model cache restored: ${MODEL_CACHE_HIT:-false}; checking local Ollama storage before any registry pull."
+          if ! ensure_model_available "$SELECTED_MODEL" selected; then
+            echo "Selected model $SELECTED_MODEL is neither cached nor downloadable after four attempts." >&2
+            echo "## Selected Ollama model unavailable" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
+          # Prepare a smaller fallback when possible. If the registry is down,
+          # the primary model can still run without model-switch recovery; pin the
+          # no-op fallback to the selected model so later steps do not try a
+          # missing default tag.
+          if [ -n "$AI_FALLBACK_MODEL" ] && [ "$AI_FALLBACK_MODEL" != "$SELECTED_MODEL" ]; then
+            if ! ensure_model_available "$AI_FALLBACK_MODEL" fallback; then
+              python tools/say.py warning "Fallback $AI_FALLBACK_MODEL is unavailable; continuing with $SELECTED_MODEL only."
+              echo "- Fallback model $AI_FALLBACK_MODEL was unavailable after retries; calls will continue on the selected model without a model switch." >> "$GITHUB_STEP_SUMMARY"
+              AI_FALLBACK_MODEL="$SELECTED_MODEL"
+            fi
+          fi
+          echo "AI_FALLBACK_MODEL=$AI_FALLBACK_MODEL" >> "$GITHUB_ENV"
           ollama show "$SELECTED_MODEL" >/dev/null
           # Warm the model once, on purpose, so the load happens here - outside the
           # per-call stall/watchdog window - and every later step (story, world
