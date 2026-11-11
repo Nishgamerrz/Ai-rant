@@ -41,6 +41,16 @@ class RendererWiringTests(unittest.TestCase):
         self.assertIn("rig:bones", RENDER_SHORT.replace(" ", ""))
         self.assertIn("addRequestedAvatarEffects(root,bones,", RENDER_SHORT.replace(" ", ""))
 
+    def test_scene_ready_updates_the_group_not_a_missing_joint_map_root(self):
+        # actor.rig is the plain {Head, ...} joint map. Only actor.avatarRig has
+        # the Three.js root; actor.root is the parent group that updates the whole
+        # hierarchy. Dereferencing actor.rig.root crashed every render at startup.
+        compact = RENDER_SHORT.replace(" ", "").replace("\n", "")
+        self.assertNotIn("actor.rig.root.updateMatrixWorld", compact)
+        self.assertIn("rig:bones,avatarRig,", compact)
+        self.assertIn("actor.root.updateMatrixWorld(true);", RENDER_SHORT)
+        self.assertIn("measureRigStretch(THREE,actor.avatarRig||actor.rig)", compact)
+
     def test_a_face_failure_cannot_kill_the_render(self):
         self.assertIn("Head measurement failed; rendering this avatar without a face",
                       RENDER_SHORT)
@@ -78,7 +88,7 @@ class RigSmokeTests(unittest.TestCase):
         """Direct check of the crash: the old code threw on a bare joint map."""
         script = """
 import * as THREE from 'three';
-import { buildAvatarRig, measureHeadRegion, measureFaceAnchor } from './avatar_rig.mjs';
+import { buildAvatarRig, measureHeadRegion, measureFaceAnchor, measureRigStretch } from './avatar_rig.mjs';
 const model = new THREE.Group();
 const material = new THREE.MeshStandardMaterial();
 const part = (name, center, size) => {
@@ -87,10 +97,24 @@ const part = (name, center, size) => {
 };
 part('Head', [0, 5.55, 0], [0.72, 0.72, 0.72]);
 part('Torso', [0, 3.55, 0], [1.05, 1.75, 0.58]);
+part('LeftArm', [-1.0, 3.7, 0], [0.4, 1.4, 0.4]);
+part('RightArm', [1.0, 3.7, 0], [0.4, 1.4, 0.4]);
+part('LeftLeg', [-0.35, 1.3, 0], [0.5, 2.4, 0.6]);
+part('RightLeg', [0.35, 1.3, 0], [0.5, 2.4, 0.6]);
 const rig = buildAvatarRig(THREE, model);
+const actorRoot = new THREE.Group();
+actorRoot.add(rig.root);
+const actor = { root: actorRoot, rig: rig.bones, avatarRig: rig };
+// This is the exact safe scene-ready path: the joint map has no .root, while
+// updating the containing actor group updates the attached Three.js rig.
+actor.root.updateMatrixWorld(true);
+const stretch = measureRigStretch(THREE, actor.avatarRig || actor.rig);
 const bonesOnly = measureHeadRegion(THREE, rig.bones);
 const wholeRig = measureHeadRegion(THREE, rig);
 console.log(JSON.stringify({
+  jointMapHasRoot: Boolean(actor.rig.root),
+  avatarRigHasRoot: Boolean(actor.avatarRig.root),
+  stretchSamples: stretch.samples,
   bonesCenter: bonesOnly.center,
   rigCenter: wholeRig.center,
   anchorLen: measureFaceAnchor(THREE, rig, rig.bones.Head, 1).anchor.length(),
@@ -102,6 +126,11 @@ console.log(JSON.stringify({
                                cwd=RENDERER, capture_output=True, text=True, timeout=300)
         self.assertEqual(result.returncode, 0, msg=result.stderr[-1500:])
         data = json.loads(result.stdout.strip().splitlines()[-1])
+        # Actor animation retains a plain joint map; only the separate avatarRig
+        # has a Three.js root. Updating actor.root safely updates the attached rig.
+        self.assertFalse(data["jointMapHasRoot"])
+        self.assertTrue(data["avatarRigHasRoot"])
+        self.assertGreater(data["stretchSamples"], 0)
         # The whole rig measures the real head geometry...
         self.assertGreater(data["rigCenter"][1], 4.0)
         # ...and a bare joint map no longer throws; it falls back to the joint.

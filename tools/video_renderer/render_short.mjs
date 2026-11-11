@@ -545,7 +545,7 @@ function buildHtml(data) {
       baseX:Number(point[0]),
       // A room's floor slab is 0.2 thick with its top at y = 0.2: stand ON it.
       baseY:Number(point[1])+(roomBounds?0.2:0),baseZ:Number(point[2]),
-      phase:index*1.73,lead,stride:lead?2.1:1.15,rig:bones,animationClips,animationScale,face,
+      phase:index*1.73,lead,stride:lead?2.1:1.15,rig:bones,avatarRig,animationClips,animationScale,face,
       blinks:blinkSchedule(index*31+5,DATA.duration+4,lead?1.15:.9)});
   }
   async function loadAvatar(profile,index){
@@ -750,9 +750,12 @@ function buildHtml(data) {
       const walkPhase=3.1;
       animateAvatarRig(actor.rig,walkPhase,actor.phase,0,1);
       idleAvatarRig(actor.rig,1.7,actor.phase,0.5);
+      // actor.rig is the plain joint map used by animation; the enclosing rig
+      // object (including its Object3D root and rigid-mesh rest profile) is kept
+      // separately as actor.avatarRig. Updating the actor group updates the full
+      // attached hierarchy, and measuring the full rig keeps the stretch guard real.
       actor.root.updateMatrixWorld(true);
-      actor.rig.Head&&actor.rig.Head.parent&&actor.rig.root.updateMatrixWorld(true);
-      const report=measureRigStretch(THREE,actor.rig);
+      const report=measureRigStretch(THREE,actor.avatarRig||actor.rig);
       if(report.maxStretch>worstStretch){worstStretch=report.maxStretch;worstPart=actor.username+':'+report.worstPart;}
     }
     window.rigStretchSummary={maxStretch:worstStretch,worstPart};
