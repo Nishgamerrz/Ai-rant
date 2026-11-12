@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -331,20 +332,14 @@ class ModelUnusable(Exception):
     """Raised when Ollama fails (5xx) to load or run the selected model."""
 
 
-class ModelTooSlow(Exception):
-    """Raised when a preset is so slow that the run would miss its budget.
-
-    A 14B model on a CPU runner can spend 20+ minutes on one narration request.
-    The workflow gives each call a wall-clock allowance; when it runs out this
-    exception triggers the fallback ladder instead of blocking the whole run.
-    """
+class NoOutputStall(Exception):
+    """Raised only when no thinking or answer content arrives for the stall window."""
 
 
 def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
-           max_seconds: float = 0.0, stall_seconds: float = 0.0,
+           stall_seconds: float = 0.0,
            type_delay: float = 0.002, type_budget: float = 120.0,
-           heartbeat_seconds: float = 15.0, min_tps: float = 0.0,
-           tps_window: float = 90.0, projected_seconds: float = 0.0) -> dict:
+           heartbeat_seconds: float = 15.0) -> dict:
     request = {**request, "stream": True}
     payload = json.dumps(request).encode("utf-8")
     http = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
@@ -366,7 +361,8 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
         label, heartbeat_seconds, console, resident=resident, prompt_chars=prompt_chars)
     if beat:
         beat.start()
-    started = time.time()
+    started = time.monotonic()
+    started_at = started
     tokens = 0
     prompt_tokens = 0
     prompt_ns = 0
@@ -379,19 +375,43 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
     answer_open = False
     repeated = False
     seen = 0
-    last_progress = time.time()
-    started_at = last_progress
+    last_progress = started_at
     first_output = 0.0
-    character_count = 0
-    # How many tokens this call was allowed to write. With the rate that is
-    # actually arriving, that is enough to project when it would finish - the
-    # honest way to catch "stuck for an hour" without imposing a wall clock on a
-    # model that is merely thinking hard.
-    target_tokens = float((request.get("options") or {}).get("num_predict") or 0)
+
+    def hand_off_if_silent_timeout(exc: BaseException) -> None:
+        """Turn an idle socket timeout into a hand-off only after the stall window."""
+        reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+        if not stall_seconds or not isinstance(reason, (TimeoutError, socket.timeout)):
+            return
+        idle = time.monotonic() - last_progress
+        if idle >= stall_seconds:
+            console.close_box()
+            raise NoOutputStall(
+                f"no thinking or answer output for {idle:.0f}s "
+                f"(stall window {stall_seconds:.0f}s); handing this call to the fallback model") from exc
+
+    def response_lines(response):
+        """Read lines while making a truly silent stream observable."""
+        try:
+            yield from response
+        except (TimeoutError, urllib.error.URLError, OSError) as exc:
+            hand_off_if_silent_timeout(exc)
+            raise
+        finally:
+            if beat:
+                beat.stop()
+
+    # urllib's timeout is an idle-socket timeout, not a total call deadline.
+    # Limit an idle read to the configured stall window so a model that never
+    # emits a first token (or goes silent mid-thought) can be handed off on time.
+    request_timeout = (min(timeout, stall_seconds)
+                       if stall_seconds > 0 and timeout > 0 else timeout)
     try:
-        handle = urllib.request.urlopen(http, timeout=timeout)
+        handle = urllib.request.urlopen(http, timeout=request_timeout)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")
+        if beat:
+            beat.stop()
         if exc.code == 400 and "think" in detail.lower():
             raise ThinkingUnsupported(detail.strip()[:300]) from exc
         if exc.code == 404:
@@ -406,8 +426,22 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
             # "unknown model architecture: 'mllama'" and returns HTTP 500.
             raise ModelUnusable(f"HTTP {exc.code}: {detail.strip()[:300]}") from exc
         raise
+    except (TimeoutError, urllib.error.URLError, OSError) as exc:
+        try:
+            hand_off_if_silent_timeout(exc)
+        finally:
+            if beat:
+                beat.stop()
+        raise
     with handle as response:
-        for raw in response:
+        for raw in response_lines(response):
+            now = time.monotonic()
+            idle = now - last_progress
+            if stall_seconds and idle >= stall_seconds:
+                console.close_box()
+                raise NoOutputStall(
+                    f"no thinking or answer output for {idle:.0f}s "
+                    f"(stall window {stall_seconds:.0f}s); handing this call to the fallback model")
             line = raw.decode("utf-8", "replace").strip()
             if not line:
                 continue
@@ -453,46 +487,9 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                             f"finishing; telling it to stop repeating and write the answer once.",
                             kind="warning")
             if piece_thinking or piece_content:
-                last_progress = time.time()
+                last_progress = time.monotonic()
                 if not first_output:
                     first_output = last_progress
-                # ~4 characters per token is close enough to judge throughput.
-                character_count += (len(piece_thinking) + len(piece_content)) / 4.0
-            now = time.time()
-            if max_seconds and now - started_at > max_seconds:
-                console.close_box()
-                raise ModelTooSlow(
-                    f"still going after {now - started_at:.0f}s "
-                    f"(budget {max_seconds:.0f}s); handing this call to the faster model")
-                    # A model that keeps talking but at 0.3 tokens/s is not making progress
-            # either: one blueprint took 48 minutes that way, and the run was over
-            # before the render started. Judge the *rate*, not the wall clock, so a
-            # slow-but-steady preset is still allowed to finish on its own terms.
-            rate = 0.0
-            if first_output and now - first_output > tps_window:
-                rate = character_count / max(1e-6, now - first_output)
-            if min_tps and rate:
-                if rate < min_tps:
-                    console.close_box()
-                    raise ModelTooSlow(
-                        f"streaming at {rate:.2f} tokens/s, below the {min_tps:.1f} tokens/s "
-                        f"floor; handing this call to a smaller model")
-            # A trickle that technically never stalls can still take an hour: a 14B
-            # model on a CPU runner writing 2 tokens/s needs 50 minutes for a
-            # 6000-token world plan. Project the finish time from the measured rate
-            # and hand over early, so the run still has time to render.
-            if projected_seconds and target_tokens and rate:
-                projected = target_tokens / rate
-                if projected > projected_seconds:
-                    console.close_box()
-                    raise ModelTooSlow(
-                        f"projected {projected / 60:.0f} min for {target_tokens:.0f} tokens at "
-                        f"{rate:.2f} tokens/s (budget {projected_seconds / 60:.0f} min); "
-                        f"handing this call to a faster model")
-            if stall_seconds and now - last_progress > stall_seconds:
-                console.close_box()
-                raise ModelTooSlow(
-                    f"no output for {stall_seconds:.0f}s; handing this call to the faster model")
             if event.get("done"):
                 tokens = int(event.get("eval_count") or 0)
                 done_reason = str(event.get("done_reason") or "")
@@ -507,7 +504,7 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
         if not quiet:
             print(paint(f"[{label}] the answer itself is repeating and was cut off; "
                   f"it will be finished with a steering instruction.", "warning"), flush=True)
-    elapsed = time.time() - started
+    elapsed = time.monotonic() - started
     # How long this call waited before it produced its first character. If the model
     # is already in RAM this is prompt processing only, a second or two; if it had to
     # be loaded from disk it is tens of seconds. Printing it makes a reload visible
@@ -605,10 +602,9 @@ def main() -> None:
                         help="known-good model to retry on when the selected one cannot run")
     parser.add_argument("--fallback-thinking", default="true",
                         help="whether the fallback model should use thinking (default true)")
-    parser.add_argument("--max-seconds", type=float, default=0.0,
-                        help="wall-clock allowance for this call; 0 = no limit")
     parser.add_argument("--stall-seconds", type=float, default=0.0,
-                        help="give up if the model emits nothing for this long; 0 = no limit")
+                        help="hand off only if no thinking or answer content arrives for this "
+                             "long; 0 = no limit")
     parser.add_argument("--type-delay", type=float,
                         default=float(os.environ.get("AI_TYPE_DELAY", "0.002")),
                         help="seconds to pause between printed characters; 0 prints at full "
@@ -621,18 +617,6 @@ def main() -> None:
                         default=float(os.environ.get("AI_HEARTBEAT", "60")),
                         help="print one quiet 'still working' note when nothing has "
                              "arrived for this long (at most 3 per call); 0 disables it")
-    parser.add_argument("--min-tps", type=float,
-                        default=float(os.environ.get("AI_MIN_TPS", "0")),
-                        help="if the streamed rate stays below this many tokens per second "
-                             "after the first --tps-window seconds, hand the call to the "
-                             "fallback model; 0 disables the check")
-    parser.add_argument("--tps-window", type=float,
-                        default=float(os.environ.get("AI_TPS_WINDOW", "90")),
-                        help="seconds of streaming before the rate is judged")
-    parser.add_argument("--projected-seconds", type=float,
-                        default=float(os.environ.get("AI_PROJECTED_SECONDS", "0") or 0),
-                        help="hand a call to the fallback model when its measured rate "
-                             "projects a finish later than this many seconds")
     parser.add_argument("--keep-stream-flag", action="store_true",
                         help="keep stream:true in the written request file for debugging")
     args = parser.parse_args()
@@ -663,15 +647,12 @@ def main() -> None:
                 f"will appear here letter by letter as it produces them, reasoning in a "
                 f"framed box.{quiet_note}", "notice"), flush=True)
 
-    limits = {"max_seconds": args.max_seconds, "stall_seconds": args.stall_seconds,
-              "min_tps": args.min_tps, "tps_window": args.tps_window,
-              "projected_seconds": args.projected_seconds,
+    limits = {"stall_seconds": args.stall_seconds,
               "type_delay": args.type_delay, "type_budget": args.type_budget,
               "heartbeat_seconds": args.heartbeat_seconds}
 
-    def run_once(payload: dict, note: str, overrides: dict | None = None) -> dict:
-        result = stream(payload, args.url, args.label, args.timeout, args.quiet,
-                        **{**limits, **(overrides or {})})
+    def run_once(payload: dict, note: str) -> dict:
+        result = stream(payload, args.url, args.label, args.timeout, args.quiet, **limits)
         # A reasoning model can spend the whole num_predict budget thinking and
         # stop mid-sentence (`done_reason: "length"`). That used to surface as a
         # mysteriously short story and burn a whole retry round; finish it here
@@ -710,7 +691,7 @@ def main() -> None:
                 "options": {**(payload.get("options") or {}), "num_predict": bigger},
             }
             retried = stream(retry_payload, args.url, args.label, args.timeout, args.quiet,
-                             **{**limits, **(overrides or {})})
+                             **limits)
             retried["token_ceiling_retry"] = bigger
             retried["steered_after_repeat"] = looping
             if retried.get("done_reason") != "length" and not retried.get("repeated"):
@@ -722,25 +703,25 @@ def main() -> None:
                 result = retried
         return result
 
-    def attempt(payload: dict, note: str = "", overrides: dict | None = None) -> dict | None:
+    def attempt(payload: dict, note: str = "") -> dict | None:
         try:
-            return run_once(payload, note, overrides)
+            return run_once(payload, note)
         except ThinkingUnsupported as exc:
             # Thinking is requested for every preset, but a few architectures
             # have no reasoning channel. Answer normally instead of failing.
             print(paint(f"[{args.label}] this model has no thinking channel ({exc}); "
                         f"answering without reasoning tokens.{note}", "warning"), flush=True)
             try:
-                result = run_once({**payload, "think": False}, note, overrides)
+                result = run_once({**payload, "think": False}, note)
             except (ModelUnusable, ModelMissing, ThinkingUnsupported) as retry_exc:
                 print(paint(f"[{args.label}] the model is unusable at all ({retry_exc}).",
                             "error"), flush=True)
                 return None
             result["thinking_unsupported"] = True
             return result
-        except ModelTooSlow as exc:
-            print(paint(f"[{args.label}] {model} is too slow for this run ({exc}).",
-                        "warning"), flush=True)
+        except NoOutputStall as exc:
+            print(paint(f"[{args.label}] {model} stopped producing thinking or answer content "
+                        f"({exc}).", "warning"), flush=True)
             return None
         except ModelMissing as exc:
             print(paint(f"[{args.label}] {model} is not installed on this runner ({exc}); "
@@ -776,9 +757,6 @@ def main() -> None:
                             f"{args.fallback_model} so the run continues.", "warning"), flush=True)
                 fallback = {**request, "model": args.fallback_model,
                             "think": bool(args.fallback_thinking)}
-                # The projection budget is what triggered the hand-over; it must not
-                # trigger again on the same measured rate, or the retry dies the same
-                # death as the first attempt.
                 result = attempt(fallback, f" (fallback {args.fallback_model})")
                 if result is not None:
                     result["fallback_model"] = args.fallback_model
@@ -791,20 +769,15 @@ def main() -> None:
                                       args.output.parent / ".ai_model")
                 else:
                     print(paint(f"[{args.label}] the fallback {args.fallback_model} could not "
-                                f"answer either; going back to {model} with the speed "
-                                f"projection switched off so the work is not thrown away.",
-                                "warning"), flush=True)
+                                f"answer either; trying {model} once more with the same "
+                                f"no-output stall watchdog.", "warning"), flush=True)
         if result is None and not switched:
-            # Last resort: the primary again, with no projection ceiling. A slow but
-            # working call is worth more than a lost plan.
-            # A model that is genuinely working should not be killed three times for
-            # its speed. The stall watchdog stays on (that catches a frozen process),
-            # the rate projection and the tps floor do not.
-            print(paint(f"[{args.label}] asking {model} once more, with the speed "
-                        f"projection switched off: a slow answer is worth more than a "
-                        f"lost plan.", "warning"), flush=True)
-            result = attempt(request, " (no speed projection)",
-                             {"projected_seconds": 0, "min_tps": 0, "max_seconds": 0})
+            # Retry the primary once, but keep the same no-thinking/no-answer stall
+            # window. No model is interrupted merely because its measured speed is low.
+            print(paint(f"[{args.label}] asking {model} once more; only a full "
+                        f"no-thinking/no-answer stall will trigger another hand-off.",
+                        "warning"), flush=True)
+            result = attempt(request)
         if result is None:
             raise SystemExit(1)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:

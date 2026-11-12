@@ -351,7 +351,11 @@ def run_one_round(model: str, prompt: str, history: list[dict], label: str, enab
         op = Path(td) / "out.json"
         rp.write_text(_json.dumps(req), encoding="utf-8")
         # use ollama_stream for coloured output + streaming + fallback handling
-        cmd = [sys.executable, str(ROOT / "tools" / "ollama_stream.py"), "--request", str(rp), "--output", str(op), "--label", label, "--timeout", "900"]
+        cmd = [
+            sys.executable, str(ROOT / "tools" / "ollama_stream.py"),
+            "--request", str(rp), "--output", str(op), "--label", label,
+            "--timeout", "900", "--stall-seconds", os.environ.get("AI_STALL", "900"),
+        ]
         # fallback model
         fallback = os.environ.get("AI_FALLBACK_MODEL", "qwen3:8b")
         if fallback:

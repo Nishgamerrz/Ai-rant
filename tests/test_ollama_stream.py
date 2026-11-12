@@ -152,25 +152,6 @@ class _PieceByPiece(BaseHTTPRequestHandler):
             self.wfile.write((json.dumps(event) + "\n").encode())
 
 
-class _SlowTrickle(BaseHTTPRequestHandler):
-    """Streams a handful of characters, then holds the connection open."""
-
-    def log_message(self, *args):
-        pass
-
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        self.rfile.read(length)
-        self.send_response(200)
-        self.send_header("Content-Type", "application/x-ndjson")
-        self.end_headers()
-        for chunk in ("a", "b", "c"):
-            self.wfile.write((json.dumps({"message": {"thinking": chunk},
-                                          "done": False}) + "\n").encode())
-            self.wfile.flush()
-            time.sleep(0.6)
-
-
 class LiveStreamingTests(unittest.TestCase):
     def test_every_piece_is_printed_as_it_arrives(self):
         import tempfile
@@ -580,95 +561,145 @@ class ThinkingBoxTests(unittest.TestCase):
         self.assertIn('if self._box and kind != "thinking":', helper)
 
 
-class ThroughputTests(unittest.TestCase):
-    """A model that crawls must be handed over, not left to eat the hour."""
+class _ModelCatalogHandler(BaseHTTPRequestHandler):
+    models: list[str] = []
 
-    def test_a_crawling_stream_is_handed_to_the_fallback(self):
-        sys.path.insert(0, str(ROOT / "tools"))
-        from ollama_stream import ModelTooSlow, stream
+    def log_message(self, *args):
+        pass
 
-        handler = type("Handler", (_SlowTrickle,), {"calls": []})
+    def do_GET(self):
+        if self.path.endswith("/api/ps"):
+            payload = {"models": []}
+        else:
+            payload = {"models": [{"name": "qwen3:14b"}, {"name": "qwen3:4b"}]}
+        body = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _SilentPrimaryThenFallback(_ModelCatalogHandler):
+    """The primary sends no thinking or answer content; the fallback answers."""
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        payload = json.loads(self.rfile.read(length))
+        model = str(payload.get("model"))
+        type(self).models.append(model)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.end_headers()
+        self.wfile.flush()
+        if model == "qwen3:14b":
+            time.sleep(0.45)  # longer than the tiny test stall window
+            return
+        events = [
+            {"message": {"content": '{"ok":"fallback"}'}, "done": False},
+            {"done": True, "done_reason": "stop", "eval_count": 5},
+        ]
+        for event in events:
+            self.wfile.write((json.dumps(event) + "\n").encode())
+            self.wfile.flush()
+
+
+class _SlowProgressingPrimary(_ModelCatalogHandler):
+    """Slow thought and answer chunks keep arriving, so the primary must finish."""
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        payload = json.loads(self.rfile.read(length))
+        model = str(payload.get("model"))
+        type(self).models.append(model)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.end_headers()
+        self.wfile.flush()
+        events = [
+            {"message": {"thinking": "Reasoning"}, "done": False},
+            {"message": {"thinking": " continues"}, "done": False},
+            {"message": {"content": '{"ok":'}, "done": False},
+            {"message": {"content": '"slow-but-progressing"}'}, "done": False},
+            {"done": True, "done_reason": "stop", "eval_count": 24},
+        ]
+        for event in events:
+            self.wfile.write((json.dumps(event) + "\n").encode())
+            self.wfile.flush()
+            time.sleep(0.08)
+
+
+class StallWatchdogTests(unittest.TestCase):
+    """Only a full no-thinking/no-answer stall may trigger model hand-off."""
+
+    def _run_cli(self, base_handler, *, stall_seconds: float):
+        import tempfile
+
+        handler = type("Handler", (base_handler,), {"models": []})
         server = HTTPServer(("127.0.0.1", 0), handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.shutdown)
         self.addCleanup(server.server_close)
-        request = {"model": "qwen3:8b", "messages": [{"role": "user", "content": "hi"}],
-                   "think": True, "options": {"num_predict": 4000}}
-        with self.assertRaises(ModelTooSlow) as caught:
-            stream(request, f"http://127.0.0.1:{server.server_port}/api/chat", "world plan",
-                   30, True, min_tps=5.0, tps_window=1.0)
-        self.assertIn("tokens/s", str(caught.exception))
-        self.assertIn("floor", str(caught.exception))
 
-    def test_a_healthy_stream_is_not_interrupted(self):
-        sys.path.insert(0, str(ROOT / "tools"))
-        from ollama_stream import stream
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            request_path = workdir / "request.json"
+            request_path.write_text(json.dumps({
+                "model": "qwen3:14b",
+                "messages": [{"role": "user", "content": "hi"}],
+                "think": True,
+                "options": {"num_predict": 6000},
+            }), encoding="utf-8")
+            environment = {**os.environ, "AI_COLOR": "0", "AI_MIN_TPS": "100000",
+                           "AI_TPS_WINDOW": "0", "AI_PROJECTED_SECONDS": "0.001"}
+            environment.pop("GITHUB_ENV", None)
+            result = subprocess.run(
+                [sys.executable, "tools/ollama_stream.py",
+                 "--request", str(request_path), "--output", str(workdir / "out.json"),
+                 "--label", "world plan", "--timeout", "2",
+                 "--stall-seconds", str(stall_seconds),
+                 "--heartbeat-seconds", "0", "--type-delay", "0",
+                 "--fallback-model", "qwen3:4b",
+                 "--url", f"http://127.0.0.1:{server.server_port}/api/chat"],
+                cwd=ROOT, capture_output=True, text=True, env=environment,
+            )
+            output_path = workdir / "out.json"
+            output = json.loads(output_path.read_text(encoding="utf-8")) if output_path.exists() else None
+            return result, output, list(handler.models)
 
-        handler = type("Handler", (_PieceByPiece,), {})
-        server = HTTPServer(("127.0.0.1", 0), handler)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
-        request = {"model": "qwen3:8b", "messages": [{"role": "user", "content": "hi"}],
-                   "think": True, "options": {"num_predict": 4000}}
-        result = stream(request, f"http://127.0.0.1:{server.server_port}/api/chat", "story",
-                       30, True, min_tps=0.001, tps_window=30.0)
-        self.assertIn("Maya found it", result["response"])
+    def test_a_silent_primary_hands_off_after_the_no_content_stall(self):
+        result, output, models = self._run_cli(_SilentPrimaryThenFallback, stall_seconds=0.16)
+        self.assertEqual(result.returncode, 0, msg=result.stdout[-2000:] + result.stderr[-1000:])
+        self.assertIn("no thinking or answer output", result.stdout)
+        self.assertEqual(models, ["qwen3:14b", "qwen3:4b"])
+        self.assertEqual(output["model"], "qwen3:4b")
+        self.assertIn("fallback", output["response"])
 
-    def test_a_call_projected_to_take_an_hour_is_handed_over_early(self):
-        """A trickle that never stalls can still eat the whole run.
+    def test_slow_thinking_and_answer_progress_never_hands_off(self):
+        result, output, models = self._run_cli(_SlowProgressingPrimary, stall_seconds=0.25)
+        self.assertEqual(result.returncode, 0, msg=result.stdout[-2000:] + result.stderr[-1000:])
+        self.assertEqual(models, ["qwen3:14b"], "the primary keeps the call while it emits content")
+        self.assertEqual(output["model"], "qwen3:14b")
+        self.assertIn("slow-but-progressing", output["response"])
+        self.assertIn("Reasoning continues", output["thinking"])
 
-        qwen3:14b needs about two tokens per second on a CPU runner, which is
-        fifty minutes for a 6000-token world plan. Nobody is stuck and no rate
-        floor is breached, so the finish time is projected from the measured rate
-        instead and the call is handed over.
-        """
-        sys.path.insert(0, str(ROOT / "tools"))
-        from ollama_stream import ModelTooSlow, stream
-
-        handler = type("Handler", (_SlowTrickle,), {"calls": []})
-        server = HTTPServer(("127.0.0.1", 0), handler)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
-        request = {"model": "qwen3:14b", "messages": [{"role": "user", "content": "hi"}],
-                   "think": True, "options": {"num_predict": 6000}}
-        with self.assertRaises(ModelTooSlow) as caught:
-            stream(request, f"http://127.0.0.1:{server.server_port}/api/chat", "world plan",
-                   30, True, tps_window=0.5, projected_seconds=30.0)
-        message = str(caught.exception)
-        self.assertIn("projected", message)
-        self.assertIn("6000 tokens", message)
-
-    def test_a_quick_call_is_not_interrupted_by_the_projection(self):
-        sys.path.insert(0, str(ROOT / "tools"))
-        from ollama_stream import stream
-
-        handler = type("Handler", (_PieceByPiece,), {})
-        server = HTTPServer(("127.0.0.1", 0), handler)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        self.addCleanup(server.shutdown)
-        self.addCleanup(server.server_close)
-        request = {"model": "qwen3:8b", "messages": [{"role": "user", "content": "hi"}],
-                   "think": True, "options": {"num_predict": 4000}}
-        result = stream(request, f"http://127.0.0.1:{server.server_port}/api/chat", "story",
-                       30, True, tps_window=0.01, projected_seconds=3600.0)
-        self.assertIn("Maya found it", result["response"])
-
-    def test_every_ai_call_gets_the_projection_budget(self):
+    def test_every_streaming_workflow_call_uses_only_the_stall_watchdog(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
-        self.assertIn("AI_PROJECTED_SECONDS: '1500'", workflow)
-        # Every streaming call must carry it, or one slow step still eats the run.
-        self.assertEqual(workflow.count('--stall-seconds "${AI_STALL:-900}"'),
-                         workflow.count('--projected-seconds "${AI_PROJECTED_SECONDS:-1500}"'))
-
-    def test_the_job_sets_a_floor_and_a_window(self):
-        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
-        self.assertIn("AI_MIN_TPS: '1.2'", workflow)
-        self.assertIn("AI_TPS_WINDOW: '90'", workflow)
+        agent_workflow = (ROOT / ".github" / "workflows" / "agent.yml").read_text(encoding="utf-8")
+        agent_helper = (ROOT / "tools" / "nish_agent.py").read_text(encoding="utf-8")
         helper = (ROOT / "tools" / "ollama_stream.py").read_text(encoding="utf-8")
-        for flag in ("--min-tps", "--tps-window", "AI_MIN_TPS"):
-            self.assertIn(flag, helper)
+        self.assertIn("AI_STALL=900", workflow)
+        self.assertIn("AI_STALL: '900'", agent_workflow)
+        self.assertIn('"--stall-seconds", os.environ.get("AI_STALL", "900")', agent_helper)
+        calls = workflow.count("python tools/ollama_stream.py")
+        self.assertGreater(calls, 0)
+        self.assertEqual(calls, workflow.count("--stall-seconds"))
+        for forbidden in ("AI_MIN_TPS", "AI_TPS_WINDOW", "AI_PROJECTED_SECONDS",
+                          "--min-tps", "--tps-window", "--projected-seconds", "--max-seconds"):
+            self.assertNotIn(forbidden, workflow)
+            self.assertNotIn(forbidden, agent_workflow)
+            self.assertNotIn(forbidden, agent_helper)
+            self.assertNotIn(forbidden, helper)
 
     def test_the_fallback_is_always_a_different_smaller_model(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
@@ -811,13 +842,8 @@ class _AlwaysAnswers(BaseHTTPRequestHandler):
         self.wfile.write((json.dumps({"done": True, "done_reason": "stop", "eval_count": 3}) + "\n").encode())
 
 
-class _SlowPrimaryNoFallback(BaseHTTPRequestHandler):
-    """Run #93: the primary is projected too slow and the fallback is absent.
-
-    The first request is answered in slow dribbles so the projection fires; the
-    retry (which runs without a projection) gets a normal answer. ``/api/tags``
-    reports only the primary, which is what makes the fallback genuinely missing.
-    """
+class _SilentPrimaryNoFallback(BaseHTTPRequestHandler):
+    """The fallback is missing; only a true no-content stall triggers retry."""
 
     models: list[str] = []
     calls = 0
@@ -834,8 +860,6 @@ class _SlowPrimaryNoFallback(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        import time as _time
-
         length = int(self.headers.get("Content-Length", 0))
         payload = json.loads(self.rfile.read(length))
         type(self).models.append(str(payload.get("model")))
@@ -844,17 +868,18 @@ class _SlowPrimaryNoFallback(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson")
         self.end_headers()
+        self.wfile.flush()
         if first:
-            # Two words, slowly: a measurable rate, a huge ceiling, so the finish is
-            # projected far into the future and the call is handed over.
-            for piece in ("{\"ok\":", "1}"):
-                self.wfile.write((json.dumps({"message": {"content": piece}, "done": False}) + "\n").encode())
-                self.wfile.flush()
-                _time.sleep(1.2)
-            self.wfile.write((json.dumps({"done": True, "done_reason": "stop", "eval_count": 8}) + "\n").encode())
+            # No thinking or answer events for longer than the test stall window.
+            time.sleep(0.25)
             return
-        self.wfile.write((json.dumps({"message": {"content": '{"ok":"retry"}'}, "done": False}) + "\n").encode())
-        self.wfile.write((json.dumps({"done": True, "done_reason": "stop", "eval_count": 5}) + "\n").encode())
+        events = [
+            {"message": {"content": '{"ok":"retry"}'}, "done": False},
+            {"done": True, "done_reason": "stop", "eval_count": 5},
+        ]
+        for event in events:
+            self.wfile.write((json.dumps(event) + "\n").encode())
+            self.wfile.flush()
 
 
 class _TooSlowPrimary(_AlwaysAnswers):
@@ -992,12 +1017,11 @@ class ModelResidencyTests(unittest.TestCase):
 
 
 class MissingFallbackTests(unittest.TestCase):
-    """A hand-over to a model that is not installed used to kill the call.
+    """A silent primary with no installed fallback retries itself safely.
 
-    Reproduced from run #93: the world plan was projected too slow, the helper
-    switched to qwen3:4b, Ollama answered 404 because that model had never been
-    pulled, the 404 escaped as a bare HTTPError, and the whole map plan was lost.
-    The run then silently shipped a procedural world instead of the AI's.
+    The test keeps the missing-model guard covered without relying on a speed
+    estimate: only a true no-thinking/no-answer stall tries the unavailable model.
+    The primary then answers on its one retry.
     """
 
     def _run(self, handler, extra_args=()):
@@ -1028,19 +1052,18 @@ class MissingFallbackTests(unittest.TestCase):
             return result, (output.read_text(encoding="utf-8") if output.is_file() else None)
 
     def test_a_fallback_that_is_not_installed_is_never_used(self):
-        handler = type("Handler", (_SlowPrimaryNoFallback,), {"models": [], "calls": 0})
+        handler = type("Handler", (_SilentPrimaryNoFallback,), {"models": [], "calls": 0})
         result, output = self._run(
-            handler, ("--fallback-model", "qwen3:4b", "--projected-seconds", "1",
-                      "--tps-window", "0"))
-        # The call still succeeds, on the primary, with no speed projection left to
-        # kill it, and it says exactly why it did not hand over.
+            handler, ("--fallback-model", "qwen3:4b", "--stall-seconds", "0.08"))
+        # The primary is retried with the same no-output watchdog; only the actual
+        # silent interval attempted the absent fallback.
         self.assertEqual(result.returncode, 0, msg=result.stdout[-2000:] + result.stderr[-1000:])
         self.assertIn("is NOT installed", result.stdout)
-        self.assertIn("speed projection switched off", result.stdout)
-        # The primary was asked twice and answered the second time, so no work was
-        # lost just because the escape hatch was missing.
+        self.assertIn("no-thinking/no-answer stall", result.stdout)
+        self.assertNotIn("speed projection", result.stdout)
         self.assertIn("retry", output or "")
         self.assertIn("never pulled", result.stdout)
+        self.assertEqual(handler.models, ["qwen3:8b", "qwen3:8b"])
 
     def test_a_404_is_reported_as_a_missing_model(self):
         class Handler(HTTPServer.__mro__[0] if False else object):

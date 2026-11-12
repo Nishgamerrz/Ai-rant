@@ -105,7 +105,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("A SHORT CONFIRMATION, not another ten-minute world plan", self.text)
         self.assertIn("confirm_request.json", self.text)
         self.assertIn("num_predict': 220", self.text)
-        self.assertIn("--projected-seconds 0", self.text)
+        self.assertIn("--timeout 300 --stall-seconds 240", self.text)
+        self.assertNotIn("--projected-seconds", self.text)
         self.assertIn("the world plan is final and the run moves on", self.text)
 
     def test_the_confirmation_answers_are_used_to_decide(self) -> None:
