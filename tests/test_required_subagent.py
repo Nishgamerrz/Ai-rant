@@ -50,6 +50,19 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue('"topic":"map", "cameras" or "faces"' in self.text or '"topic":"map" or "cameras"' in self.text)
         self.assertIn('"topic":"models"', self.text)
 
+    def test_required_map_camera_delegation_is_the_first_prompt_instruction(self) -> None:
+        prompt_start = self.text.index("cat > map_prompt.txt <<PROMPT")
+        prompt_end = self.text.index("\n          PROMPT", prompt_start)
+        prompt = self.text[prompt_start:prompt_end]
+        requirement = prompt.index("MANDATORY FIRST ACTION FOR THE MAP AND CAMERA PLAN")
+        design = prompt.index("Think through the complete story")
+        self.assertLess(requirement, design)
+        opening = prompt[requirement:prompt.index("The web is NOT searched", requirement)]
+        self.assertIn("FIRST JSON response", opening)
+        self.assertIn("topic=map or topic=cameras", opening)
+        self.assertIn("topic=models", opening)
+        self.assertIn("a models-only, narration-only or other task does not count", opening)
+
     def test_story_prompt_keeps_delegation_optional(self) -> None:
         # The story prompt still offers the helper without demanding it; only the
         # map/camera step is compulsory (the map prompt now says so explicitly and
