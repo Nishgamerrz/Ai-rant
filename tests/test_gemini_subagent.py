@@ -1,8 +1,7 @@
-"""The local model can delegate work to a Gemini sub-agent at any time.
+"""The local model can delegate work to Gemini, with Groq as its fallback.
 
-Configuration lives in the repository: a secret named ``GEMINI_API_KEY`` (free key
-from aistudio.google.com/apikey) and an optional variable ``GEMINI_MODEL``. Without
-the secret every delegated task is skipped and the run carries on untouched.
+The workflow supplies ``GEMINI_API_KEY`` and ``GROQ_API_KEY`` secrets. Gemini is
+tried first and Groq is the fallback; if neither key is set, tasks are skipped.
 """
 from __future__ import annotations
 
@@ -593,11 +592,14 @@ class StaleMarkerTests(unittest.TestCase):
 
 
 class _GroqStub(BaseHTTPRequestHandler):
-    """An OpenAI-compatible Groq endpoint."""
+    """An OpenAI-compatible Groq endpoint with per-model failure/length controls."""
 
     calls: list[dict] = []
     text = "GROQ ANSWER"
     status = 200
+    status_by_model: dict[str, int] = {}
+    text_by_model: dict[str, str] = {}
+    finish_by_model: dict[str, str] = {}
 
     def log_message(self, *args):
         pass
@@ -605,18 +607,25 @@ class _GroqStub(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         payload = json.loads(self.rfile.read(length))
-        type(self).calls.append({"model": payload.get("model"),
+        model = payload.get("model")
+        type(self).calls.append({"model": model,
                                  "auth": self.headers.get("Authorization"),
-                                 "prompt": payload["messages"][0]["content"]})
-        if type(self).status != 200:
-            body = json.dumps({"error": {"message": "model_not_found"}}).encode()
-            self.send_response(type(self).status)
+                                 "prompt": payload["messages"][0]["content"],
+                                 "max_tokens": payload.get("max_tokens")})
+        status = type(self).status_by_model.get(model, type(self).status)
+        if status != 200:
+            message = "rate limit reached" if status == 429 else "model_not_found"
+            body = json.dumps({"error": {"message": message}}).encode()
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
             return
-        body = json.dumps({"choices": [{"message": {"content": type(self).text}}]}).encode()
+        text = type(self).text_by_model.get(model, type(self).text)
+        finish = type(self).finish_by_model.get(model, "stop")
+        body = json.dumps({"choices": [{"message": {"content": text},
+                                        "finish_reason": finish}]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -661,6 +670,42 @@ class GroqFallbackTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["text"], "GROQ ANSWER")
         self.assertEqual(len(self.gemini.calls), 1)
         self.assertEqual(self.groq.calls[0]["auth"], "Bearer groq-secret")
+
+    def test_groq_prefers_llama_then_gpt_oss_120b(self):
+        self.assertEqual(gemini_subagent.DEFAULT_GROQ_MODEL, "llama-3.3-70b-versatile")
+        self.assertEqual(gemini_subagent.GROQ_MODEL_CHOICES[:2],
+                         ("llama-3.3-70b-versatile", "openai/gpt-oss-120b"))
+        self.marker.write_text("quota", encoding="utf-8")
+        self.groq.status_by_model = {"llama-3.3-70b-versatile": 404}
+        result = self._run([{"kind": "answer", "instruction": "design a lamp"}],
+                           groq_model_name="llama-3.3-70b-versatile")
+        self.assertTrue(result["results"][0]["ok"])
+        self.assertEqual(result["results"][0]["text"], "GROQ ANSWER")
+        self.assertEqual([call["model"] for call in self.groq.calls],
+                         ["llama-3.3-70b-versatile", "openai/gpt-oss-120b"])
+
+    def test_a_rate_limited_llama_hands_off_to_gpt_oss_120b(self):
+        self.marker.write_text("quota", encoding="utf-8")
+        self.groq.status_by_model = {"llama-3.3-70b-versatile": 429}
+        self.groq.text_by_model = {"openai/gpt-oss-120b": "BACKUP COMPLETE"}
+        result = self._run([{"kind": "answer", "instruction": "write a short answer"}],
+                           groq_model_name="llama-3.3-70b-versatile")
+        self.assertEqual(result["results"][0]["text"], "BACKUP COMPLETE")
+        self.assertEqual([call["model"] for call in self.groq.calls],
+                         ["llama-3.3-70b-versatile", "openai/gpt-oss-120b"])
+
+    def test_a_still_truncated_llama_reply_uses_gpt_oss_not_the_partial_text(self):
+        self.marker.write_text("quota", encoding="utf-8")
+        self.groq.finish_by_model = {"llama-3.3-70b-versatile": "length"}
+        self.groq.text_by_model = {"llama-3.3-70b-versatile": "PARTIAL ANSWER",
+                                   "openai/gpt-oss-120b": "COMPLETE BACKUP ANSWER"}
+        result = self._run([{"kind": "answer", "instruction": "write it fully"}],
+                           groq_model_name="llama-3.3-70b-versatile")
+        self.assertEqual(result["results"][0]["text"], "COMPLETE BACKUP ANSWER")
+        self.assertEqual([call["model"] for call in self.groq.calls],
+                         ["llama-3.3-70b-versatile", "llama-3.3-70b-versatile",
+                          "openai/gpt-oss-120b"])
+        self.assertEqual([call["max_tokens"] for call in self.groq.calls], [8192, 16384, 8192])
 
     def test_the_next_call_asks_gemini_again_without_waiting(self):
         self._run([{"id": "t1", "kind": "answer", "instruction": "one"}])
@@ -707,7 +752,13 @@ class GroqWorkflowTests(unittest.TestCase):
     def test_the_workflow_passes_the_groq_secret_to_every_ai_step(self):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertEqual(text.count("GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}"), 3)
-        self.assertEqual(text.count("GROQ_MODEL: ${{ vars.GROQ_MODEL }}"), 3)
+        self.assertEqual(text.count("GROQ_MODEL: llama-3.3-70b-versatile"), 3)
+        self.assertIn("Groq's default order is llama-3.3-70b-versatile → openai/gpt-oss-120b", text)
+
+    def test_agent_workflow_uses_the_same_groq_model_order(self):
+        text = (ROOT / ".github" / "workflows" / "agent.yml").read_text(encoding="utf-8")
+        self.assertIn("GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}", text)
+        self.assertIn("GROQ_MODEL: llama-3.3-70b-versatile", text)
 
     def test_an_exhausted_quota_only_cancels_tasks_when_there_is_no_fallback(self):
         text = WORKFLOW.read_text(encoding="utf-8")
