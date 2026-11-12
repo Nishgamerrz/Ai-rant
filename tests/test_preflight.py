@@ -21,6 +21,7 @@ WORKFLOW = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf
 sys.path.insert(0, str(ROOT / "tools"))
 
 from build_story_map import derive_theme, repair_blueprint  # noqa: E402
+from preflight import write_preflight_avatar  # noqa: E402
 
 
 class PreflightWiringTests(unittest.TestCase):
@@ -64,11 +65,39 @@ class PreflightScriptTests(unittest.TestCase):
         for banned in ("import yaml", "import requests", "from PIL"):
             self.assertNotIn(banned, source)
 
-    def test_the_renderer_has_a_preflight_mode(self):
+    def test_the_renderer_has_a_preflight_mode_that_accepts_profiles(self):
         renderer = (ROOT / "tools" / "video_renderer" / "render_short.mjs").read_text(encoding="utf-8")
-        self.assertIn("async function preflight(", renderer)
-        self.assertIn("if(args.preflight){ await preflight(plan); return; }", renderer)
+        self.assertIn("async function preflight(plan, profiles = [])", renderer)
+        self.assertIn("awaitpreflight(plan,profiles);return;", renderer.replace(" ", ""))
+        self.assertIn("Render preflight avatar check", renderer)
         self.assertIn("Render preflight passed", renderer)
+
+    def test_avatar_scene_ready_failure_is_checked_before_the_ai_starts(self):
+        source = (ROOT / "tools" / "preflight.py").read_text(encoding="utf-8")
+        workflow = WORKFLOW[WORKFLOW.index("Preflight: prove every tool"):]
+        self.assertLess(workflow.index("python tools/preflight.py --render"),
+                        workflow.index("Download the selected AI model"))
+        self.assertIn('"--profiles", str(profiles_path), "--preflight"', source)
+        self.assertIn("Render preflight avatar check: 1/1 synthetic avatar(s) rigged", source)
+        renderer = (ROOT / "tools/video_renderer/render_short.mjs").read_text(encoding="utf-8")
+        self.assertIn("the scene failed to build", renderer)
+        self.assertIn("Avatar root/rig mismatch", renderer)
+        self.assertIn("not actor.rig (the joint map)", renderer)
+
+
+class PreflightAvatarFixtureTests(unittest.TestCase):
+    def test_fixture_contains_named_r15_parts_and_model_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = write_preflight_avatar(Path(tmp))
+            folder = Path(tmp) / profile["user_id"]
+            self.assertTrue(profile["model_ready"])
+            self.assertEqual(profile["model_format"], "obj")
+            self.assertTrue((folder / "avatar.obj").is_file())
+            self.assertTrue((folder / "avatar.mtl").is_file())
+            obj = (folder / "avatar.obj").read_text(encoding="utf-8")
+            for part in ("Head", "Torso", "LeftArm", "RightArm", "LeftLeg", "RightLeg"):
+                self.assertIn(f"o {part}", obj)
+            self.assertIn("f 1 2 3 4", obj)
 
 
 class BlueprintRepairTests(unittest.TestCase):

@@ -673,10 +673,12 @@ def expand_plan(plan, target_props=3000):
         return {**plan, "props": source_props}
 
     building_words = {
-        "building", "shop", "tower", "house", "school", "cafe", "store", "station", "temple",
+        "building", "shop", "tower", "house", "home", "school", "cafe", "store", "station", "temple",
         "castle", "museum", "hall", "market", "hotel", "factory", "restaurant", "library",
         "hospital", "arcade", "bakery", "office", "apartment", "mansion", "workshop", "palace",
         "warehouse", "inn", "laboratory", "lab", "theater", "theatre", "pavilion", "cottage",
+        "hut", "villa", "barn", "church", "chapel", "clinic", "salon", "bistro", "diner", "pub",
+        "lodge", "shelter", "garage", "hangar", "dorm", "hostel", "villas", "houses", "homes",
     }
     component_words = {"wall", "roof", "door", "window", "frame", "floor", "stair", "chimney",
                        "foundation", "facade", "pillar", "column", "interior", "sill", "header"}
@@ -686,14 +688,20 @@ def expand_plan(plan, target_props=3000):
         words = set(re.findall(r"[a-z]+", prop.get("name", "").casefold()))
         size = prop.get("size", [0, 0, 0])
         model = normalize_model(prop.get("model"))
-        named_building = (bool(words & building_words) and not bool(words & component_words)
+        # Names like "Cozy Home" or "Sunset Villa" don't contain "building" but
+        # are obviously houses — normalize the name itself so they still become
+        # hollow houses instead of a single solid brick.
+        name_model = normalize_model(prop.get("name", ""))
+        named_model_building = name_model in BUILDING_MODELS
+        named_building = ((bool(words & building_words) or named_model_building)
+                          and not bool(words & component_words)
                           and size[0] >= 10 and size[1] >= 6 and size[2] >= 8
                           and prop.get("shape") == "Block")
         # A declared building model always becomes a real building, even when the
         # AI drew its anchor small or named it "Story Place".
         declared_building = (model in BUILDING_MODELS and prop.get("shape") in {"Block", "Cylinder"}
                              and min(size[0], size[2]) >= 6 and size[1] >= 4)
-        is_building = named_building or declared_building
+        is_building = named_building or declared_building or named_model_building
         (building_cores if is_building else keep_props).append(prop)
 
     expanded = list(keep_props)
@@ -1045,8 +1053,11 @@ def expand_plan(plan, target_props=3000):
 
         inner_z = z - sz * 0.08
         rug_y = bottom + thickness + 0.18
+        # Dense, hollow interior: rug + layered rugs, counter, tables, shelves, cabinets, sofas, bookcases — many times inside so it reads as fully furnished.
         add(f"{name} Welcome Rug", "Block", "SmoothPlastic", [x, rug_y, inner_z],
             [max(2, sx * 0.42), 0.22, max(2, sz * 0.28)], accent_color(plan, color))
+        add(f"{name} Second Rug Layer", "Block", "SmoothPlastic", [x, rug_y + 0.04, inner_z - sz * 0.02],
+            [max(1.5, sx * 0.28), 0.18, max(1.5, sz * 0.18)], tint(accent_color(plan, color), 1.08))
         add(f"{name} Front Counter", "Block", "Wood", [x, bottom + 1.0, z + sz * 0.12],
             [max(2, sx * 0.36), 1.4, 1.0], wood)
         for side, sign in (("West", -1), ("East", 1)):
@@ -1055,9 +1066,64 @@ def expand_plan(plan, target_props=3000):
                 [max(1.5, sx * 0.16), 1.1, max(1.5, sz * 0.12)], tint(wood, 1.12))
             add(f"{name} {side} Chair", "Block", "SmoothPlastic", [table_x, bottom + 0.55, inner_z + sz * 0.13],
                 [1.0, 1.0, 1.0], roof)
+            add(f"{name} {side} Chair Back", "Block", "Wood", [table_x, bottom + 1.15, inner_z + sz * 0.18],
+                [1.0, 0.55, 0.22], wood)
             add(f"{name} {side} Wall Shelf", "Block", "Wood", [x + sign * sx * 0.32, bottom + sy * 0.45, back + thickness],
                 [max(1.5, sx * 0.15), 0.55, 1.0], wood)
-        add(f"{name} Ceiling Light", "Ball", "Neon", [x, ceiling_y - 0.25, z], [1.0, 0.7, 1.0], accent_color(plan, color))
+            # Shelf decor: books / vases on each shelf
+            add(f"{name} {side} Shelf Books", "Block", "SmoothPlastic",
+                [x + sign * sx * 0.32, bottom + sy * 0.45 + 0.45, back + thickness],
+                [max(1.0, sx * 0.12), 0.5, 0.7], [196, 96, 92] if sign < 0 else [92, 132, 196])
+            add(f"{name} {side} Table Lamp Base", "Cylinder", "Metal",
+                [table_x, bottom + 1.75, inner_z], [0.42, 0.7, 0.42], [176, 178, 184])
+            add(f"{name} {side} Table Lamp Shade", "Ball", "Neon",
+                [table_x, bottom + 2.25, inner_z], [0.85, 0.65, 0.85], [255, 232, 168])
+            expanded[-1]["light"] = {"kind": "Point", "color": [255, 232, 168], "brightness": 1.4, "range": 18.0, "angle": 90.0}
+        # Ceiling light is now a real PointLight — the warm decorative glow that makes the hollow shell readable inside.
+        add(f"{name} Ceiling Light", "Ball", "Neon", [x, ceiling_y - 0.35, z], [1.2, 0.75, 1.2], [255, 236, 190])
+        expanded[-1]["light"] = {"kind": "Point", "color": [255, 236, 190], "brightness": 2.8, "range": 32.0, "angle": 90.0}
+        # Hanging pendant over counter
+        add(f"{name} Hanging Pendant", "Ball", "Neon", [x, ceiling_y - 1.2, z + sz * 0.08], [0.9, 0.9, 0.9], [255, 226, 156])
+        expanded[-1]["light"] = {"kind": "Point", "color": [255, 226, 156], "brightness": 1.8, "range": 22.0, "angle": 90.0}
+        add(f"{name} Pendant Cord", "Cylinder", "Metal", [x, ceiling_y - 0.65, z + sz * 0.08], [0.12, 1.1, 0.12], [96, 104, 116])
+        # Wall sconces — decorative lights on left/right interior walls, many times
+        for side, sign in (("West", -1), ("East", 1)):
+            sconce_x = x + sign * (sx * 0.43)
+            add(f"{name} Wall Sconce {side}", "Ball", "Neon", [sconce_x, floor_y + wall_height * 0.62, z - sz * 0.12], [0.7, 0.7, 0.7], [255, 220, 160])
+            expanded[-1]["light"] = {"kind": "Point", "color": [255, 220, 160], "brightness": 1.2, "range": 16.0, "angle": 90.0}
+            add(f"{name} Sconce Plate {side}", "Cylinder", "Metal", [sconce_x - sign * 0.18, floor_y + wall_height * 0.62, z - sz * 0.12], [0.5, 0.5, 0.5], [120, 130, 140])
+        # Fairy string lights across the ceiling perimeter — many small Point lights for a festive hollow house
+        for idx in range(3):
+            fx = x - sx * 0.32 + idx * (sx * 0.64 / 2)
+            add(f"{name} Fairy Light {idx + 1}", "Ball", "Neon", [fx, ceiling_y - 0.18, z + sz * 0.18], [0.45, 0.45, 0.45], [255, 228, 168])
+            expanded[-1]["light"] = {"kind": "Point", "color": [255, 228, 168], "brightness": 0.9, "range": 12.0, "angle": 90.0}
+        # Corner floor lamp
+        add(f"{name} Corner Floor Lamp Base", "Cylinder", "Metal", [x - sx * 0.35, bottom + 1.0, z - sz * 0.32], [0.35, 2.0, 0.35], [74, 86, 103])
+        add(f"{name} Corner Floor Lamp Shade", "Cylinder", "Neon", [x - sx * 0.35, bottom + 2.2, z - sz * 0.32], [1.0, 0.7, 1.0], [255, 236, 178])
+        expanded[-1]["light"] = {"kind": "Point", "color": [255, 236, 178], "brightness": 1.6, "range": 20.0, "angle": 90.0}
+        # Dense extra furniture to make it fully furnished: cabinets, sofa, bookcase, sideboard, many plants
+        add(f"{name} Back Wall Cabinet", "Block", "Wood", [x, bottom + 1.1, back + 1.0], [max(2.5, sx * 0.32), 1.8, 1.1], wood)
+        add(f"{name} Back Wall Cabinet Top", "Block", "SmoothPlastic", [x, bottom + 2.05, back + 1.0], [max(2.6, sx * 0.33), 0.2, 1.2], tint(wood, 1.12))
+        add(f"{name} Lounge Sofa", "Block", "SmoothPlastic", [x + sx * 0.28, bottom + 0.85, z - sz * 0.22], [max(2.2, sx * 0.22), 1.1, max(1.8, sz * 0.18)], [140, 160, 190])
+        add(f"{name} Sofa Cushion Left", "Block", "SmoothPlastic", [x + sx * 0.28 - 0.6, bottom + 1.15, z - sz * 0.22], [0.7, 0.5, 1.0], [176, 190, 220])
+        add(f"{name} Sofa Cushion Right", "Block", "SmoothPlastic", [x + sx * 0.28 + 0.6, bottom + 1.15, z - sz * 0.22], [0.7, 0.5, 1.0], [176, 190, 220])
+        add(f"{name} Bookshelf Tall", "Block", "Wood", [left + 0.9, bottom + sy * 0.32, z - sz * 0.18], [0.9, max(3.0, sy * 0.68), max(2.0, sz * 0.22)], [150, 112, 78])
+        for shelf_i in range(3):
+            add(f"{name} Bookshelf Books {shelf_i + 1}", "Block", "SmoothPlastic",
+                [left + 0.9, bottom + 1.0 + shelf_i * 1.1, z - sz * 0.18], [0.7, 0.45, 1.2],
+                [[188, 92, 88], [92, 132, 188], [214, 176, 96]][shelf_i])
+        add(f"{name} Sideboard", "Block", "Wood", [x - sx * 0.28, bottom + 0.95, z + sz * 0.32], [max(1.8, sx * 0.18), 1.0, 1.0], tint(wood, 0.92))
+        add(f"{name} Sideboard Lamp", "Ball", "Neon", [x - sx * 0.28, bottom + 1.75, z + sz * 0.32], [0.65, 0.65, 0.65], [255, 232, 168])
+        expanded[-1]["light"] = {"kind": "Point", "color": [255, 232, 168], "brightness": 1.1, "range": 14.0, "angle": 90.0}
+        # More plants inside — many times
+        for p_idx, (px, pz) in enumerate(((x - sx * 0.32, z - sz * 0.28), (x + sx * 0.32, z - sz * 0.28), (x, z - sz * 0.32))):
+            add(f"{name} Indoor Plant Pot Extra {p_idx + 1}", "Cylinder", "Concrete", [px, bottom + 0.7, pz], [0.9, 1.2, 0.9], [176, 104, 76])
+            leaves(f"{name} Indoor Plant Extra {p_idx + 1}", px, bottom + 1.35, pz, max(1.0, min(1.8, sx * 0.09)), p_idx + 5, 3)
+        # Wall art / posters inside
+        for art_i, col in enumerate(([236, 176, 96], [140, 196, 236])):
+            add(f"{name} Wall Art {art_i + 1}", "Block", "SmoothPlastic",
+                [x + (-1 if art_i == 0 else 1) * sx * 0.38, floor_y + wall_height * 0.58, back + 0.18],
+                [1.6, 1.2, 0.12], col)
         add(f"{name} Entry Step", "Block", "Concrete", [x, bottom + 0.25, front + 0.9], [door_width + 1, 0.5, 1.4], tint(wall, 1.12))
         add(f"{name} Roof Sign", "Block", "Neon", [x, min(249, top + 1.1), z + sz * 0.25],
             [max(2, sx * 0.35), 0.8, 0.5], accent_color(plan, color))
@@ -1067,6 +1133,9 @@ def expand_plan(plan, target_props=3000):
         furnish_interior(name, x, y, z, sx, sy, sz, bottom, floor_y, ceiling_y,
                          front, back, left, right, thickness, wall, wood, roof,
                          accent_color(plan, color))
+        # Additional decorative ceiling cove light strip inside — warm glow along the ceiling edge
+        add(f"{name} Cove Light Strip", "Block", "Neon", [x, ceiling_y - 0.14, z], [sx * 0.88, 0.14, sz * 0.88], [255, 228, 168])
+        expanded[-1]["light"] = {"kind": "Point", "color": [255, 228, 168], "brightness": 1.0, "range": 26.0, "angle": 90.0}
 
     # Build a walkable, furnished central plaza instead of leaving the cast on an empty patch.
     paving_material = "Slate" if family in {"castle", "space", "snow"} else "Concrete"

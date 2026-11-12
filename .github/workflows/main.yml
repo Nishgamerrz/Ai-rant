@@ -307,9 +307,10 @@ jobs:
           fi
           # Everything expensive that has ever broken this workflow broke at the
           # END of an hour: the renderer's page template, a missing node module,
-          # a browser with no WebGL. This step starts Chromium, loads the real
-          # page and captures a frame now, so a broken tool fails in two minutes
-          # instead of after the model download, the story and the world plan.
+          # a browser with no WebGL, or an avatar's scene-ready rig. This step starts
+          # Chromium, loads the real page with a synthetic R15 OBJ, awaits sceneReady
+          # and captures a frame now, so an updateMatrixWorld/avatar-root crash is
+          # reported in two minutes instead of after the model, story and world plan.
           python tools/preflight.py --render
 
       - name: Run the whole test suite before spending a model call
@@ -426,10 +427,10 @@ jobs:
             OLLAMA_KEEP_ALIVE=60m OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_NUM_PARALLEL=1 \
             ollama serve > ollama.log 2>&1 &
           for attempt in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then break; fi
+            if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then break; fi
             sleep 2
           done
-          if ! curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then
+          if ! curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
             echo "Ollama is not answering on port 11434; last 40 lines of its log:" >&2
             tail -n 40 ollama.log >&2 || true
             echo "## Ollama did not start" >> "$GITHUB_STEP_SUMMARY"
@@ -498,15 +499,63 @@ jobs:
             qwen3:4b|qwen3:1.7b) FALLBACK_MODEL=qwen3:8b ;;
             *) FALLBACK_MODEL=qwen3:4b ;;
           esac
-          echo "AI_FALLBACK_MODEL=$FALLBACK_MODEL" >> "$GITHUB_ENV"
-          python tools/say.py success "Selected model cache restored: ${MODEL_CACHE_HIT:-false}; pulling only $SELECTED_MODEL if its weights are not already present."
-          ollama pull "$SELECTED_MODEL"
-          # Safety net: the stream helper can switch to this model if the selected
-          # one cannot load or answer, so it must already be on disk.
-          if [ -n "${AI_FALLBACK_MODEL:-}" ] && [ "$AI_FALLBACK_MODEL" != "$SELECTED_MODEL" ]; then
-            python tools/say.py plan "Pulling the fallback model $AI_FALLBACK_MODEL so a mid-run switch never fails."
-            ollama pull "$AI_FALLBACK_MODEL"
+          # GITHUB_ENV is only applied to later steps, so keep the fallback in this
+          # shell too; otherwise this step silently skipped preparing it.
+          AI_FALLBACK_MODEL="$FALLBACK_MODEL"
+          ensure_model_available() {
+            local model="$1"
+            local purpose="$2"
+            local pull_attempt pull_status retry_wait
+            # A restored Ollama cache is already usable offline. `ollama pull`
+            # still contacts the remote registry for its manifest, so never call
+            # it when the requested tag is already installed locally.
+            if ollama show "$model" >/dev/null 2>&1; then
+              python tools/say.py success "$purpose model $model is already installed locally; skipping the registry."
+              return 0
+            fi
+            # Registry manifests can transiently return HTTP 503 even when the
+            # model cache was successfully restored. Back off and retry before
+            # declaring that a required model is unavailable.
+            for pull_attempt in 1 2 3 4; do
+              python tools/say.py plan "Pulling $purpose model $model (attempt $pull_attempt of 4)."
+              if ollama pull "$model"; then
+                if ollama show "$model" >/dev/null 2>&1; then return 0; fi
+              else
+                pull_status=$?
+                python tools/say.py warning "Ollama could not pull $model on attempt $pull_attempt (exit $pull_status)."
+              fi
+              # A completed/cached model may be usable even if the registry call
+              # itself failed while checking its manifest.
+              if ollama show "$model" >/dev/null 2>&1; then
+                python tools/say.py success "$model is available locally despite the pull response; continuing without another registry request."
+                return 0
+              fi
+              if [ "$pull_attempt" -lt 4 ]; then
+                retry_wait=$((10 * pull_attempt))
+                python tools/say.py plan "Retrying the Ollama registry request in ${retry_wait}s."
+                sleep "$retry_wait"
+              fi
+            done
+            return 1
+          }
+          python tools/say.py success "Selected model cache restored: ${MODEL_CACHE_HIT:-false}; checking local Ollama storage before any registry pull."
+          if ! ensure_model_available "$SELECTED_MODEL" selected; then
+            echo "Selected model $SELECTED_MODEL is neither cached nor downloadable after four attempts." >&2
+            echo "## Selected Ollama model unavailable" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
+          # Prepare a smaller fallback when possible. If the registry is down,
+          # the primary model can still run without model-switch recovery; pin the
+          # no-op fallback to the selected model so later steps do not try a
+          # missing default tag.
+          if [ -n "$AI_FALLBACK_MODEL" ] && [ "$AI_FALLBACK_MODEL" != "$SELECTED_MODEL" ]; then
+            if ! ensure_model_available "$AI_FALLBACK_MODEL" fallback; then
+              python tools/say.py warning "Fallback $AI_FALLBACK_MODEL is unavailable; continuing with $SELECTED_MODEL only."
+              echo "- Fallback model $AI_FALLBACK_MODEL was unavailable after retries; calls will continue on the selected model without a model switch." >> "$GITHUB_STEP_SUMMARY"
+              AI_FALLBACK_MODEL="$SELECTED_MODEL"
+            fi
+          fi
+          echo "AI_FALLBACK_MODEL=$AI_FALLBACK_MODEL" >> "$GITHUB_ENV"
           ollama show "$SELECTED_MODEL" >/dev/null
           # Warm the model once, on purpose, so the load happens here - outside the
           # per-call stall/watchdog window - and every later step (story, world
@@ -896,6 +945,7 @@ jobs:
           export SCENE_BLOCK
           python tools/say.py plan "Scene mode: ${WORLD_MODE} $(printf '%s' "$SCENE_JSON" | jq -r '.reason')"
           cat > map_prompt.txt <<PROMPT
+          MANDATORY FIRST ACTION FOR THE MAP AND CAMERA PLAN: Before you finalize any map prop or camera shot, use the Gemini sub-agent (Groq fallback if needed) in your FIRST JSON response. Include one task with topic=map or topic=cameras to review/design the map and camera storyboard, AND one task with topic=models for the hardest anchors. This map/camera delegation is REQUIRED; a models-only, narration-only or other task does not count. Do not skip the helper or finalize the plan until you have received its result and accepted/declined it. The workflow has an automatic map/camera review only as a safety net if you omit the required task.
           The web is NOT searched for you by default: nothing is scraped unless you ask. If a real-world fact would genuinely make this story better (a real place, a real tradition, a real object), return search_queries and the workflow runs those searches and sends you the facts. If you do not need any, return "search_queries":[] and no search happens. Do not repeat a query you already asked. If you notice you are repeating yourself or re-planning the same thing, say so briefly and return the best complete plan you have.
           You have full creative authority over this video and may do anything at any time: invent characters, props, buildings, colours, materials, emotions, camera moves, cut timing and expression timing however you think makes the best YouTube-Shorts-style Roblox story short. If you need current real-world facts at any point, add "search_queries": ["…"] to your JSON and the workflow will run those web searches and ask you again with the results.
           Think through the complete story and invent/design the entire playable, detailed Roblox Studio world plus a cinematic camera plan with animated faces.
@@ -925,7 +975,7 @@ jobs:
           The sub-agent is given ALL the file-rules and tool specs (shapes, materials, lights, effects, grid, cast lane, camera constraints) so its design is ready to paste. You are still the director: keep what is good, fix what is not, never ask the same thing twice, and after helper round 2 set "subagent_tasks":[].
           (Delegation stays optional everywhere else: the story and the narration can be written without a sub-agent.)
           Design the complete coherent world blueprint for a 640-by-640-stud map, but keep this model response concise and reliable: output 12–18 meaningful anchor props (never more than 20), not hundreds of low-quality repeated Parts. Every extra anchor is another minute of generation on a CPU runner. Include at least 3 named building cores, 3 distinct landmarks tied to the story, and supporting scenic/story props spread across the map. Name each building by its actual type (for example Market Hall, Reef Laboratory, or Snowy Library), give it a footprint large enough to furnish, and make its location/color/material fit the user theme. Use bright, readable colors (avoid near-black walls), avatar-scale doors/windows, detailed facades, furnished interiors, paths, layered landscaping, and story-specific landmark silhouettes; do not create giant featureless boxes. The build step automatically expands those anchors into walls, roofs, doors, windows, counters, shelves, tables, chairs, lamps, paths, plants, and other theme-specific details, producing at least ${TARGET_PROPS} individually named, grid-aligned editable Parts.
-          BUILD MODELS, NOT BARE BLOCKS. Every prop is an anchor for a finished group of Parts, so say what each one IS in "model" (building, house, shop, tower, school, cafe, station, temple, market, hall, library, museum, bakery, restaurant, clinic, workshop, cottage, castle, tree, plant, bench, lamp, stall, fence, rock, statue, vehicle). The build expands it: a building becomes real walls, a stepped gable roof, a chimney, wood-framed GLASS windows, a door, plus an interior with a counter, tables, chairs, shelves, a rug, a ceiling light, GLASS display cases and a glass partition, potted plants, plants in a window box, and climbing vines with leaves on the facade. A tree becomes a trunk with branches and clusters of leaves; a plant a pot of soil with leaves; a bench a seat, back and legs; a stall a counter, awning, poles and produce; a lamp a post and lantern. So size them for a group: buildings 18-40 wide, 10-22 tall, 16-34 deep; trees 6-14 wide, 6-18 tall; stalls 4-8 wide, 3-5 tall. Never return one giant featureless box for a house, and never skip "model".
+          BUILD MODELS, NOT BARE BLOCKS. Every prop is an anchor for a finished group of Parts, so say what each one IS in "model" (building, house, shop, tower, school, cafe, station, temple, market, hall, library, museum, bakery, restaurant, clinic, workshop, cottage, castle, tree, plant, bench, lamp, stall, fence, rock, statue, vehicle). The build expands it: a building becomes a hollow, enterable shell — interior floor, real Brick walls that make a hollow interior, a stepped gable roof, a chimney, wood-framed GLASS windows, a door with window glass above it, plus a dense, fully furnished hollow interior with a counter, tables with chairs, wall shelves with books, a welcome rug plus layered rugs, a warm decorative Point-light ceiling light, hanging pendant, wall sconces, fairy string lights, table lamps and a floor lamp (many warm Point lights so the hollow house glows inside), GLASS display cases and a glass partition, cabinets, sofa with cushions, tall bookshelf, sideboard, many potted plants on the floor and in window boxes, wall art, and climbing vines with leaves on the facade — many times inside so it reads as fully lived-in, not an empty box. A tree becomes a trunk with branches and clusters of leaves; a plant a pot of soil with leaves; a bench a seat, back and legs; a stall a counter, awning, poles and produce; a lamp a post and lantern. So size them for a group: buildings 18-40 wide, 10-22 tall, 16-34 deep; trees 6-14 wide, 6-18 tall; stalls 4-8 wide, 3-5 tall. Never return one giant featureless box for a house, and never skip "model".
           Make the world look lived in and furnished: homes with glass windows, shops with produce and awnings, gardens with trees, pots and flower beds, benches and street lamps along the paths, fences around plots, rocks and statues as landmarks. Glass, plants, leaves, wood and stone should all appear somewhere, matched to the theme.
           REQUIRED TOP-LEVEL KEYS, every one of them present and non-empty: "name", "theme", "props", "character_placements", "camera_shots", "face_expressions". "theme" is one specific sentence describing THIS story's world (for example "A sunny floating city where gravity clocks off every morning, full of pastel rooftops and safety ropes"); it is never empty, never a placeholder, and never the words "AUTO FROM STORY".
           Return ONLY JSON with this structure:

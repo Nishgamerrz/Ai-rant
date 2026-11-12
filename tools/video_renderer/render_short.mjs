@@ -545,7 +545,7 @@ function buildHtml(data) {
       baseX:Number(point[0]),
       // A room's floor slab is 0.2 thick with its top at y = 0.2: stand ON it.
       baseY:Number(point[1])+(roomBounds?0.2:0),baseZ:Number(point[2]),
-      phase:index*1.73,lead,stride:lead?2.1:1.15,rig:bones,animationClips,animationScale,face,
+      phase:index*1.73,lead,stride:lead?2.1:1.15,rig:bones,avatarRig,animationClips,animationScale,face,
       blinks:blinkSchedule(index*31+5,DATA.duration+4,lead?1.15:.9)});
   }
   async function loadAvatar(profile,index){
@@ -750,9 +750,12 @@ function buildHtml(data) {
       const walkPhase=3.1;
       animateAvatarRig(actor.rig,walkPhase,actor.phase,0,1);
       idleAvatarRig(actor.rig,1.7,actor.phase,0.5);
+      // actor.rig is the plain joint map used by animation; the enclosing rig
+      // object (including its Object3D root and rigid-mesh rest profile) is kept
+      // separately as actor.avatarRig. Updating the actor group updates the full
+      // attached hierarchy, and measuring the full rig keeps the stretch guard real.
       actor.root.updateMatrixWorld(true);
-      actor.rig.Head&&actor.rig.Head.parent&&actor.rig.root.updateMatrixWorld(true);
-      const report=measureRigStretch(THREE,actor.rig);
+      const report=measureRigStretch(THREE,actor.avatarRig||actor.rig);
       if(report.maxStretch>worstStretch){worstStretch=report.maxStretch;worstPart=actor.username+':'+report.worstPart;}
     }
     window.rigStretchSummary={maxStretch:worstStretch,worstPart};
@@ -997,8 +1000,8 @@ async function launchBrowser() {
     + where + ` Tried: ${problems.join(' | ')}`);
 }
 
-async function preflight(plan) {
-  const data = { plan, profiles: [], duration: 15, captions: '', faceAnimation: 'off' };
+async function preflight(plan, profiles = []) {
+  const data = { plan, profiles: Array.isArray(profiles) ? profiles : [], duration: 15, captions: '', faceAnimation: 'off' };
   let stage = 'build the page';
   let html;
   try {
@@ -1027,8 +1030,23 @@ async function preflight(plan) {
     const ready = await Promise.race([
       page.evaluate(() => window.sceneReady),
       new Promise((_, fail) => setTimeout(() => fail(new Error('the scene never became ready (60s)')), 60000)),
-    ]).catch(error => { throw new Error(`the scene failed to build: ${error.message}`); });
+    ]).catch(error => {
+      const details = error?.message || String(error);
+      const missingUpdateTarget = details.includes('Cannot read properties of undefined')
+        && details.includes('updateMatrixWorld');
+      const rootHint = missingUpdateTarget
+        ? ' Avatar root/rig mismatch: update actor.root or avatarRig.root (the Three.js Object3D), not actor.rig (the joint map).'
+        : '';
+      throw new Error(`the scene failed to build: ${details}${rootHint}`);
+    });
     if (!ready) throw new Error('the scene reported itself ready but returned nothing');
+    const avatarRigging = await page.evaluate(() => window.avatarRigSummary || { total: 0, rigged: 0, modes: [] });
+    if (profiles.length && avatarRigging.rigged !== profiles.length) {
+      throw new Error(`the avatar render path rigged ${avatarRigging.rigged}/${profiles.length} preflight avatar(s); each avatar must build a working joint map before the AI starts`);
+    }
+    if (profiles.length) {
+      console.log(`Render preflight avatar check: ${avatarRigging.rigged}/${profiles.length} synthetic avatar(s) rigged (${avatarRigging.modes.join(', ')}).`);
+    }
 
     stage = 'draw one frame';
     await page.evaluate(() => window.renderAt(0.1));
@@ -1123,7 +1141,11 @@ async function preflight(plan) {
 async function main() {
   const args=argumentsFromProcess(process.argv.slice(2));
   const plan=JSON.parse(readFileSync(args.map,'utf8'));
-  if(args.preflight){ await preflight(plan); return; }
+  if(args.preflight){
+    const profiles=args.profiles?JSON.parse(readFileSync(args.profiles,'utf8')):[];
+    if(!Array.isArray(profiles))throw new Error('--profiles must contain a JSON array.');
+    await preflight(plan,profiles);return;
+  }
   const usernames=JSON.parse(readFileSync(args.characters,'utf8'));
   const profiles=JSON.parse(readFileSync(args.profiles,'utf8'));
   if(!Array.isArray(usernames)||usernames.length===0) throw new Error('Provide at least one actual Roblox username for the lead avatar.');
