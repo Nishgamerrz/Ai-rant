@@ -176,7 +176,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
-          GROQ_MODEL: ${{ vars.GROQ_MODEL }}
+          GROQ_MODEL: llama-3.3-70b-versatile
         run: |
           mkdir -p dist/agent_workspace
           python3 tools/say.py plan "NishAgent starting — model $AI_MODEL (preset $MODEL_QUALITY)"

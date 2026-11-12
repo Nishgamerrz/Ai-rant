@@ -35,11 +35,11 @@ Output file (JSON):
 
 Credentials
 -----------
-Add a repository **secret** named ``GEMINI_API_KEY`` (free key from
-https://aistudio.google.com/apikey). Optionally add a repository **variable**
-named ``GEMINI_MODEL`` to pick the model; the default is ``gemini-2.5-flash``,
-which is on the free tier. Without the secret every task is skipped and the run
-continues exactly as before - the sub-agent is never a hard dependency.
+Add repository **secrets** named ``GEMINI_API_KEY`` and ``GROQ_API_KEY``.
+Gemini is tried first; when it is out of quota, unreachable or truncated, Groq
+tries ``llama-3.3-70b-versatile`` and then ``openai/gpt-oss-120b`` for a complete
+reply. Optionally add ``GEMINI_MODEL`` to choose Gemini's model. If neither
+secret is set, delegated tasks are skipped and the workflow continues.
 """
 from __future__ import annotations
 
@@ -326,21 +326,23 @@ GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_KEY_ENV = "GROQ_API_KEY"
 GROQ_MODEL_VAR = "GROQ_MODEL"
 DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
-# Free Groq models — best first for no-cutoff, long replies. Prioritize
-# large-context, non-reasoning instruct models that handle 8k+ output reliably.
-# Reasoning models (gpt-oss-*) can burn tokens on hidden thought and truncate
-# early, so they are fallbacks after the instruct family. If one is retired or
-# 429 the next is tried, so no run loses a task.
+# Groq fallback order: try the requested Llama 3.3 model first, then GPT-OSS
+# 120B if the first model is retired, rate-limited, or still truncates after the
+# larger-output retry. Keep the other models as last-resort fallbacks.
 GROQ_MODEL_CHOICES = ("llama-3.3-70b-versatile",
+                      "openai/gpt-oss-120b",
                       "qwen/qwen3-32b",
                       "meta-llama/llama-4-maverick-17b-128e-instruct",
                       "deepseek-r1-distill-llama-70b",
-                      "openai/gpt-oss-120b", "openai/gpt-oss-20b",
-                      "llama-3.1-8b-instant")
+                      "openai/gpt-oss-20b", "llama-3.1-8b-instant")
 
 
 class GroqUnavailable(GeminiUnavailable):
     """The Groq fallback could not answer (rate limit, bad key, retired model)."""
+
+
+class GroqTruncated(GroqUnavailable):
+    """A Groq model hit its output ceiling twice; try the next model instead."""
 
 
 def groq_model(requested: str = "") -> str:
@@ -353,9 +355,10 @@ def call_groq(prompt: str, *, api_key: str, model: str = "", timeout: float = 12
     """One Groq (OpenAI-compatible) chat call - the fallback when Gemini is out.
 
     A retired model answers 404/decommissioned; that is reported as such so the
-    caller can try the next free model instead of failing the whole task.
-    If the reply was cut at the token ceiling (finish_reason=length) we retry
-    once with double the ceiling before returning a truncated answer.
+    caller can try the next configured model instead of failing the whole task.
+    If the reply was cut at the token ceiling (finish_reason=length), retry once
+    with double the ceiling; if still cut off, discard it and let call_any try
+    the next model rather than passing a partial answer to the workflow.
     """
     if not api_key:
         raise GroqUnavailable("no Groq API key configured")
@@ -396,8 +399,9 @@ def call_groq(prompt: str, *, api_key: str, model: str = "", timeout: float = 12
             print(f"[gemini sub-agent] Groq cut at {payload['choices'][0].get('finish_reason')} — retrying {model} with max_tokens={max_tokens}", flush=True)
             continue
         if finish == "length":
-            # still length after retry -> warn but return what we have (better than failing)
-            print(f"[gemini sub-agent] Groq still at length after retry — returning {len(text)} chars (may be truncated)", flush=True)
+            print(f"[gemini sub-agent] Groq model {model} still hit the token ceiling after retry; "
+                  "discarding the partial reply and trying the next model.", flush=True)
+            raise GroqTruncated(f"{model} response was cut off at max_tokens={max_tokens} after retry")
         return text
     raise GroqUnavailable("no answer after retries")
 
@@ -406,6 +410,16 @@ def retired_groq_model(exc: Exception) -> bool:
     detail = str(exc).lower()
     return any(word in detail for word in (
         "404", "does not exist", "decommission", "not found", "model_not_found"))
+
+
+def should_try_next_groq_model(exc: Exception) -> bool:
+    """Move on for model-specific failures; don't return a partial completion."""
+    if isinstance(exc, GroqTruncated) or retired_groq_model(exc):
+        return True
+    detail = str(exc).lower()
+    # A rate limit may be specific to a model. Try the configured backup once
+    # before reporting that the provider could not answer.
+    return any(word in detail for word in ("http 429", "rate_limit", "rate limit", "too many requests"))
 
 
 def call_any(prompt: str, *, gemini_key: str = "", gemini_model: str = "",
@@ -451,16 +465,18 @@ def call_any(prompt: str, *, gemini_key: str = "", gemini_model: str = "",
                     text = call_groq(prompt, api_key=groq_key, model=candidate,
                                      timeout=timeout, url=groq_url)
                     if candidate != first:
-                        print(paint(f"[gemini sub-agent] Groq model {first} is not "
-                                    f"available, so {candidate} answered instead.",
+                        print(paint(f"[gemini sub-agent] Groq model {first} could not provide a "
+                                    f"complete answer, so {candidate} answered instead.",
                                     "warning"), flush=True)
                     return text, "groq"
                 except GroqUnavailable as exc:
                     failures.append(f"Groq ({candidate}): {exc}")
-                    # A retired model moves on to the next free model; a rate limit
-                    # or a bad key will not be fixed by trying another name.
-                    if not retired_groq_model(exc) or index == len(candidates) - 1:
+                    # Keep the first complete response: a retired/rate-limited
+                    # model or one that still truncates hands off to the next.
+                    if not should_try_next_groq_model(exc) or index == len(candidates) - 1:
                         break
+                    print(f"[gemini sub-agent] Groq model {candidate} failed to produce a complete "
+                          f"answer ({exc}); trying {candidates[index + 1]}.", flush=True)
             continue
     raise GeminiUnavailable("no provider could answer (" + "; ".join(failures) + ")")
 
