@@ -135,7 +135,7 @@ CAMERA PLAN (camera_shots inside the same blueprint)
                       made-up name and never a full name - the username only.
     transition        "smooth" or "snap". "snap" is a hard cut.
     framing           "auto", "wide", "face", "close", "closeup" or "close-up".
-    face_distance     how close a face shot gets, 1.6..4.0 studs (default 2.45).
+    face_distance     face framing starts 2.8 studs away (default 3.0); use up to 4.0 for wider headroom.
 - Cameras live in the air and never inside a prop: keep y at 4 or more, keep the
   camera and its target off the props you placed, and keep the target around
   chest or head height (y 3..8) for people.

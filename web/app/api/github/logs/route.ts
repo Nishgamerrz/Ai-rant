@@ -2,8 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 // Logs + artifacts proxy — keeps GITHUB_TOKEN server-side.
 // The UI polls this while a workflow is running so colours, plan next/previous
 // badges and the AI's thinking appear live.
-// Now also supports ?logs=1 to return live job log tail (via jobs/:id/logs redirect to blob)
-// and extracts Cloudflare tunnel URL from logs for live chat.
+// Now also supports ?logs=1 to return the live job-log tail through GitHub.
 
 const REPO = "Nishgamerrz/Ai-rant";
 
@@ -85,7 +84,6 @@ export async function GET(req: NextRequest) {
 
     // 3) optional live log tail (heavy - only when ?logs=1)
     let logTail: string | null = null;
-    let logTunnelUrl: string | null = null;
     if (wantLogs && jobs.jobs?.length) {
       // Prefer the in_progress or most recent job
       const targetJobs = (jobs.jobs as any[])
@@ -99,17 +97,10 @@ export async function GET(req: NextRequest) {
         const tail = await fetchJobLogTail(j.id, tok);
         if (tail) {
           logTail = tail;
-          // Try to extract tunnel URL from log
-          const m = tail.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com\/?[^\s"'<>]*/);
-          if (m) logTunnelUrl = m[0].replace(/\/$/, "");
           break;
         }
       }
     }
-
-    // 4) also try to extract tunnel_url from artifacts if log didn't have it (fallback to existing /api/agent/tunnel logic)
-    // We don't fetch zip here to keep this endpoint light; tunnel endpoint can do that separately.
-    // But if we have logTail we already have tunnel_url.
 
     return NextResponse.json({
       run: {
@@ -130,8 +121,7 @@ export async function GET(req: NextRequest) {
         archive_download_url: a.archive_download_url,
       })),
       logTail: logTail || undefined,
-      tunnel_url: logTunnelUrl || undefined,
-      hint: "Poll this endpoint every 4s while status is not completed. Fetch artifact zip via /api/github/artifact?id=...; add ?logs=1 for live job log tail and tunnel_url.",
+      hint: "Poll this endpoint while the workflow runs. Fetch artifacts via /api/github/artifact?id=...; add ?logs=1 for the live GitHub job-log tail.",
     });
   } catch (e: any) {
     return NextResponse.json({ error: String(e?.message || e) }, { status: 502 });

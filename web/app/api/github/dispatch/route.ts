@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { AGENT_WORKFLOW, SHORT_WORKFLOW, dispatchWorkflow } from "@/lib/github";
+import { makeChatToken, makeDispatchId } from "@/lib/agentChat";
 
-// POST { kind: "agent"|"rbx", model, prompt, story_topic, character_usernames, duration_seconds, map_detail, voice_style, world_theme, enable_tunnel }
+// POST { kind: "agent"|"rbx", model, prompt, story_topic, character_usernames, duration_seconds, map_detail, voice_style, world_theme }
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -21,15 +22,22 @@ export async function POST(req: NextRequest) {
       await dispatchWorkflow(SHORT_WORKFLOW, inputs);
       return NextResponse.json({ ok: true, workflow: SHORT_WORKFLOW, inputs });
     }
-    // Agent — direct API mode, no tunnel
+    // Direct GitHub API only: the run-scoped token is masked in Actions and lets
+    // the website exchange encrypted messages with this same persistent plan.
     const prompt = String(body.prompt || body.story_topic || "").trim();
     if (!prompt) return NextResponse.json({ error: "prompt required" }, { status: 400 });
+    if (prompt.length > 4_000) return NextResponse.json({ error: "prompt exceeds 4000 characters" }, { status: 413 });
     const model = String(body.model_quality || body.model || "hard");
+    const chatToken = makeChatToken();
+    const dispatchId = makeDispatchId();
     await dispatchWorkflow(AGENT_WORKFLOW, {
       prompt,
       model_quality: model,
+      agent_chat_key: chatToken,
+      chat_dispatch_id: dispatchId,
     });
-    return NextResponse.json({ ok: true, workflow: AGENT_WORKFLOW, prompt, model_quality: model });
+    return NextResponse.json({ ok: true, workflow: AGENT_WORKFLOW, prompt,
+      model_quality: model, chatToken, dispatchId });
   } catch (e: any) {
     const msg = String(e?.message || e);
     if (msg.includes("409") || msg.toLowerCase().includes("already")) {

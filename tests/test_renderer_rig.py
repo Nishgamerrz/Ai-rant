@@ -31,8 +31,16 @@ AVATAR_RIG = (RENDERER / "avatar_rig.mjs").read_text(encoding="utf-8")
 class RendererWiringTests(unittest.TestCase):
     def test_the_actor_gets_the_whole_rig(self):
         self.assertIn("registerActor(pivot,point,index,place,username,avatarRig,"
-                      "animationClips,avatarScale,profile.front_direction)",
+                      "animationClips,avatarScale,frontDirection)",
                       RENDER_SHORT.replace("\n", "").replace(" ", ""))
+
+    def test_gltf_orientation_is_canonicalized_before_rigging(self):
+        compact = RENDER_SHORT.replace(" ", "").replace("\n", "")
+        self.assertIn("canonicalizeAvatarOrientation(THREE,model,frontDirection)", compact)
+        self.assertLess(compact.index("canonicalizeAvatarOrientation(THREE,model,frontDirection)"),
+                        compact.index("buildAvatarRig(THREE,model)"))
+        self.assertIn("frontDirection=orientation.frontDirection", compact)
+        self.assertIn("Z-wide avatar to the R15 X-shoulder/+Z-front axes", RENDER_SHORT)
         self.assertNotIn("avatarRig?.bones||null", RENDER_SHORT)
 
     def test_the_body_still_gets_plain_joints(self):

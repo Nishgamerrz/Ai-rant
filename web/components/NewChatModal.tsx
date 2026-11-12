@@ -1,11 +1,13 @@
 "use client";
 import { useState } from "react";
 import { ModelSelector } from "./ModelSelector";
+import { encodeFaceReference } from "@/lib/faceReference";
 
 export function NewChatModal({ open, onClose, onStart }: { open: boolean; onClose: () => void; onStart: (payload: any) => void }) {
   const [kind, setKind] = useState<"agent" | "rbx">("agent");
   const [model, setModel] = useState("hard");
   const [prompt, setPrompt] = useState("");
+  const [referenceImage, setReferenceImage] = useState<File | null>(null);
   const [storyTopic, setStoryTopic] = useState("In a world where the last person to fall asleep each night gets one wish, two brothers keep each other awake on purpose");
   const [usernames, setUsernames] = useState("normal,noob");
   const [duration, setDuration] = useState("120");
@@ -30,29 +32,66 @@ export function NewChatModal({ open, onClose, onStart }: { open: boolean; onClos
           body: JSON.stringify({ kind: "agent", prompt: prompt.trim(), model_quality: model }),
         });
         const j = await res.json();
-        if (!res.ok) {
-          const is409 = res.status === 409 || String(j.error||"").includes("409") || String(j.error||"").toLowerCase().includes("already");
-          if (!is409) throw new Error(j.error || "Dispatch failed");
-        }
-        // Poll for new run (also handles 409 already-queued case)
+        if (!res.ok) throw new Error(j.error || "Dispatch failed");
+        const chatToken = String(j.chatToken || "");
+        const dispatchId = String(j.dispatchId || "");
+        if (chatToken) sessionStorage.setItem("nishagent_pending_chat_key", chatToken);
+        // Match the opaque run-name nonce, not merely the newest run: other
+        // workflows may be dispatched at the same time.
         let runId: number | null = null;
-        for (let i = 0; i < 10; i++) {
-          await new Promise((r) => setTimeout(r, 1500));
+        for (let i = 0; i < 30; i++) {
+          await new Promise((r) => setTimeout(r, 1000));
           try {
-            const rj = await fetch("/api/github/runs?kind=agent&per_page=5", { cache: "no-store" }).then((r) => r.json());
-            const newest = rj?.runs?.[0];
-            if (newest && new Date(newest.created_at).getTime() > before - 5000) {
-              runId = newest.id;
+            const rj = await fetch("/api/github/runs?kind=agent&per_page=10", { cache: "no-store" }).then((r) => r.json());
+            const match = dispatchId
+              ? rj?.runs?.find((run: any) => String(run.display_title || "").includes(dispatchId))
+              : rj?.runs?.find((run: any) => new Date(run.created_at).getTime() > before - 5000);
+            if (match?.id) {
+              runId = match.id;
               break;
             }
           } catch {}
         }
-        onStart({ kind: "agent", model, prompt, runId });
-        onClose();
-        if (runId) {
-          // Small delay to let caller handle
-          setTimeout(() => {}, 100);
+        let imageQueueError = "";
+        if (runId && chatToken) {
+          sessionStorage.setItem(`nishagent_chat_${runId}`, chatToken);
+          sessionStorage.removeItem("nishagent_pending_chat_key");
+          if (referenceImage) {
+            try {
+              const encoded = await encodeFaceReference(referenceImage);
+              let uploaded = false;
+              for (let attempt = 0; attempt < 45; attempt++) {
+                const ready = await fetch(`/api/agent/chat?run=${runId}`, {
+                  headers: { Authorization: `Bearer ${chatToken}` }, cache: "no-store",
+                });
+                if (ready.ok) {
+                  const response = await fetch("/api/agent/chat", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", Authorization: `Bearer ${chatToken}` },
+                    body: JSON.stringify({ runId, action: "image", ...encoded, clientId: `initial-face-${Date.now()}` }),
+                  });
+                  const data = await response.json().catch(() => ({}));
+                  if (!response.ok) throw new Error(data.error || "reference image was not queued");
+                  uploaded = true;
+                  break;
+                }
+                if (ready.status !== 401) {
+                  const data = await ready.json().catch(() => ({}));
+                  throw new Error(data.error || "Could not verify the secure chat session.");
+                }
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+              }
+              if (!uploaded) imageQueueError = "The run started, but its secure chat session did not finish registering. Select the run and attach the image with Photo once the workflow is active.";
+            } catch (error: any) {
+              imageQueueError = String(error?.message || "Could not upload the image reference.");
+            }
+          }
+        } else if (referenceImage) {
+          imageQueueError = "The run started but is still being discovered. Select it from the sidebar and attach the face reference with Photo.";
         }
+        onStart({ kind: "agent", model, prompt, runId, chatToken, dispatchId, createdAfter: before - 5000, chatNotice: imageQueueError });
+        setReferenceImage(null);
+        onClose();
       } else {
         if (!storyTopic.trim()) throw new Error("Story topic is required.");
         const res = await fetch("/api/github/dispatch", {
@@ -143,8 +182,20 @@ export function NewChatModal({ open, onClose, onStart }: { open: boolean; onClos
               </div>
               <ModelSelector value={model} onChange={setModel} />
               <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-3.5">
-                <div className="text-sm font-medium text-zinc-200">Direct API — no tunnel</div>
-                <div className="text-xs text-zinc-500 leading-relaxed">Runs use direct GitHub API polling. Thinking, tools, and files stream live in one persistent plan until the workflow dies. No Cloudflare needed.</div>
+                <label className="text-[11px] font-semibold tracking-widest text-zinc-500 uppercase">Face / eyebrow reference (optional)</label>
+                <input type="file" accept="image/*" onChange={(event) => {
+                  const file = event.target.files?.[0] || null;
+                  if (file && !file.type.startsWith("image/")) { setErr("Choose an image file."); return; }
+                  setReferenceImage(file);
+                  setErr("");
+                }} className="mt-2 block w-full text-xs text-zinc-400 file:mr-3 file:rounded-lg file:border-0 file:bg-zinc-800 file:px-3 file:py-2 file:text-xs file:font-medium file:text-zinc-200 hover:file:bg-zinc-700" />
+                <div className="mt-1 text-[11px] leading-relaxed text-zinc-600">
+                  {referenceImage ? `${referenceImage.name} · compressed and encrypted for this run` : "The AI can inspect the actual pixels. ‘500+’ is treated as bold, dark brows—one expressive pair per face, not hundreds on one head."}
+                </div>
+              </div>
+              <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-3.5">
+                <div className="text-sm font-medium text-zinc-200">Direct GitHub API · no tunnel</div>
+                <div className="text-xs text-zinc-500 leading-relaxed">Logs and files stream through GitHub. After it starts, send follow-up messages in the same run; the persistent plan keeps working until the workflow ends.</div>
               </div>
             </>
           ) : (
@@ -189,7 +240,7 @@ export function NewChatModal({ open, onClose, onStart }: { open: boolean; onClos
         </div>
 
         <div className="shrink-0 p-4 border-t border-zinc-800 bg-zinc-900 flex items-center justify-end gap-2">
-          <button onClick={() => !busy && onClose()} disabled={busy} className="h-9 px-4 rounded-xl border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-sm font-medium text-zinc-300 hover:text-white disabled:opacity-50 transition-colors">Cancel</button>
+          <button onClick={() => { if (!busy) { setReferenceImage(null); setErr(""); onClose(); } }} disabled={busy} className="h-9 px-4 rounded-xl border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-sm font-medium text-zinc-300 hover:text-white disabled:opacity-50 transition-colors">Cancel</button>
           <button
             onClick={handleStart}
             disabled={busy}

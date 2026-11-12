@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chooseSafeCamera, segmentHitsBox } from './scene_camera.mjs';
+import { chooseFaceCamera, chooseSafeCamera, segmentHitsBox } from './scene_camera.mjs';
 
 const target = [0, 4, 0];
 const desired = [0, 7, 24];
@@ -12,6 +12,11 @@ const open = chooseSafeCamera(target, desired, [], 14, 36);
 assert.ok(Math.abs(open[0] - desired[0]) < 1e-6);
 assert.ok(Math.abs(open[1] - desired[1]) < 1e-6);
 assert.ok(Math.abs(open[2] - desired[2]) < 1e-6);
+
+const faceTarget = [0, 5, 0];
+const faceCamera = chooseFaceCamera(faceTarget, [0, 6, 12], [], 2.2);
+const faceDistance = Math.hypot(...faceCamera.map((value, axis) => value - faceTarget[axis]));
+assert.ok(faceDistance >= 2.79, `a face close-up must not zoom tighter than the 2.8-stud minimum, got ${faceDistance}`);
 
 const closedRoom = [
   { position: [0, 5, 9], size: [14, 12, 1] },

@@ -1,15 +1,7 @@
-"""The Gemini sub-agent is required for the map and the cameras, optional elsewhere.
-
-The map step is where the world and the shot list are designed, so the AI has to
-hand at least one job about them to the sub-agent. The story, narration and
-summary steps stay free to plan alone. Both halves are enforced here: the schema
-for the map step, the prompt wording, and the workflow's own fallback review so a
-forgetful model can never ship an unreviewed map.
-"""
+"""Map delegation is mandatory, AI-authored, and never workflow-injected."""
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -17,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
+import map_delegation  # noqa: E402
 import plan_schema  # noqa: E402
 
 WORKFLOW = ROOT / ".github" / "workflows" / "main.yml"
@@ -27,103 +20,141 @@ def workflow_text() -> str:
 
 
 class MapSchemaTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.schema = plan_schema.build_schema([])
-
-    def test_map_plan_must_delegate_at_least_one_task(self) -> None:
-        tasks = self.schema["properties"]["subagent_tasks"]
+    def test_first_map_response_requires_a_subagent_task(self) -> None:
+        schema = plan_schema.build_schema([])
+        tasks = schema["properties"]["subagent_tasks"]
         self.assertEqual(tasks["minItems"], 1)
         self.assertEqual(tasks["items"]["properties"]["topic"]["enum"],
                          ["map", "cameras", "faces", "narration",
                           "animation", "models", "code"])
+        self.assertIn("subagent_tasks", schema["required"])
 
-    def test_subagent_tasks_is_required(self) -> None:
-        self.assertIn("subagent_tasks", self.schema["required"])
+    def test_followup_plan_can_return_no_more_tasks(self) -> None:
+        schema = plan_schema.build_schema([], require_subagent_tasks=False)
+        self.assertEqual(schema["properties"]["subagent_tasks"]["minItems"], 0)
+        self.assertIn("subagent_tasks", schema["required"])
+
+
+class FirstResponseValidationTests(unittest.TestCase):
+    @staticmethod
+    def task(topic: str, task_id: str) -> dict:
+        return {"id": task_id, "kind": "write", "topic": topic,
+                "instruction": f"Design or review the {topic} for this story."}
+
+    def test_valid_first_response_authors_both_required_topics(self) -> None:
+        response = {"message": {"content": json.dumps({
+            "subagent_tasks": [self.task("map", "t1"), self.task("models", "t2")]
+        })}}
+        self.assertEqual(map_delegation.missing_required_topics(response), [])
+        self.assertEqual(map_delegation.authored_topics(response), {"map", "models"})
+
+    def test_workflow_generated_review_cannot_substitute_for_ai_authored_map_call(self) -> None:
+        # This is what the validator sees: the model's untouched response. A later
+        # workflow append would make a different object valid, but cannot repair it.
+        ai_response = {"subagent_tasks": [self.task("models", "t1")]}
+        workflow_appended = {
+            **ai_response,
+            "subagent_tasks": ai_response["subagent_tasks"] + [
+                self.task("cameras", "workflow-generated-review")
+            ],
+        }
+        self.assertIn("map/camera", " ".join(
+            map_delegation.missing_required_topics(ai_response)))
+        self.assertEqual(map_delegation.missing_required_topics(workflow_appended), [])
+
+    def test_map_camera_task_does_not_replace_the_models_call(self) -> None:
+        response = {"subagent_tasks": [self.task("cameras", "t1")]}
+        self.assertIn("models", " ".join(
+            map_delegation.missing_required_topics(response)))
+
+    def test_tasks_without_instructions_do_not_count_as_authored_calls(self) -> None:
+        response = {"subagent_tasks": [
+            {"topic": "map", "kind": "verify", "instruction": "  "},
+            self.task("models", "t1"),
+        ]}
+        self.assertIn("map/camera", " ".join(
+            map_delegation.missing_required_topics(response)))
+
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.text = workflow_text()
 
-    def test_map_prompt_says_the_subagent_is_not_optional(self) -> None:
-        # New wording: MAP + CAMERA + BIG MODELS mandatory at the START
-        self.assertTrue("THE GEMINI SUB-AGENT IS NOT OPTIONAL FOR THIS STEP" in self.text or "SUB-AGENT IS MANDATORY AND MUST HAPPEN AT THE START" in self.text)
-        self.assertTrue('"topic":"map", "cameras" or "faces"' in self.text or '"topic":"map" or "cameras"' in self.text)
-        self.assertIn('"topic":"models"', self.text)
-
-    def test_required_map_camera_delegation_is_the_first_prompt_instruction(self) -> None:
+    def map_prompt(self) -> str:
         prompt_start = self.text.index("cat > map_prompt.txt <<PROMPT")
         prompt_end = self.text.index("\n          PROMPT", prompt_start)
-        prompt = self.text[prompt_start:prompt_end]
-        requirement = prompt.index("MANDATORY FIRST ACTION FOR THE MAP AND CAMERA PLAN")
+        return self.text[prompt_start:prompt_end]
+
+    def test_prompt_says_the_ai_must_manually_author_both_calls_first(self) -> None:
+        prompt = self.map_prompt()
+        self.assertIn("MANUALLY AUTHOR THE SUB-AGENT TOOL CALLS YOURSELF", prompt)
+        self.assertIn("FIRST JSON response", prompt)
+        self.assertIn('"topic":"models"', prompt)
+        self.assertIn('"topic":"map"', prompt)
+        self.assertIn("workflow will not create, append, repair, or substitute", prompt)
+
+    def test_manual_call_requirement_precedes_map_design_instructions(self) -> None:
+        prompt = self.map_prompt()
+        requirement = prompt.index("MANDATORY FIRST ACTION")
         design = prompt.index("Think through the complete story")
         self.assertLess(requirement, design)
-        opening = prompt[requirement:prompt.index("The web is NOT searched", requirement)]
-        self.assertIn("FIRST JSON response", opening)
-        self.assertIn("topic=map or topic=cameras", opening)
-        self.assertIn("topic=models", opening)
-        self.assertIn("a models-only, narration-only or other task does not count", opening)
 
     def test_story_prompt_keeps_delegation_optional(self) -> None:
-        # The story prompt still offers the helper without demanding it; only the
-        # map/camera step is compulsory (the map prompt now says so explicitly and
-        # no longer carries the old "for the STORY" aside).
         self.assertIn("There is no quota and no rule that you must ask", self.text)
         self.assertIn('if you can write the story yourself, just write it and return '
                       '"subagent_tasks":[]', self.text)
-        self.assertTrue("THE GEMINI SUB-AGENT IS NOT OPTIONAL FOR THIS STEP" in self.text or "SUB-AGENT IS MANDATORY AND MUST HAPPEN AT THE START" in self.text)
 
-    def test_workflow_sends_the_review_itself_when_nothing_was_delegated(self) -> None:
-        self.assertIn("MAP_TOPICS = {'map', 'cameras', 'faces'}", self.text)
-        self.assertIn("'required-map-camera-review'", self.text)
-        self.assertIn("map_subagent_review.done", self.text)
+    def test_original_response_is_validated_before_any_helper_task_is_built(self) -> None:
+        validation = self.text.index("python tools/map_delegation.py map_response.json")
+        helper_loop = self.text.index("for helper_round in 1 2 3 4; do")
+        self.assertLess(validation, helper_loop)
+        self.assertIn("untouched AI response", self.text)
 
-    def test_a_models_job_is_required_too(self) -> None:
-        # "create 1-2 parts/models with the sub-agent" - the prompt asks for it and
-        # the workflow sends it when the model forgot.
-        self.assertTrue("at least one MODELS job" in self.text or "MODELS job" in self.text)
-        self.assertIn("'required-model-design'", self.text)
-        self.assertIn("required 1-2 finished model designs", self.text)
+    def test_workflow_never_injects_a_required_subagent_task(self) -> None:
+        for forbidden in (
+            "required-map-camera-review",
+            "required-model-design",
+            "The AI delegated nothing for the map/cameras",
+            "The AI delegated nothing for the models",
+            "sending it once from the draft plan",
+            "workflow will itself inject",
+        ):
+            self.assertNotIn(forbidden, self.text)
+        self.assertIn("never synthesize a replacement task", self.text)
 
-    def test_the_ai_is_told_the_time_and_the_edits_it_made(self) -> None:
-        # New: each entry shows provider + seconds + whether it edited + FULL text, and accept/decline handshake
-        self.assertTrue("it tells you how long each job took and whether it edited a file" in self.text or "each entry shows provider" in self.text)
-        self.assertTrue("CONFIRM BEFORE YOU CONTINUE" in self.text or "YOU MUST ACCEPT OR DECLINE BEFORE YOU CONTINUE" in self.text)
+    def test_map_response_is_forwarded_without_synthesized_required_jobs(self) -> None:
+        self.assertIn("(plan.get('subagent_tasks') or [])[:3]", self.text)
+        self.assertIn("'tasks': tasks", self.text)
+        self.assertNotIn("MAP_TOPICS =", self.text)
+        self.assertIn("cannot execute the AI-authored mandatory map sub-agent calls", self.text)
+
+    def test_a_missing_delegation_is_reprompted_without_marking_review_done(self) -> None:
+        retry_loop = self.text.index("for delegation_retry in 1 2 3; do")
+        validation = self.text.index("python tools/map_delegation.py map_response.json", retry_loop)
+        helper_loop = self.text.index("for helper_round in 1 2 3 4; do", validation)
+        self.assertLess(retry_loop, validation)
+        self.assertLess(validation, helper_loop)
+        self.assertIn("Return a complete corrected map-plan JSON yourself", self.text)
+        self.assertIn("manually author BOTH required entries", self.text)
+        self.assertIn("map_repair_request.json", self.text)
+        self.assertIn("map_repair_response.json", self.text)
+        self.assertIn("cp map_repair_response.json map_response.json", self.text)
+        self.assertIn("after two explicit re-prompts", self.text)
+        self.assertIn("no workflow-generated substitute will be run", self.text)
+        self.assertIn("exit 1", self.text)
+
+    def test_followup_schema_allows_the_ai_to_return_an_empty_task_list(self) -> None:
+        self.assertIn("--allow-empty-subagent-tasks --output map_followup_schema.json", self.text)
+        self.assertGreaterEqual(self.text.count("--slurpfile schema map_followup_schema.json"), 2)
+
+    def test_the_helper_results_still_require_accept_or_decline(self) -> None:
+        self.assertIn("YOU MUST ACCEPT OR DECLINE BEFORE YOU CONTINUE", self.text)
         self.assertIn('"subagent_review"', self.text)
+        self.assertIn("The AI asked for changes, so it gets one more world plan round", self.text)
 
-    def test_the_three_task_cap_cannot_drop_a_required_job(self) -> None:
-        self.assertIn("Never let the cap of three steal", self.text)
-        self.assertIn("tasks = required[:3] + others[:max(0, 3 - len(required[:3]))]", self.text)
-
-    def test_the_map_step_cannot_loop_on_required_tasks(self) -> None:
-        self.assertIn("SUBA_ROUNDS=0", self.text)
-        self.assertIn('if [ "$SUBA_ROUNDS" -ge 2 ]; then', self.text)
-        self.assertIn("the world plan is final and the run moves on", self.text)
-
-    def test_the_confirmation_is_a_short_call_not_another_world_plan(self) -> None:
-        # "show the AI how much time it took and what it edited, then the AI
-        # confirms, then move on" - a few dozen tokens, not a second ten-minute plan.
-        self.assertIn("A SHORT CONFIRMATION, not another ten-minute world plan", self.text)
-        self.assertIn("confirm_request.json", self.text)
-        self.assertIn("num_predict': 220", self.text)
-        self.assertIn("--timeout 300 --stall-seconds 240", self.text)
-        self.assertNotIn("--projected-seconds", self.text)
-        self.assertIn("the world plan is final and the run moves on", self.text)
-
-    def test_the_confirmation_answers_are_used_to_decide(self) -> None:
-        self.assertIn("changes_needed", self.text)
-        self.assertIn("The AI asked for changes, so it gets one more world plan round",
-                      self.text)
-
-    def test_a_real_subagent_round_marks_the_review_done(self) -> None:
+    def test_a_real_ai_authored_subagent_round_marks_the_review_done(self) -> None:
+        self.assertIn("python tools/gemini_subagent.py", self.text)
         self.assertIn("touch map_subagent_review.done", self.text)
-
-    def test_the_helper_loop_cannot_skip_the_review(self) -> None:
-        self.assertIn('if [ -z "$QUERIES" ] && [ "$TASKS" = "[]" ] '
-                      '&& [ -f map_subagent_review.done ]; then break; fi', self.text)
-
-    def test_a_belt_and_braces_review_runs_after_the_loop(self) -> None:
-        self.assertIn('if [ ! -f map_subagent_review.done ]; then', self.text)
-        self.assertIn("never shipped unreviewed", self.text)
 
 
 if __name__ == "__main__":

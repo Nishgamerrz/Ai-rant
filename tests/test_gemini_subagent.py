@@ -13,6 +13,7 @@ import tempfile
 import time
 import threading
 import unittest
+from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -23,7 +24,9 @@ import gemini_subagent  # noqa: E402
 from gemini_subagent import (  # noqa: E402
     build_prompt,
     normalize_request,
+    parse_agent_turn,
     run_tasks,
+    run_tool_agent,
     safe_target,
 )
 
@@ -89,6 +92,82 @@ class RequestTests(unittest.TestCase):
         self.assertIn("Return only the edited text.", prompt)
         self.assertIn("long draft", prompt)
 
+    def test_tool_enabled_subagent_gets_the_shared_visual_and_file_tools(self):
+        task = normalize_request({"tasks": [{"kind": "agent", "instruction": "Inspect a supplied face photo",
+                                               "topic": "faces", "input": "references/face.jpg"}]})["tasks"][0]
+        prompt = build_prompt(task)
+        self.assertIn("search_assets", prompt)
+        self.assertIn("inspect_image", prompt)
+        self.assertIn("edit_image", prompt)
+        self.assertIn("YOU must author its call", prompt)
+        self.assertIn("never invent or inject", prompt)
+        self.assertIn("references/face.jpg", prompt)
+
+    def test_agent_json_parser_does_not_fabricate_missing_calls(self):
+        parsed = parse_agent_turn('```json\\n{"answer":"ok","tool_calls":[{"tool":"inspect_image","path":"face.jpg"}]}\\n```')
+        self.assertEqual(parsed["tool_calls"], [{"tool": "inspect_image", "path": "face.jpg"}])
+        plain = parse_agent_turn("No tool call was authored.")
+        self.assertEqual(plain["tool_calls"], [])
+
+    def test_subagent_executes_only_tool_calls_present_in_its_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "reference.txt").write_text("bold dark brows", encoding="utf-8")
+            first = json.dumps({"answer": "I will inspect the supplied reference.",
+                                "tool_calls": [{"tool": "read_file", "path": "reference.txt"}]})
+            final = json.dumps({"answer": "The reference has bold dark brows.", "tool_calls": []})
+            with patch("gemini_subagent.call_any", side_effect=[(first, "gemini"), (final, "groq")]) as mocked:
+                result = run_tool_agent(
+                    {"kind": "agent", "instruction": "Inspect the supplied reference", "input": "reference.txt"},
+                    "", model="gemini-2.5-flash", api_key="key", groq_key="key",
+                    groq_model_name="", root=root, timeout=1)
+            self.assertEqual(mocked.call_count, 2)
+            self.assertEqual(result["text"], "The reference has bold dark brows.")
+            self.assertEqual([call["tool"] for call in result["tool_calls"]], ["read_file"])
+            self.assertEqual(result["tool_results"][0]["result"]["content"], "bold dark brows")
+
+    def test_subagent_reprompts_until_it_authors_the_supplied_image_inspection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "references").mkdir()
+            (root / "references" / "face.jpg").write_bytes(b"fixture")
+            no_call = json.dumps({"answer": "I inspected the face.", "tool_calls": []})
+            inspect = json.dumps({"answer": "I will inspect the face now.", "tool_calls": [
+                {"tool": "inspect_image", "arguments": {"path": "references/face.jpg"}}]})
+            final = json.dumps({"answer": "The reference has bold dark eyebrows.", "tool_calls": []})
+            with patch("gemini_subagent.call_any", side_effect=[(no_call, "gemini"),
+                                                                (inspect, "groq"),
+                                                                (final, "gemini")]) as mocked, \
+                    patch("gemini_subagent.execute_tool", return_value={"ok": True, "analysis": "bold dark eyebrows"}) as execute:
+                result = run_tool_agent(
+                    {"kind": "agent", "instruction": "Inspect the supplied photo at references/face.jpg",
+                     "input": "references/face.jpg"}, "", model="gemini-2.5-flash", api_key="key",
+                    groq_key="key", groq_model_name="", root=root, timeout=1)
+            self.assertEqual(mocked.call_count, 3)
+            self.assertIn("MANDATORY PROVIDED-IMAGE CHECK", mocked.call_args_list[0].args[0])
+            self.assertIn("rejected", mocked.call_args_list[1].args[0])
+            self.assertEqual(execute.call_count, 1)
+            self.assertEqual(execute.call_args.args[0], "inspect_image")
+            self.assertEqual(execute.call_args.args[1], {"path": "references/face.jpg"})
+            self.assertEqual(result["tool_results"][0]["result"]["analysis"], "bold dark eyebrows")
+            self.assertEqual(result["text"], "The reference has bold dark eyebrows.")
+
+    def test_subagent_reports_missing_inspection_instead_of_inventing_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "face.webp").write_bytes(b"fixture")
+            no_call = json.dumps({"answer": "Done.", "tool_calls": []})
+            with patch("gemini_subagent.call_any", return_value=(no_call, "gemini")) as mocked, \
+                    patch("gemini_subagent.execute_tool") as execute:
+                result = run_tool_agent(
+                    {"kind": "agent", "instruction": "Use face.webp", "input": "face.webp"},
+                    "", model="gemini-2.5-flash", api_key="key", groq_key="key",
+                    groq_model_name="", root=root, timeout=1)
+            self.assertEqual(mocked.call_count, 6)
+            execute.assert_not_called()
+            self.assertEqual(result["required_image_inspection_missing"], ["face.webp"])
+            self.assertIn("No inspection was invented", result["text"])
+
     def test_gemini_is_told_in_parentheses_that_an_ai_is_asking(self):
         prompt = build_prompt({"kind": "answer", "instruction": "Name a teacher"})
         self.assertIn("written by another AI model, not by a person", prompt)
@@ -123,7 +202,8 @@ class WorkspaceGuideTests(unittest.TestCase):
                       "topic": "cameras"})
         self.assertIn("CAMERA PLAN", text)
         self.assertIn("WORLD BLUEPRINT", text)  # always shipped together
-        self.assertIn("1.6..4.0", text)
+        self.assertIn("2.8 studs away (default 3.0)", text)
+        self.assertIn("up to 4.0 for wider headroom", text)
         self.assertIn('"smooth" or "snap"', text)
 
     def test_narration_edits_get_the_script_rules(self):
@@ -561,12 +641,12 @@ class QuotaTests(unittest.TestCase):
 
 
 class QuotaWorkflowTests(unittest.TestCase):
-    def test_the_workflow_skips_the_required_tasks_instead_of_replanning(self):
+    def test_the_workflow_fails_if_no_fallback_can_run_required_ai_authored_tasks(self):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("Path('dist/gemini_quota_exhausted').is_file()", text)
-        self.assertIn("skipped and the plan you already wrote stands", text)
-        self.assertIn("out of quota, so the required map/camera review could not run", text)
+        self.assertIn("cannot execute the AI-authored mandatory map sub-agent calls", text)
         self.assertIn("Neither Gemini nor the Groq fallback edited the narration", text)
+        self.assertNotIn("skipped and the plan you already wrote stands", text)
 
 
 class StaleMarkerTests(unittest.TestCase):
@@ -760,8 +840,8 @@ class GroqWorkflowTests(unittest.TestCase):
         self.assertIn("GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}", text)
         self.assertIn("GROQ_MODEL: llama-3.3-70b-versatile", text)
 
-    def test_an_exhausted_quota_only_cancels_tasks_when_there_is_no_fallback(self):
+    def test_exhausted_quota_never_silently_skips_mandatory_ai_authored_calls(self):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("and not os.environ.get('GROQ_API_KEY', '').strip()", text)
-        self.assertIn('[ -z "${GROQ_API_KEY:-}" ]', text)
+        self.assertIn("cannot execute the AI-authored mandatory map sub-agent calls", text)
         self.assertIn('{ [ -n "${GEMINI_API_KEY:-}" ] || [ -n "${GROQ_API_KEY:-}" ]; }', text)

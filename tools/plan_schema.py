@@ -32,7 +32,7 @@ def axis(low: float, high: float, *, integer: bool = False) -> dict:
             "minItems": 3, "maxItems": 3}
 
 
-def build_schema(usernames=()) -> dict:
+def build_schema(usernames=(), *, require_subagent_tasks: bool = True) -> dict:
     cast = [name for name in usernames if isinstance(name, str) and name.strip()]
     username = {"type": "string"}
     if cast:
@@ -104,7 +104,7 @@ def build_schema(usernames=()) -> dict:
             "focus_username": focus,
             "transition": {"type": "string", "enum": ["smooth", "snap"]},
             "framing": {"type": "string", "enum": ["auto", "face"]},
-            "face_distance": {"type": "number", "minimum": 0.8, "maximum": 12},
+            "face_distance": {"type": "number", "minimum": 2.8, "maximum": 4.0},
         },
         "required": ["time", "position", "target", "focus_username", "transition"],
     }
@@ -161,12 +161,12 @@ def build_schema(usernames=()) -> dict:
             "camera_shots": {"type": "array", "items": shot, "minItems": 6},
             "face_expressions": {"type": "array", "items": beat, "minItems": 6},
             "search_queries": {"type": "array", "items": {"type": "string"}},
-            # The Gemini sub-agent is REQUIRED for the map and the camera plan: this
-            # step is where the world and the shots are designed, and the sub-agent is
-            # the second pair of eyes that checks them. The schema therefore demands at
-            # least one delegated task. (Everywhere else - story, narration, summary -
-            # delegating stays optional.)
-            "subagent_tasks": {"type": "array", "items": subagent_task, "minItems": 1},
+            # The first map-plan response must author at least one task. The workflow
+            # separately checks that the original response includes both map/camera and
+            # model topics. Follow-up plans may use an empty array after that required
+            # delegation has run; the workflow never fills it in for the model.
+            "subagent_tasks": {"type": "array", "items": subagent_task,
+                               "minItems": 1 if require_subagent_tasks else 0},
             # After the sub-agent has answered, the AI says what it did with each
             # result (kept it, fixed it, asked again) rather than moving on silently.
             "subagent_review": {
@@ -189,13 +189,15 @@ def main() -> None:
     parser.add_argument("--usernames", type=Path,
                         help="JSON array of the exact cast usernames")
     parser.add_argument("--output", type=Path, help="write the schema here (default: stdout)")
+    parser.add_argument("--allow-empty-subagent-tasks", action="store_true",
+                        help="allow an empty task list on a follow-up plan after the AI has delegated")
     args = parser.parse_args()
     cast = []
     if args.usernames and args.usernames.exists():
         data = json.loads(args.usernames.read_text(encoding="utf-8"))
         if isinstance(data, list):
             cast = [item for item in data if isinstance(item, str)]
-    schema = build_schema(cast)
+    schema = build_schema(cast, require_subagent_tasks=not args.allow_empty_subagent_tasks)
     text = json.dumps(schema, ensure_ascii=False)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

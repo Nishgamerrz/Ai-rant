@@ -220,9 +220,9 @@ def clean_camera_shots(plan, report):
         if framing not in {"auto", "wide", "face", "close", "closeup", "close-up"}:
             framing = "auto"
         try:
-            face_distance = min(4.0, max(1.6, float(shot.get("face_distance", 2.45))))
+            face_distance = min(4.0, max(2.8, float(shot.get("face_distance", 3.0))))
         except (TypeError, ValueError):
-            face_distance = 2.45
+            face_distance = 3.0
         fixed.append({"time": round(min(duration, float(shot.get("time", 0))), 2),
                       "position": [round(value, 2) for value in position],
                       "target": [round(value, 2) for value in target],

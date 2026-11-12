@@ -36,6 +36,35 @@ function boxCentre(box) {
 }
 
 /**
+ * Rotate a strongly Z-wide glTF avatar into the renderer's R15 convention:
+ * shoulders/hips spread along X, and the face looks along +Z. A number of
+ * Sketchfab Roblox exports (including users/noob.glb) store their four limbs
+ * along Z. Sending those straight to the X-based classifier put all limbs on
+ * the torso chain, so the soft fallback rig dragged them into shards.
+ *
+ * `frontDirection` is metadata when present. Local glTF fixtures historically
+ * defaulted it to +Z even when their width axis was Z; in that ambiguous case
+ * the model's remaining horizontal axis is treated as its front.
+ */
+export function canonicalizeAvatarOrientation(THREE, model, frontDirection = [0, 0, 1]) {
+  model.updateMatrixWorld(true);
+  const bounds = new THREE.Box3().setFromObject(model);
+  const size = bounds.getSize(new THREE.Vector3());
+  const front = Array.isArray(frontDirection) && frontDirection.length === 3
+    ? frontDirection.map((value) => Number(value) || 0) : [0, 0, 1];
+  if (size.z > size.x * 1.35 && size.z > size.y * 0.15) {
+    const sourceForwardX = Math.abs(front[0]) > Math.abs(front[2]) * 0.5 && Math.abs(front[0]) > 0.15
+      ? Math.sign(front[0]) : 1;
+    const rotation = -sourceForwardX * Math.PI / 2;
+    model.rotation.y += rotation;
+    model.updateMatrixWorld(true);
+    return { rotation, lateralAxis: 'z', frontDirection: [0, 0, 1] };
+  }
+  const forward = Math.abs(front[2]) > 0.15 ? Math.sign(front[2]) : 1;
+  return { rotation: 0, lateralAxis: 'x', frontDirection: [0, 0, forward] };
+}
+
+/**
  * Name every rigid part of an avatar from its own geometry.
  * Returns { parts, height, centreX, confident, joints }.
  */

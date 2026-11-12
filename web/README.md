@@ -2,16 +2,16 @@
 
 Dark grey studio for two workflows in this repo:
 
-- **Agent chat** (`/`) — the new `agent.yml` workflow. It runs a local Ollama model (same choices as the short workflow: `fast`, `medium`, `hard`, `smart_11b`, `animation_best` — `hard` recommended for agent) and can:
-  - `search_web` (DuckDuckGo via `tools/ai_web_search.py`, free)
-  - `create_file` / `read_file` / `list_files` under `dist/agent_workspace`
-  - `run_cmd` in the sandbox
-  - `create_image` (Pillow-rendered PNG)
-  - `subagent` — delegates to Gemini (or Groq fallback) for code/writing/verify
+- **Agent chat** (`/`) — the `agent.yml` workflow. It runs a local Ollama model (choices: `fast`, `medium`, `hard`, `smart_11b`, `animation_best`) with twenty shared tools available to both the local model and a tool-enabled Gemini/Groq sub-agent:
+  - web and visual/model asset-reference search (`search_web`, `search_assets`, `find_model_reference`)
+  - safe workspace file create/read/list/search/exact edit plus bounded shell commands
+  - HTTPS image download, Gemini pixel inspection, resize/crop/convert/compare/contact-sheet, Gemini image generation/editing
+  - video metadata inspection and ZIP packaging
+  - `subagent` — Gemini first, then Groq fallback for complete answers and model-authored visual/file tool calls
 
   Chat history → `dist/agent_chat.json`, tool calls → `dist/agent_tools.jsonl`, workspace → `dist/agent_workspace`. All uploaded as artifacts and shown in the Vercel file explorer (other side of the chat) with open / download / folder navigation.
 
-  **Live mode**: tick *Enable Cloudflare tunnel* in the New chat modal — the runner installs `cloudflared` and exposes `https://…trycloudflare.com` (free). Vercel proxies user messages through `/api/agent/chat` → tunnel so you can talk live to the running job. Without it, batch mode + artifact polling every 4s.
+  **Live chat**: the website dispatches the workflow with a random, run-scoped key. The workflow registers it with the website using a signed GitHub Actions OIDC proof (same run/repository/workflow). Follow-up text and compressed face-reference images are AES-GCM encrypted into per-message GitHub Actions variables; the single persistent agent plan polls and acknowledges them through the GitHub API. Logs and artifacts are also read directly from GitHub — no tunnel or sidecar server.
 
 - **RBX Short** (`/rbxshort` alias `nishagent.vercel.app/rbxshort`) — the existing `main.yml` workflow. Same inputs as GitHub: story topic, usernames, duration, map detail, model, voice, theme. Dispatches via `GITHUB_TOKEN` and shows coloured logs + plan next/previous loads.
 
@@ -19,7 +19,8 @@ Dark grey studio for two workflows in this repo:
 
 - The repo never stores a token. Vercel holds `GITHUB_TOKEN` as an **Environment Variable** (Settings → Environment Variables → `GITHUB_TOKEN` — a fine-grained PAT with `Actions: read/write`, `Contents: read` on `Nishgamerrz/Ai-rant`).
 - All `/api/github/*` routes read it server-side. The browser never sees it. The token is never logged.
-- Cloudflare tunnel host is allow-listed to `*.trycloudflare.com`.
+- Chat registration is rejected unless a short-lived GitHub Actions OIDC token is signed by GitHub and is bound to the expected repository, `agent.yml`, `workflow_dispatch` event, and run ID. The browser can use a registered token but cannot claim a new run session.
+- Chat actions variables store only encrypted queue payloads and a hash of the run-scoped key. Vercel's server-side `GITHUB_TOKEN` needs Actions variables read/write access; the workflow token is limited to `actions: read`, `contents: read`, and `id-token: write`.
 
 ## Local dev
 

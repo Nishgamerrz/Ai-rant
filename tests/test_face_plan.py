@@ -65,9 +65,9 @@ class FacePlanTests(unittest.TestCase):
         face_shots = [shot for shot in clean if shot["framing"] == "face"]
         self.assertGreaterEqual(len(face_shots), 2)
         self.assertTrue(all(shot["focus_username"] in CAST for shot in face_shots))
-        self.assertEqual(face_shots[0]["face_distance"], 2.2)
+        self.assertEqual(face_shots[0]["face_distance"], 2.8, "too-tight AI crops are raised to the minimum")
         self.assertEqual(face_shots[-1]["face_distance"], 4.0, "face distance is clamped to a usable range")
-        self.assertTrue(all(1.6 <= shot["face_distance"] <= 4.0 for shot in clean))
+        self.assertTrue(all(2.8 <= shot["face_distance"] <= 4.0 for shot in clean))
 
     def test_generated_camera_plan_always_contains_face_shot(self):
         for duration in (30, 60, 120, 180):

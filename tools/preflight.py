@@ -328,6 +328,7 @@ def render_room_frame():
         assert result.returncode == 0, explain(combined)
         assert "Render preflight room check" in result.stdout, explain(combined)
         assert "camera positions all inside" in result.stdout, explain(combined)
+        assert "Render preflight interior check:" in result.stdout, explain(combined)
 
 
 def main() -> int:

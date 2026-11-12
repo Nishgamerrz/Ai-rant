@@ -1,4 +1,5 @@
 name: Nish Agent — chat, web, code & files
+run-name: NishAgent run ${{ inputs.chat_dispatch_id || github.run_number }}
 
 on:
   workflow_dispatch:
@@ -19,6 +20,16 @@ on:
           - hard
           - smart_11b
           - animation_best
+      agent_chat_key:
+        description: 'Run-scoped encrypted chat key supplied by the website'
+        required: false
+        default: ''
+        type: string
+      chat_dispatch_id:
+        description: 'Opaque correlation ID used by the website to find this run'
+        required: false
+        default: ''
+        type: string
   workflow_call:
     inputs:
       prompt:
@@ -28,9 +39,17 @@ on:
         required: true
         default: 'hard'
         type: string
+      agent_chat_key:
+        required: false
+        type: string
+      chat_dispatch_id:
+        required: false
+        type: string
 
 permissions:
+  actions: read
   contents: read
+  id-token: write
 
 jobs:
   nish-agent:
@@ -75,6 +94,29 @@ jobs:
           git log --oneline -3 || true
           ls -la | head -n 30
 
+      # Bind the browser chat key from inside this exact workflow run. A browser
+      # cannot register or replace the token without a signed GitHub OIDC proof.
+      - name: Register same-run chat session
+        id: chat-session
+        if: ${{ inputs.agent_chat_key != '' }}
+        continue-on-error: true
+        env:
+          AGENT_CHAT_KEY: ${{ inputs.agent_chat_key }}
+          AGENT_CHAT_URL: https://nishagent.vercel.app/api/agent/chat
+        run: |
+          set -euo pipefail
+          printf '::add-mask::%s\n' "$AGENT_CHAT_KEY"
+          oidc_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=nishagent-chat"
+          oidc_response="$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$oidc_url")"
+          oidc_token="$(printf '%s' "$oidc_response" | jq -er '.value')"
+          test -n "$oidc_token"
+          printf '::add-mask::%s\n' "$oidc_token"
+          body="$(jq -n --arg runId "$GITHUB_RUN_ID" --arg action register '{runId:$runId,action:$action}')"
+          response="$(curl -fsS -X POST "$AGENT_CHAT_URL" -H "Authorization: Bearer $AGENT_CHAT_KEY" -H "X-GitHub-Actions-OIDC-Token: $oidc_token" -H 'Content-Type: application/json' --data "$body")"
+          printf '%s' "$response" | jq -e '.registered == true' >/dev/null
+          echo "registered=true" >> "$GITHUB_OUTPUT"
+          echo "Secure chat session registered for this workflow run."
+
       # No `actions/setup-python` — runner already has 3.11, and that action adds its own Post step.
       - name: Set up Python (system)
         run: |
@@ -88,8 +130,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y curl jq zstd
           python3 -m pip install --upgrade pip
-          python3 -m pip install --quiet --break-system-packages ddgs pillow reportlab pyyaml || python3 -m pip install --quiet ddgs pillow reportlab pyyaml || pip install --quiet ddgs pillow reportlab pyyaml
-          python3 -c "import PIL, yaml, reportlab; print('deps ok')"
+          python3 -m pip install --quiet --break-system-packages ddgs pillow reportlab pyyaml cryptography || python3 -m pip install --quiet ddgs pillow reportlab pyyaml cryptography || pip install --quiet ddgs pillow reportlab pyyaml cryptography
+          python3 -c "import PIL, yaml, reportlab, cryptography; print('deps ok')"
 
       - name: Reclaim disk for the selected model
         id: disk-space
@@ -175,7 +217,13 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           GROQ_MODEL: llama-3.3-70b-versatile
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AGENT_CHAT_KEY: ${{ inputs.agent_chat_key }}
+          AGENT_CHAT_REGISTERED: ${{ steps.chat-session.outputs.registered }}
+          AGENT_CHAT_URL: https://nishagent.vercel.app/api/agent/chat
         run: |
+          printf '::add-mask::%s\n' "$PROMPT"
+          printf '::add-mask::%s\n' "$AGENT_CHAT_KEY"
           mkdir -p dist/agent_workspace
           python3 tools/say.py plan "NishAgent starting — model $AI_MODEL (preset $MODEL_QUALITY)"
           python3 tools/say.py tool "Prompt: $PROMPT"

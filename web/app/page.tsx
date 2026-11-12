@@ -16,6 +16,7 @@ export default function Home() {
   const [steps, setSteps] = useState<any[]>([]);
   const [runStatus, setRunStatus] = useState("idle");
   const [liveLog, setLiveLog] = useState<string>("");
+  const [chatNotice, setChatNotice] = useState("");
 
   async function pollLogs() {
     if (!selectedRun) return;
@@ -48,7 +49,7 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-[#09090b] flex">
-      <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} onNewChat={() => setModalOpen(true)} selectedRun={selectedRun} onSelectRun={setSelectedRun} />
+      <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} onNewChat={() => setModalOpen(true)} selectedRun={selectedRun} onSelectRun={(run) => { setChatNotice(""); setSelectedRun(run); }} />
 
       <div className="flex-1 flex flex-col min-h-screen min-w-0">
         {/* Header */}
@@ -79,7 +80,7 @@ export default function Home() {
         <div className="flex-1 flex min-h-0">
           {/* Chat */}
           <div className="flex-1 flex flex-col min-w-0">
-            <ChatWindow runId={selectedRun} />
+            <ChatWindow runId={selectedRun} notice={chatNotice} />
           </div>
 
           {/* Right panel — desktop */}
@@ -128,16 +129,36 @@ export default function Home() {
         onStart={(payload: any) => {
           setModalOpen(false);
           const rid = payload?.runId;
+          const chatToken = String(payload?.chatToken || "");
+          setChatNotice(String(payload?.chatNotice || ""));
+          const rememberSession = (run: number) => {
+            if (!chatToken) return;
+            sessionStorage.setItem(`nishagent_chat_${run}`, chatToken);
+            sessionStorage.removeItem("nishagent_pending_chat_key");
+          };
           if (rid) {
+            rememberSession(rid);
             setSelectedRun(rid);
           } else {
-            setTimeout(async () => {
-              try {
-                const j = await fetch("/api/github/runs?kind=agent&per_page=3", { cache: "no-store" }).then((r) => r.json());
-                const newest = j?.runs?.[0]?.id;
-                if (newest) setSelectedRun(newest);
-              } catch {}
-            }, 1200);
+            if (chatToken) sessionStorage.setItem("nishagent_pending_chat_key", chatToken);
+            const createdAfter = Number(payload?.createdAfter || 0);
+            const dispatchId = String(payload?.dispatchId || "");
+            void (async () => {
+              for (let i = 0; i < 30; i++) {
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+                try {
+                  const j = await fetch("/api/github/runs?kind=agent&per_page=10", { cache: "no-store" }).then((r) => r.json());
+                  const match = dispatchId
+                    ? j?.runs?.find((run: any) => String(run.display_title || "").includes(dispatchId))
+                    : j?.runs?.find((run: any) => !createdAfter || new Date(run.created_at).getTime() >= createdAfter);
+                  if (match?.id) {
+                    rememberSession(match.id);
+                    setSelectedRun(match.id);
+                    return;
+                  }
+                } catch {}
+              }
+            })();
           }
         }}
       />

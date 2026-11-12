@@ -85,10 +85,11 @@ function buildHtml(data) {
   import { PLYLoader } from '/modules/three/examples/jsm/loaders/PLYLoader.js';
   import { STLLoader } from '/modules/three/examples/jsm/loaders/STLLoader.js';
   import { TDSLoader } from '/modules/three/examples/jsm/loaders/TDSLoader.js';
-  import { animateAvatarRig, applyRobloxAnimationRig, buildAvatarRig, idleAvatarRig, measureFaceAnchor, measureRigStretch } from '/avatar_rig.mjs';
+  import { animateAvatarRig, applyRobloxAnimationRig, buildAvatarRig, canonicalizeAvatarOrientation, idleAvatarRig, measureFaceAnchor, measureRigStretch } from '/avatar_rig.mjs';
   import { planMarks, poseAt, roomBoundsFrom, yawToward } from '/actor_motion.mjs';
   import { chooseFaceCamera, chooseSafeCamera } from '/scene_camera.mjs';
   import { buildShapeGeometry, SHAPE_ROTATIONS } from '/map_shapes.mjs';
+  import { auditRenderProps, isCameraHazard } from '/render_map_audit.mjs';
   import { createParticleField, isAdditive, sampleParticles } from '/particles.mjs';
   import { applyFaceHeadMotion, blinkSchedule, createFaceRig, defaultFaceTimeline, faceStateAt,
     normalizeExpressionTimeline, parseSrt, speechPulses, syntheticPulses } from '/face_rig.mjs';
@@ -98,13 +99,7 @@ function buildHtml(data) {
   const fixedWorldBody=physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed());
   const dynamicPropBodies=new Map();let dynamicPropCount=0,staticPropCount=0;
   physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(320,1,320).setTranslation(0,-1.08,0).setFriction(.9),fixedWorldBody);
-  const castLaneHazard=(part)=>{
-    const [x,y,z]=part.position||[],[sx,sy,sz]=part.size||[];
-    if(![x,y,z,sx,sy,sz].every(Number.isFinite))return true;
-    if(Math.max(sx,sy,sz)>70)return true;
-    const blocks=y-sy/2<7&&y+sy/2>2;
-    return blocks&&Math.abs(x)<20&&z>4&&z<54;
-  };
+  const castLaneHazard=(part)=>isCameraHazard(part,DATA.plan.interior||null);
   for(const part of DATA.plan.props||[]){
     if(castLaneHazard(part))continue;
     const [x,y,z]=part.position,[sx,sy,sz]=part.size;
@@ -175,7 +170,30 @@ function buildHtml(data) {
   // lit surface past white, so the frame measured 219/255 with no colour in it.
   scene.add(new THREE.HemisphereLight(0xf2f9ff,0x9aa88f,0.85));
   scene.add(new THREE.AmbientLight(0xffffff,0.28));
-  const sun=new THREE.DirectionalLight(0xfff4dc,1.35); sun.position.set(-150,260,150); sun.castShadow=true; sun.shadow.mapSize.set(2048,2048); sun.shadow.camera.left=-320; sun.shadow.camera.right=320; sun.shadow.camera.top=320; sun.shadow.camera.bottom=-320; sun.shadow.camera.near=10; sun.shadow.camera.far=900; sun.shadow.bias=-0.0006; sun.shadow.normalBias=0.45; scene.add(sun);
+  const sun=new THREE.DirectionalLight(0xfff4dc,1.35);
+  sun.castShadow=true; sun.shadow.mapSize.set(2048,2048);
+  if(DATA.plan.interior){
+    // An outdoor 640-stud shadow frustum spent only a few pixels on a bedroom,
+    // so shadows vanished. Aim a soft key through the room from the window-side,
+    // below the ceiling, and fit the shadow camera to this actual room.
+    const room=DATA.plan.interior, span=Math.max(Number(room.width)||34,Number(room.depth)||34);
+    const centreZ=Number(room.centre_z??24), height=Number(room.height)||11;
+    sun.position.set(-span*.34,height*.78,centreZ+span*.18);
+    sun.target.position.set(0,.45,centreZ);
+    const extent=span*.9;
+    sun.shadow.camera.left=-extent; sun.shadow.camera.right=extent;
+    sun.shadow.camera.top=extent; sun.shadow.camera.bottom=-extent;
+    sun.shadow.camera.near=.1; sun.shadow.camera.far=Math.max(60,span*4);
+    sun.shadow.bias=-.00018; sun.shadow.normalBias=.06;
+  }else{
+    sun.position.set(-150,260,150);
+    sun.target.position.set(0,0,0);
+    sun.shadow.camera.left=-320; sun.shadow.camera.right=320;
+    sun.shadow.camera.top=320; sun.shadow.camera.bottom=-320;
+    sun.shadow.camera.near=10; sun.shadow.camera.far=900;
+    sun.shadow.bias=-.0006; sun.shadow.normalBias=.45;
+  }
+  sun.shadow.camera.updateProjectionMatrix(); scene.add(sun.target); scene.add(sun);
   const fill=new THREE.DirectionalLight(0xcfe4ff,0.3); fill.position.set(160,120,-160); scene.add(fill);
   const rim=new THREE.DirectionalLight(0xffffff,0.2); rim.position.set(0,60,220); scene.add(rim);
   const groundRgb=sanitize(DATA.plan.ground_color||[126,182,120],118);
@@ -233,46 +251,25 @@ function buildHtml(data) {
     }
     slab('Roof Eave',[x,y1+.35,z],[sx*1.06,.7,sz*1.06],roofColor,'SmoothPlastic');
   }
-  // Frame audit. A single oversized or dark Part sitting in the camera's working
-  // area produced the "black box over the character" artefact. Props are snapped
-  // to a 0.25-stud grid and anything that would swallow the shot is dropped or
-  // shrunk instead of being rendered as a wall across the lens.
-  const GRID=.25, CAST_MIN_Z=6, CAST_MAX_Z=52;
-  const snap=(v)=>Math.round(Number(v||0)/GRID)*GRID;
-  const groundLevel=0;
-  function propIsCameraHazard(p){
-    const [x,y,z]=p.position,[sx,sy,sz]=p.size;
-    if(![x,y,z,sx,sy,sz].every(Number.isFinite))return true;
-    const maxSpan=Math.max(sx,sy,sz);
-    if(maxSpan>70)return true;
-    const halfH=sy/2;
-    const blocksCast=y-halfH<7&&y+halfH>2;
-    const nearCast=Math.abs(x)<20&&z>CAST_MIN_Z-2&&z<CAST_MAX_Z+2;
-    if(blocksCast&&nearCast)return true;
-    return false;
-  }
-  let droppedProps=0,alignedProps=0;
-  const safeProps=[];
-  for(const raw of DATA.plan.props||[]){
-    if(!Array.isArray(raw?.position)||!Array.isArray(raw?.size)){droppedProps+=1;continue;}
-    const size=raw.size.map(v=>Math.max(.5,Math.min(70,Math.abs(Number(v)||.5))));
-    const position=[snap(raw.position[0]),Math.max(.5,snap(raw.position[1])),snap(raw.position[2])];
-    const p={...raw,position,size,color:sanitize(raw.color||[150,170,196])};
-    if(propIsCameraHazard(p)){droppedProps+=1;continue;}
-    alignedProps+=1;
-    safeProps.push(p);
-  }
+  // Frame audit. Outdoor cast-lane hazards are dropped, but the same coordinates
+  // are the whole footprint of a bedroom: preserve the builder's fitted room shell
+  // and furnishings rather than stripping its walls and beds from the render.
+  const auditedMap=auditRenderProps(DATA.plan.props||[],DATA.plan.interior||null);
+  const safeProps=auditedMap.props.map(raw=>({...raw,color:sanitize(raw.color||[150,170,196])}));
   DATA.plan.props=safeProps;
-  window.mapAudit={alignedParts:alignedProps,droppedHazards:droppedProps};
+  window.mapAudit=auditedMap.audit;
   for(const p of safeProps){
     const name=(p.name||'').toLowerCase();
     const core=buildingWords.some(w=>name.includes(w))&&!componentWords.some(w=>name.includes(w))&&p.size[0]>=10&&p.size[1]>=6&&p.size[2]>=8;
     if(core)makeFurnishedShell(p);else addPart(p);
   }
-  // Cast lane stays completely clear so no wall, roof or prop can cross a face.
-  for(let z=CAST_MIN_Z;z<=CAST_MAX_Z;z+=6){
-    for(let x=-18;x<=18;x+=6){
-      addPart({name:'Plaza Paving Tile',shape:'Block',material:'Concrete',position:[x,.03,z],size:[5.7,.14,5.7],color:[196,202,210]});
+  // Outdoor maps get the clean tiled cast lane. An interior already has its own
+  // continuous floor; laying a plaza grid over it creates clipped/z-fighting edges.
+  if(!DATA.plan.interior){
+    for(let z=6;z<=52;z+=6){
+      for(let x=-18;x<=18;x+=6){
+        addPart({name:'Plaza Paving Tile',shape:'Block',material:'Concrete',position:[x,.03,z],size:[5.7,.14,5.7],color:[196,202,210]});
+      }
     }
   }
   // Batch ordinary architecture into instanced meshes, so generously furnished AI maps render smoothly.
@@ -594,6 +591,12 @@ function buildHtml(data) {
       model=new THREE.Group();model.add(new THREE.Mesh(geometry,material));
     }else throw new Error('Unsupported avatar model format '+modelFormat+' for '+username);
     if(hasTextures&&managerSawItems)await textureReady;else finishTextures();
+    let frontDirection=profile.front_direction||[0,0,1];
+    if(modelFormat==='gltf'||modelFormat==='glb'){
+      const orientation=canonicalizeAvatarOrientation(THREE,model,frontDirection);
+      frontDirection=orientation.frontDirection;
+      if(orientation.rotation)console.log('Canonicalized '+username+' Z-wide avatar to the R15 X-shoulder/+Z-front axes.');
+    }
     const bounds=new THREE.Box3().setFromObject(model);const size=bounds.getSize(new THREE.Vector3());
     if(!Number.isFinite(size.y)||size.y<.1) throw new Error('Roblox avatar mesh has invalid bounds for '+username);
     const pivot=new THREE.Group();pivot.name='AuthenticRobloxAvatar_'+username;
@@ -622,7 +625,7 @@ function buildHtml(data) {
     pivot.position.set(point[0],point[1],point[2]);
     // Pass the whole rig object: the face needs the meshes and skeleton, the body
     // needs the joints. Handing over only its bones is what crashed measureHeadRegion.
-    scene.add(pivot);registerActor(pivot,point,index,place,username,avatarRig,animationClips,avatarScale,profile.front_direction);
+    scene.add(pivot);registerActor(pivot,point,index,place,username,avatarRig,animationClips,avatarScale,frontDirection);
   }
   const avatarPromise=Promise.all(DATA.profiles.map(loadAvatar));
   const shots=DATA.plan.camera_shots?.length?DATA.plan.camera_shots:[{time:0,position:[0,38,76],target:[0,3,24],transition:'smooth'},{time:DATA.duration,position:[-14,15,18],target:[0,3,24],transition:'smooth'}];
@@ -664,7 +667,7 @@ function buildHtml(data) {
       const head=focusActor.rig?.Head
         ? focusActor.rig.Head.getWorldPosition(new THREE.Vector3())
         : new THREE.Vector3(focusActor.root.position.x,focusActor.root.position.y+5.35,focusActor.root.position.z);
-      const faceDistance=Math.max(2.0,Math.min(3.4,Number(a.face_distance||b.face_distance||2.45)));
+      const faceDistance=Math.max(2.8,Math.min(4.0,Number(a.face_distance||b.face_distance||3.0)));
       const faceView=chooseFaceCamera(head.toArray(),desired.toArray(),cameraBlockers,faceDistance,roomBounds);
       camera.position.set(faceView[0],faceView[1],faceView[2]);camera.lookAt(head);camera.updateMatrixWorld(true);
       return;
@@ -878,6 +881,7 @@ function createStaticServer(html, avatarRoot) {
     if (pathname === '/actor_motion.mjs') { serveFile(response, join(ROOT, 'actor_motion.mjs')); return; }
     if (pathname === '/scene_camera.mjs') { serveFile(response, join(ROOT, 'scene_camera.mjs')); return; }
     if (pathname === '/map_shapes.mjs') { serveFile(response, join(ROOT, 'map_shapes.mjs')); return; }
+    if (pathname === '/render_map_audit.mjs') { serveFile(response, join(ROOT, 'render_map_audit.mjs')); return; }
     if (pathname === '/particles.mjs') { serveFile(response, join(ROOT, 'particles.mjs')); return; }
     if (pathname === '/face_rig.mjs') { serveFile(response, join(ROOT, 'face_rig.mjs')); return; }
     if (pathname.startsWith('/modules/')) {
@@ -1046,6 +1050,19 @@ async function preflight(plan, profiles = []) {
     }
     if (profiles.length) {
       console.log(`Render preflight avatar check: ${avatarRigging.rigged}/${profiles.length} synthetic avatar(s) rigged (${avatarRigging.modes.join(', ')}).`);
+    }
+    const mapAudit = await page.evaluate(() => window.mapAudit || {});
+    if (plan.interior) {
+      if (mapAudit.roomShellParts < 10 || mapAudit.roomWallParts < 8) {
+        throw new Error(`the interior renderer retained only ${mapAudit.roomShellParts} shell part(s) and ${mapAudit.roomWallParts} wall/door/window part(s); the bedroom would render as an open stage`);
+      }
+      if (mapAudit.roomFurnitureParts < 20) {
+        throw new Error(`the interior renderer retained only ${mapAudit.roomFurnitureParts} furniture part(s); the room is not furnished enough to ship`);
+      }
+      if (mapAudit.roomFloorY !== 0) {
+        throw new Error(`the room floor was shifted to Y=${mapAudit.roomFloorY}; it must stay on the ground plane to avoid clipped edges`);
+      }
+      console.log(`Render preflight interior check: ${mapAudit.roomShellParts} shell parts, ${mapAudit.roomWallParts} wall/door/window parts, ${mapAudit.roomFurnitureParts} furnished parts; floor stays at Y=${mapAudit.roomFloorY}.`);
     }
 
     stage = 'draw one frame';
