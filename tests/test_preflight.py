@@ -79,7 +79,10 @@ class PreflightScriptTests(unittest.TestCase):
                         workflow.index("Download the selected AI model"))
         self.assertIn('"--profiles", str(profiles_path), "--preflight"', source)
         self.assertIn("Render preflight avatar check: 1/1 synthetic avatar(s) rigged", source)
-        self.assertIn("the scene failed to build", (ROOT / "tools/video_renderer/render_short.mjs").read_text(encoding="utf-8"))
+        renderer = (ROOT / "tools/video_renderer/render_short.mjs").read_text(encoding="utf-8")
+        self.assertIn("the scene failed to build", renderer)
+        self.assertIn("Avatar root/rig mismatch", renderer)
+        self.assertIn("not actor.rig (the joint map)", renderer)
 
 
 class PreflightAvatarFixtureTests(unittest.TestCase):

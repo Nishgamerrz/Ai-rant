@@ -1030,7 +1030,15 @@ async function preflight(plan, profiles = []) {
     const ready = await Promise.race([
       page.evaluate(() => window.sceneReady),
       new Promise((_, fail) => setTimeout(() => fail(new Error('the scene never became ready (60s)')), 60000)),
-    ]).catch(error => { throw new Error(`the scene failed to build: ${error.message}`); });
+    ]).catch(error => {
+      const details = error?.message || String(error);
+      const missingUpdateTarget = details.includes('Cannot read properties of undefined')
+        && details.includes('updateMatrixWorld');
+      const rootHint = missingUpdateTarget
+        ? ' Avatar root/rig mismatch: update actor.root or avatarRig.root (the Three.js Object3D), not actor.rig (the joint map).'
+        : '';
+      throw new Error(`the scene failed to build: ${details}${rootHint}`);
+    });
     if (!ready) throw new Error('the scene reported itself ready but returned nothing');
     const avatarRigging = await page.evaluate(() => window.avatarRigSummary || { total: 0, rigged: 0, modes: [] });
     if (profiles.length && avatarRigging.rigged !== profiles.length) {
