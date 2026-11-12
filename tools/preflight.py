@@ -8,10 +8,13 @@ nothing proved the *tools* worked until they were needed:
 * a backtick inside the renderer's HTML template, which only surfaced when
   buildHtml() ran;
 * a missing npm module, which only surfaced when Chromium loaded the page;
+* an avatar rig whose joint map was mistaken for its Three.js root, which only
+  surfaced after the story and the full camera plan were finished;
 * a renderer that needed a GPU flag, which only surfaced at the first frame.
 
-This script runs those checks up front and fails fast, with a message naming the
-broken thing. It is deliberately stdlib-only, so it works before any pip install.
+This script runs those checks up front with a synthetic R15 OBJ avatar, so the
+real browser scene-ready and avatar-rig path fails fast with the exact browser
+error instead of waiting an hour for the production render. It is deliberately stdlib-only, so it works before any pip install.
 
     python tools/preflight.py            # static checks only
     python tools/preflight.py --render   # also render one real frame
@@ -141,8 +144,47 @@ def plan_schema():
         assert cast.get("enum") == ["Lead"], f"the schema ignores the cast: {cast}"
 
 
+def write_preflight_avatar(asset_root: Path) -> dict:
+    """Write one tiny, real OBJ avatar so browser preflight exercises sceneReady rigging."""
+    user_id = "preflight-avatar"
+    avatar_dir = asset_root / user_id
+    avatar_dir.mkdir(parents=True, exist_ok=True)
+    parts = [
+        ("Head", (0, 5.55, 0), (0.72, 0.72, 0.72)),
+        ("Torso", (0, 3.55, 0), (1.05, 1.75, 0.58)),
+        ("LeftArm", (-1.0, 3.7, 0), (0.4, 1.4, 0.4)),
+        ("RightArm", (1.0, 3.7, 0), (0.4, 1.4, 0.4)),
+        ("LeftLeg", (-0.35, 1.3, 0), (0.5, 2.4, 0.6)),
+        ("RightLeg", (0.35, 1.3, 0), (0.5, 2.4, 0.6)),
+    ]
+    corners = [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
+               (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)]
+    faces = [(0, 1, 2, 3), (4, 7, 6, 5), (0, 4, 5, 1),
+             (3, 2, 6, 7), (0, 3, 7, 4), (1, 5, 6, 2)]
+    obj = ["mtllib avatar.mtl"]
+    base = 1
+    for name, center, size in parts:
+        obj.extend((f"o {name}", "usemtl PreflightAvatar"))
+        for signs in corners:
+            vertex = [center[axis] + signs[axis] * size[axis] / 2 for axis in range(3)]
+            obj.append("v " + " ".join(f"{value:.4f}" for value in vertex))
+        for face in faces:
+            obj.append("f " + " ".join(str(base + index) for index in face))
+        base += len(corners)
+    (avatar_dir / "avatar.obj").write_text("\n".join(obj) + "\n", encoding="utf-8")
+    (avatar_dir / "avatar.mtl").write_text(
+        "newmtl PreflightAvatar\nKd 0.26 0.68 0.34\nKa 0.12 0.12 0.12\n"
+        "Ks 0.08 0.08 0.08\nNs 12\n", encoding="utf-8")
+    return {
+        "username": "PreflightLead", "user_id": user_id, "model_ready": True,
+        "model_file": "avatar.obj", "model_format": "obj",
+        "model_source": "preflight-fixture", "front_direction": [0, 0, 1],
+        "thumbnail_ready": False,
+    }
+
+
 def render_frame():
-    """Start Chromium, load the real page and capture one frame."""
+    """Start Chromium, rig a synthetic R15 avatar, then load the real page and capture a frame."""
     node = shutil.which("node")
     assert node, "node is not installed"
     # A representative world, not a single grey box. The colour audit measures
@@ -175,16 +217,24 @@ def render_frame():
              "position": [8, 2, 10], "size": [6, 2, 2], "color": [120, 82, 50],
              "physics": "static"},
         ],
-        "character_placements": [], "camera_shots": [], "face_expressions": [],
+        "character_placements": [
+            {"username": "PreflightLead", "role": "lead", "position": [0, 0, 24]},
+        ],
+        "camera_shots": [], "face_expressions": [],
     }
     with tempfile.TemporaryDirectory() as tmp:
-        map_path = Path(tmp) / "map.json"
+        work = Path(tmp)
+        map_path = work / "map.json"
         map_path.write_text(json.dumps(plan), encoding="utf-8")
+        profile = write_preflight_avatar(work / "dist" / "avatar-assets")
+        profiles_path = work / "profiles.json"
+        profiles_path.write_text(json.dumps([profile]), encoding="utf-8")
         result = subprocess.run([node, str(RENDERER / "render_short.mjs"),
-                                 "--map", str(map_path), "--preflight"],
-                                capture_output=True, text=True, cwd=ROOT, timeout=600)
+                                 "--map", str(map_path), "--profiles", str(profiles_path), "--preflight"],
+                                capture_output=True, text=True, cwd=work, timeout=600)
         combined = result.stdout + result.stderr
         assert result.returncode == 0, explain(combined)
+        assert "Render preflight avatar check: 1/1 synthetic avatar(s) rigged" in result.stdout, explain(combined)
         assert "Render preflight passed" in result.stdout, explain(combined)
 
 

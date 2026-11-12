@@ -1000,8 +1000,8 @@ async function launchBrowser() {
     + where + ` Tried: ${problems.join(' | ')}`);
 }
 
-async function preflight(plan) {
-  const data = { plan, profiles: [], duration: 15, captions: '', faceAnimation: 'off' };
+async function preflight(plan, profiles = []) {
+  const data = { plan, profiles: Array.isArray(profiles) ? profiles : [], duration: 15, captions: '', faceAnimation: 'off' };
   let stage = 'build the page';
   let html;
   try {
@@ -1032,6 +1032,13 @@ async function preflight(plan) {
       new Promise((_, fail) => setTimeout(() => fail(new Error('the scene never became ready (60s)')), 60000)),
     ]).catch(error => { throw new Error(`the scene failed to build: ${error.message}`); });
     if (!ready) throw new Error('the scene reported itself ready but returned nothing');
+    const avatarRigging = await page.evaluate(() => window.avatarRigSummary || { total: 0, rigged: 0, modes: [] });
+    if (profiles.length && avatarRigging.rigged !== profiles.length) {
+      throw new Error(`the avatar render path rigged ${avatarRigging.rigged}/${profiles.length} preflight avatar(s); each avatar must build a working joint map before the AI starts`);
+    }
+    if (profiles.length) {
+      console.log(`Render preflight avatar check: ${avatarRigging.rigged}/${profiles.length} synthetic avatar(s) rigged (${avatarRigging.modes.join(', ')}).`);
+    }
 
     stage = 'draw one frame';
     await page.evaluate(() => window.renderAt(0.1));
@@ -1126,7 +1133,11 @@ async function preflight(plan) {
 async function main() {
   const args=argumentsFromProcess(process.argv.slice(2));
   const plan=JSON.parse(readFileSync(args.map,'utf8'));
-  if(args.preflight){ await preflight(plan); return; }
+  if(args.preflight){
+    const profiles=args.profiles?JSON.parse(readFileSync(args.profiles,'utf8')):[];
+    if(!Array.isArray(profiles))throw new Error('--profiles must contain a JSON array.');
+    await preflight(plan,profiles);return;
+  }
   const usernames=JSON.parse(readFileSync(args.characters,'utf8'));
   const profiles=JSON.parse(readFileSync(args.profiles,'utf8'));
   if(!Array.isArray(usernames)||usernames.length===0) throw new Error('Provide at least one actual Roblox username for the lead avatar.');

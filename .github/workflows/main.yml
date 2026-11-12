@@ -307,9 +307,10 @@ jobs:
           fi
           # Everything expensive that has ever broken this workflow broke at the
           # END of an hour: the renderer's page template, a missing node module,
-          # a browser with no WebGL. This step starts Chromium, loads the real
-          # page and captures a frame now, so a broken tool fails in two minutes
-          # instead of after the model download, the story and the world plan.
+          # a browser with no WebGL, or an avatar's scene-ready rig. This step starts
+          # Chromium, loads the real page with a synthetic R15 OBJ, awaits sceneReady
+          # and captures a frame now, so an updateMatrixWorld/avatar-root crash is
+          # reported in two minutes instead of after the model, story and world plan.
           python tools/preflight.py --render
 
       - name: Run the whole test suite before spending a model call
