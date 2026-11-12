@@ -42,9 +42,7 @@ jobs:
       AI_TYPE_DELAY: '0.002'
       AI_TYPE_BUDGET: '120'
       AI_HEARTBEAT: '60'
-      AI_MIN_TPS: '1.2'
-      AI_TPS_WINDOW: '90'
-      AI_PROJECTED_SECONDS: '1500'
+      AI_STALL: '900'
     steps:
       # Manual checkout — no `actions/checkout` so there is no `Post Checkout repository` step at all.
       # RDP workflow you showed has zero `uses:` and therefore zero Post steps; we do the same here.

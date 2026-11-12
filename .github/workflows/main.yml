@@ -122,20 +122,9 @@ jobs:
       AI_TYPE_DELAY: '0.002'
       AI_TYPE_BUDGET: '120'
       AI_HEARTBEAT: '60'
-      # A model that talks at half a token per second is not making progress: one
-      # blueprint took 48 minutes that way and the run was over before the render.
-      # After 90 s of streaming, anything slower than this is handed to the
-      # fallback model. The wall-clock limit stays off, so a slow-but-steady run
-      # is still allowed to finish.
-      AI_MIN_TPS: '1.2'
-      AI_TPS_WINDOW: '90'
-      # ...and a trickle above that floor can still take an hour: a 14B model at
-      # 2 tokens/s needs fifty minutes for a 6000-token world plan. Once the rate
-      # is measurable, the finish time is projected from it, and a call that would
-      # land later than this hands over to the fallback model. This is a projection
-      # from measured progress, not a wall clock, so a model that is genuinely
-      # working is never interrupted; one that is not cannot eat the render.
-      AI_PROJECTED_SECONDS: '1500'
+      # A model remains primary while it emits thinking or answer content, however
+      # slowly. Only a full AI_STALL window with no content on either channel may
+      # trigger the fallback; throughput and projected completion time never do.
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -591,7 +580,7 @@ jobs:
             echo "- Presets: fast qwen3:4b, medium qwen3:8b, hard qwen3:8b (longer thinking budget, extra correction round), smart_11b qwen3:14b (14.8B), animation_best deepseek-r1:8b. Every one is a thinking model that returns the full JSON schema."
             echo "- Output budget for this preset: ${MAP_TOKENS} tokens, so a modelled blueprint with cameras and face beats cannot be cut off mid-JSON."
             echo "- smart_11b runs qwen3:14b: the same Qwen3 family that already passes every JSON-schema, narration and world-plan gate here, just larger, so it plans the most reliable furnished world, aligned Part placement, cameras and face timing."
-            echo "- No time limit on a model call: hard and smart presets may take as long as they need. Only ${AI_STALL}s of complete silence (a frozen process) hands the call to qwen3:8b."
+            echo "- No time limit on a model call: hard and smart presets may take as long as they need. Only ${AI_STALL}s with no thinking or answer content (a frozen stream) hands the call to its configured fallback model."
             echo "- Speed: flash attention + q8 KV cache, 60-minute model keep-alive, one loaded model, and compact per-step token budgets, so a slow CPU preset no longer spends hours on repeated generations. The live console prints tokens/second for every AI call."
             echo "- llama3.2-vision was dropped: current Ollama cannot load its mllama architecture (HTTP 500) and it has no thinking channel."
             echo "- animation_best is the ~5.2 GB, 128K-context, text-only DeepSeek-R1 reasoning model for world/shot planning; it is not a mesh editor. Avatar mesh loading and native Roblox animation retargeting remain unchanged."
@@ -736,7 +725,6 @@ jobs:
             --output narration_response.json --label "story narration" \
             --timeout "${AI_TIMEOUT:-900}" \
             --stall-seconds "${AI_STALL:-900}" \
-            --projected-seconds "${AI_PROJECTED_SECONDS:-1500}" \
             --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}"
           # A delegated task from the story call is answered once, then the story is
           # asked again with the answers. Never fatal: if Gemini is missing the run
@@ -790,7 +778,6 @@ jobs:
               --output narration_response.json --label "story + sub-agent answers" \
               --timeout "${AI_TIMEOUT:-900}" \
               --stall-seconds "${AI_STALL:-900}" \
-            --projected-seconds "${AI_PROJECTED_SECONDS:-1500}" \
               --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}" || true
           fi
           GEMINI_EDIT_DONE=0
@@ -885,7 +872,6 @@ jobs:
               --output narration_response.json --label "narration repair ${attempt}" \
               --timeout "${AI_TIMEOUT:-900}" \
               --stall-seconds "${AI_STALL:-900}" \
-            --projected-seconds "${AI_PROJECTED_SECONDS:-1500}" \
               --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}"
           done
           test -s dist/narration.txt
@@ -1009,7 +995,6 @@ jobs:
               --output map_response.json --label "world + camera + face plan ${attempt}" \
               --timeout "${AI_TIMEOUT:-900}" \
               --stall-seconds "${AI_STALL:-900}" \
-            --projected-seconds "${AI_PROJECTED_SECONDS:-1500}" \
               --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}" || curl_status=$?
             if [ "$curl_status" -ne 0 ]; then
               python tools/say.py warning "Map request failed with curl exit ${curl_status}."
@@ -1251,7 +1236,7 @@ jobs:
           PYCONF
                 python tools/ollama_stream.py --request confirm_request.json \
                   --output confirm_response.json --label "AI confirms the sub-agent's work" \
-                  --timeout 300 --stall-seconds 240 --projected-seconds 0 \
+                  --timeout 300 --stall-seconds 240 \
                   --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}" || true
                 NEED_REPLAN=$(python - <<'PYCN'
           import json
@@ -1284,7 +1269,6 @@ jobs:
                 --label "world plan + AI help round ${helper_round}" \
                 --timeout "${AI_TIMEOUT:-900}" \
                 --stall-seconds "${AI_STALL:-900}" \
-            --projected-seconds "${AI_PROJECTED_SECONDS:-1500}" \
                 --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}" || break
               # The AI confirms the sub-agent's work in "subagent_review": once that is
               # in the plan the world and the cameras are settled, so the run moves on
@@ -1691,7 +1675,6 @@ jobs:
           python tools/ollama_stream.py --request creation_summary_request.json \
             --output creation_summary_response.json --label "creation summary" \
             --timeout 3600 --stall-seconds "${AI_STALL:-900}" \
-            --projected-seconds "${AI_PROJECTED_SECONDS:-1500}" \
             --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}"
           python - <<'PY'
           from pathlib import Path
