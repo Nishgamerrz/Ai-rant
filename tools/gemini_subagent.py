@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -58,6 +59,7 @@ from console_style import paint  # noqa: E402
 
 from gemini_workspace import guide as file_guide  # noqa: E402
 from gemini_workspace import topics_for  # noqa: E402
+from agent_tools import TOOL_GUIDE, execute_tool, safe_path  # noqa: E402
 
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 DEFAULT_MODEL = "gemini-2.5-flash"
@@ -70,7 +72,9 @@ MAX_INSTRUCTION_CHARS = 1200
 # "write" is a free-form letter to Gemini: the planning model may send it any
 # message it likes - a question, a draft it wants improved, a decision it wants
 # a second opinion on - and gets prose back. Nothing is applied to a file.
-KINDS = ("edit", "answer", "verify", "code", "name", "write")
+KINDS = ("edit", "answer", "verify", "code", "name", "write", "agent")
+MAX_AGENT_TOOL_ROUNDS = 6
+MAX_AGENT_TOOL_CALLS = 6
 
 SYSTEM_RULES = (
     "You are the helper sub-agent for a local text model that is building a short, "
@@ -219,7 +223,192 @@ def build_prompt(task: dict, context: str = "") -> str:
                      if task.get("apply_to") else "Return only the edited text.")
     elif task["kind"] == "code":
         parts.append("Return only the complete code, no fences and no commentary.")
+    elif task["kind"] == "agent":
+        parts.append(TOOL_GUIDE)
+        parts.append(
+            "You are the tool-enabled sub-agent. For this task, you may use the "
+            "listed tools. If one is needed, YOU must author its call in your own "
+            "first response as a JSON object inside a json code fence, shaped like "
+            "{\\\"thought\\\":\\\"brief reason\\\",\\\"answer\\\":\\\"status\\\","
+            "\\\"tool_calls\\\":[{\\\"tool\\\":\\\"inspect_image\\\","
+            "\\\"path\\\":\\\"reference.png\\\"}]}. The runner will only "
+            "execute calls present in your response; it will never invent or inject "
+            "delegation or asset-search calls. After tool results arrive, continue "
+            "until finished, then return an empty tool_calls array and a concise final "
+            "answer. Keep each round's call list to six or fewer tools."
+        )
     return "\n\n".join(parts)
+
+
+def parse_agent_turn(text: str) -> dict:
+    """Read only a JSON tool-call object authored in the sub-agent's response."""
+    import re
+    candidates = []
+    candidates.extend(match.group(1) for match in re.finditer(
+        r"```(?:json)?\s*(\{.*?\})\s*```", text or "", flags=re.IGNORECASE | re.DOTALL))
+    candidates.append(text or "")
+    decoder = json.JSONDecoder()
+    for candidate in candidates:
+        stripped = candidate.strip()
+        try:
+            value = json.loads(stripped)
+            if isinstance(value, dict) and isinstance(value.get("tool_calls"), list):
+                return value
+        except (json.JSONDecodeError, TypeError):
+            pass
+        for start, char in enumerate(stripped):
+            if char != "{":
+                continue
+            try:
+                value, _ = decoder.raw_decode(stripped[start:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict) and isinstance(value.get("tool_calls"), list):
+                return value
+    return {"answer": str(text or "").strip(), "tool_calls": []}
+
+
+def _tool_call_parts(call: dict) -> tuple[str, dict]:
+    name = str(call.get("tool") or call.get("name") or "").strip().lower()
+    arguments = call.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            arguments = {}
+    if not isinstance(arguments, dict):
+        arguments = {}
+    reserved = {"tool", "name", "arguments", "thought", "answer"}
+    inline = {key: value for key, value in call.items() if key not in reserved}
+    return name, {**inline, **arguments}
+
+
+def _required_image_paths(task: dict, root: Path) -> list[str]:
+    if str(task.get("kind") or "").lower() != "agent":
+        return []
+    text = str(task.get("instruction") or "") + "\n" + str(task.get("input") or "")
+    paths: list[str] = []
+    for match in re.finditer(r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:png|jpe?g|webp)", text, re.IGNORECASE):
+        try:
+            candidate = safe_path(root, match.group(0))
+            if candidate.is_file():
+                relative = candidate.relative_to(Path(root).resolve()).as_posix()
+                if relative not in paths:
+                    paths.append(relative)
+        except (ValueError, OSError):
+            continue
+    return paths[:4]
+
+
+def run_tool_agent(task: dict, context: str, *, model: str, api_key: str,
+                   groq_key: str, groq_model_name: str, root: Path,
+                   url: str | None = None, groq_url: str | None = None,
+                   timeout: float = 120.0) -> dict:
+    """Run a bounded tool loop, executing only calls the model authored."""
+    required_images = _required_image_paths(task, root)
+    base_prompt = build_prompt(task, context)
+    if required_images:
+        image_list = ", ".join(f"`{path}`" for path in required_images)
+        base_prompt += (
+            "\n\nMANDATORY PROVIDED-IMAGE CHECK: you must inspect every supplied workspace image yourself. "
+            f"Your own JSON tool_calls must include inspect_image (or read_image) for {image_list}. "
+            "The runner rejects and re-prompts if you omit the inspection call; it will not inject one."
+        )
+    history: list[dict] = []
+    providers: list[str] = []
+    authored_calls: list[dict] = []
+    tool_results: list[dict] = []
+    final_answer = ""
+    staged_image_calls: dict[str, dict] = {}
+    retry_instruction = ""
+    image_calls_ready = not bool(required_images)
+    for round_index in range(1, MAX_AGENT_TOOL_ROUNDS + 1):
+        if retry_instruction:
+            prompt = base_prompt + "\n\nRequired-image inspection retry: " + retry_instruction
+        elif history:
+            prompt = (base_prompt + "\n\nPrior model-authored calls and tool results:\n"
+                      + json.dumps(history, ensure_ascii=False)[:20000]
+                      + "\nContinue using your own next tool_calls, or return an empty array and final answer.")
+        else:
+            prompt = base_prompt
+        text, provider = call_any(
+            prompt, gemini_key=api_key, gemini_model=model,
+            groq_key=groq_key, groq_model_name=groq_model_name,
+            timeout=timeout, url=url, groq_url=groq_url,
+            prefer="groq" if quota_is_exhausted(root) else "gemini")
+        if provider not in providers:
+            providers.append(provider)
+        parsed = parse_agent_turn(text)
+        final_answer = str(parsed.get("answer") or parsed.get("final") or text).strip()
+        calls = parsed.get("tool_calls")
+        if not isinstance(calls, list):
+            calls = []
+
+        if required_images and not image_calls_ready:
+            for authored in calls[:MAX_AGENT_TOOL_CALLS]:
+                if not isinstance(authored, dict):
+                    continue
+                name, arguments = _tool_call_parts(authored)
+                if name not in ("inspect_image", "read_image"):
+                    continue
+                image_path = str(arguments.get("path") or "")
+                if image_path in required_images:
+                    staged_image_calls.setdefault(image_path, authored)
+            missing = [path for path in required_images if path not in staged_image_calls]
+            if missing:
+                retry_instruction = (
+                    "Your previous response was rejected because you did not author "
+                    "inspect_image tool_calls for " + ", ".join(f"`{path}`" for path in missing)
+                    + ". Write the missing calls yourself as JSON now. Do not say that an AI inspected the "
+                    "image without returning its own call; the runner will not invent or inject one."
+                )
+                continue
+            required_call_keys = {json.dumps(call, ensure_ascii=False, sort_keys=True, default=str)
+                                  for call in staged_image_calls.values()}
+            combined_calls = list(staged_image_calls.values())
+            for authored in calls[:MAX_AGENT_TOOL_CALLS]:
+                if not isinstance(authored, dict):
+                    continue
+                key = json.dumps(authored, ensure_ascii=False, sort_keys=True, default=str)
+                if key not in required_call_keys:
+                    combined_calls.append(authored)
+                    required_call_keys.add(key)
+            calls = combined_calls[:MAX_AGENT_TOOL_CALLS]
+            image_calls_ready = True
+            retry_instruction = ""
+
+        if not calls:
+            if required_images and not image_calls_ready:
+                continue
+            return {"text": final_answer, "provider": provider,
+                    "providers": providers, "rounds": round_index,
+                    "tool_calls": authored_calls, "tool_results": tool_results}
+        round_results = []
+        for authored in calls[:MAX_AGENT_TOOL_CALLS]:
+            if not isinstance(authored, dict):
+                continue
+            name, arguments = _tool_call_parts(authored)
+            # This is deliberately a direct execution of the model's exact call;
+            # the runner never fabricates a default request or tool name.
+            result = execute_tool(name, arguments, root)
+            record = {"tool": name, "arguments": arguments, "result": result,
+                      "round": round_index}
+            authored_calls.append({"tool": name, "arguments": arguments,
+                                   "round": round_index})
+            tool_results.append(record)
+            round_results.append(record)
+        history.append({"model_response": text[:10000], "tool_results": round_results})
+    if required_images and not image_calls_ready:
+        missing = [path for path in required_images if path not in staged_image_calls]
+        return {"text": "I could not complete the required model-authored image inspection call(s) for "
+                        + ", ".join(missing) + ". No inspection was invented or executed.",
+                "provider": providers[-1] if providers else "", "providers": providers,
+                "rounds": MAX_AGENT_TOOL_ROUNDS, "tool_calls": authored_calls,
+                "tool_results": tool_results, "required_image_inspection_missing": missing}
+    return {"text": final_answer or "Tool-agent round limit reached before a final response.",
+            "provider": providers[-1] if providers else "", "providers": providers,
+            "rounds": MAX_AGENT_TOOL_ROUNDS, "tool_calls": authored_calls,
+            "tool_results": tool_results, "round_limit_reached": True}
 
 
 def _extract_text(payload) -> str:
@@ -543,13 +732,23 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
             print(paint(f"[gemini sub-agent] giving it the file rules{target}: "
                         f"{', '.join(topics)}.", "tool"), flush=True)
         started = time.monotonic()
+        agent_run: dict = {}
         try:
-            text, provider = call_any(
-                build_prompt(task, request.get("context", "")),
-                gemini_key=api_key, gemini_model=model,
-                groq_key=groq_key, groq_model_name=groq_model_name,
-                timeout=timeout, url=url, groq_url=groq_url,
-                prefer="groq" if quota_is_exhausted(root) else "gemini")
+            if task["kind"] == "agent":
+                agent_run = run_tool_agent(
+                    task, request.get("context", ""), model=model,
+                    api_key=api_key, groq_key=groq_key,
+                    groq_model_name=groq_model_name, root=root,
+                    url=url, groq_url=groq_url, timeout=timeout)
+                text = str(agent_run.get("text") or "")
+                provider = str(agent_run.get("provider") or "")
+            else:
+                text, provider = call_any(
+                    build_prompt(task, request.get("context", "")),
+                    gemini_key=api_key, gemini_model=model,
+                    groq_key=groq_key, groq_model_name=groq_model_name,
+                    timeout=timeout, url=url, groq_url=groq_url,
+                    prefer="groq" if quota_is_exhausted(root) else "gemini")
         except GeminiUnavailable as exc:
             print(paint(f"[gemini sub-agent] task {task['id']} failed ({exc}); "
                         f"continuing without it.", "error"), file=sys.stderr, flush=True)
@@ -564,6 +763,16 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
         entry = {"id": task["id"], "kind": task["kind"], "ok": True, "text": text,
                  "provider": provider,
                  "seconds": round(time.monotonic() - started, 1)}
+        if agent_run:
+            entry["providers"] = agent_run.get("providers", [])
+            entry["tool_rounds"] = agent_run.get("rounds", 0)
+            entry["tool_calls"] = agent_run.get("tool_calls", [])
+            entry["tool_results"] = agent_run.get("tool_results", [])
+            if agent_run.get("round_limit_reached"):
+                entry["round_limit_reached"] = True
+            if agent_run.get("required_image_inspection_missing"):
+                entry["ok"] = False
+                entry["required_image_inspection_missing"] = agent_run["required_image_inspection_missing"]
         if task["kind"] == "edit" and task.get("apply_to"):
             target = safe_target(task["apply_to"], root)
             if target is None:

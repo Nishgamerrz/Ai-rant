@@ -237,9 +237,9 @@ class StudioExperienceTests(unittest.TestCase):
     def test_models_that_cannot_run_have_a_known_good_fallback(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
         # Every streaming call must be able to retry on a model we know loads.
-        # Story, story repair, narration edit, world plan, its helper round and the
-        # short post-sub-agent confirmation.
-        self.assertEqual(workflow.count("--fallback-model"), 7)
+        # Story, story repair, narration edit, world plan, delegation repair,
+        # helper round, map retry and the short post-sub-agent confirmation.
+        self.assertEqual(workflow.count("--fallback-model"), 8)
         self.assertIn("FALLBACK_MODEL=qwen3:4b", workflow)
         self.assertIn("FALLBACK_MODEL=qwen3:8b", workflow)
         # llama3.2-vision is the mllama architecture, which current Ollama cannot
@@ -257,7 +257,7 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("smart_11b) AI_TIMEOUT=9000", workflow)
         self.assertIn("hard) AI_TIMEOUT=5400", workflow)
         self.assertIn('echo "AI_TIMEOUT=$AI_TIMEOUT" >> "$GITHUB_ENV"', workflow)
-        self.assertEqual(workflow.count('--timeout "${AI_TIMEOUT:-900}"'), 5)
+        self.assertEqual(workflow.count('--timeout "${AI_TIMEOUT:-900}"'), 6)
         self.assertNotIn("--max-seconds", workflow)
         self.assertNotIn("NARRATION_MAX", workflow)
 

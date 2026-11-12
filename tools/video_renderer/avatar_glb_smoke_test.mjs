@@ -16,7 +16,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { applyRobloxAnimationRig, buildAvatarRig, measureHeadRegion } from './avatar_rig.mjs';
+import { animateAvatarRig, applyRobloxAnimationRig, buildAvatarRig, canonicalizeAvatarOrientation, measureHeadRegion, measureRigStretch } from './avatar_rig.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const candidate = process.argv[2]
@@ -73,14 +73,31 @@ function withoutTextures(buffer) {
 }
 
 const source = readFileSync(candidate);
+const stripped = withoutTextures(source);
 const gltf = await new GLTFLoader().parseAsync(
-  withoutTextures(source).buffer.slice(0, withoutTextures(source).length), '');
+  stripped.buffer.slice(stripped.byteOffset, stripped.byteOffset + stripped.byteLength), '');
 const model = gltf.scene;
-const originalHeight = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3()).y;
-assert.ok(originalHeight > 0.1, 'uploaded GLB has invalid bounds');
-console.log(`Loaded ${candidate}: ${originalHeight.toFixed(2)} units tall, `
+const originalBounds = new THREE.Box3().setFromObject(model);
+const originalSize = originalBounds.getSize(new THREE.Vector3());
+assert.ok(originalSize.y > 0.1, 'uploaded GLB has invalid bounds');
+const isRepositoryNoob = resolve(candidate) === resolve(HERE, '../../users/noob.glb');
+const orientation = canonicalizeAvatarOrientation(THREE, model, [0, 0, 1]);
+if (isRepositoryNoob) {
+  assert.equal(orientation.lateralAxis, 'z', 'the real noob.glb needs its sideways Z-width corrected');
+  assert.ok(Math.abs(Math.abs(orientation.rotation) - Math.PI / 2) < 1e-6,
+    'the real noob.glb must be turned into the R15 shoulder/front convention');
+}
+const bounds = new THREE.Box3().setFromObject(model);
+const size = bounds.getSize(new THREE.Vector3());
+const avatarScale = 6.2 / size.y;
+model.scale.setScalar(avatarScale);
+model.position.set(-((bounds.min.x + bounds.max.x) / 2) * avatarScale,
+  -bounds.min.y * avatarScale, -((bounds.min.z + bounds.max.z) / 2) * avatarScale);
+model.updateMatrixWorld(true);
+console.log(`Loaded ${candidate}: ${originalSize.y.toFixed(2)} units tall, `
   + `${gltf.animations.length} embedded animation clip(s), `
-  + `${(gltf.parser.json.skins || []).length} skin binding(s).`);
+  + `${(gltf.parser.json.skins || []).length} skin binding(s), `
+  + `${orientation.lateralAxis}-wide axis canonicalized.`);
 if (!(gltf.parser.json.skins || []).length) {
   console.log('The GLB has an armature hierarchy but no skin bindings, so it is not directly '
     + 'animatable; the automatic rig below supplies real joints.');
@@ -89,6 +106,10 @@ if (!(gltf.parser.json.skins || []).length) {
 const rig = buildAvatarRig(THREE, model);
 rig.root.updateMatrixWorld(true);
 rig.skeleton.update();
+if (isRepositoryNoob) {
+  assert.equal(rig.mode, 'rigid-parts', 'the real noob.glb must use rigid body parts, not soft region skinning');
+  assert.ok(rig.meshCount >= 6, 'all separate noob body parts must be retained');
+}
 assert.ok(rig.meshCount >= 1, 'no meshes were rigged');
 assert.equal(rig.skeleton.bones.length, 18, `expected 18 R15-style joints, got ${rig.skeleton.bones.length}`);
 for (const bone of ['Root', 'Hips', 'Chest', 'Head', 'LeftUpperArm', 'RightUpperArm', 'LeftUpperLeg', 'RightUpperLeg']) {
@@ -116,6 +137,17 @@ const head = measureHeadRegion(THREE, rig);
 assert.ok(head.size[0] > 0.05 && head.size[1] > 0.05,
   `the head region must be measurable for the animated face: ${JSON.stringify(head)}`);
 assert.ok(head.center[1] > rig.height * 0.6, 'the measured head must sit near the top of the avatar');
+
+if (rig.mode === 'rigid-parts') {
+  for (const time of [0.2, 0.7, 1.4]) {
+    animateAvatarRig(rig.bones, time, 0.3, 1, true);
+    rig.root.updateMatrixWorld(true);
+    rig.skeleton.update();
+    const report = measureRigStretch(THREE, rig);
+    assert.ok(report.maxStretch < 1e-3,
+      `the oriented GLB must not tear into shards at t=${time}: ${report.worstPart} stretched ${report.maxStretch}`);
+  }
+}
 
 // No stretching: a limb keeps its rest length when a native clip rotates it.
 const leftArm = rig.meshes.find((mesh) => /arm|object_10/i.test(mesh.name)) || rig.meshes[0];

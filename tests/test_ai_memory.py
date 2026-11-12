@@ -104,10 +104,10 @@ class WorkflowMemoryTests(unittest.TestCase):
         self.text = WORKFLOW.read_text(encoding="utf-8")
 
     def test_every_ai_request_sends_a_real_system_message(self):
-        # Seven jq-built requests (story, story re-ask, narration repair, world
-        # plan, helper round, map retry, creation summary) + the python-built
-        # confirmation request.
-        self.assertEqual(self.text.count('role:"system"'), 7)
+        # Eight jq-built requests (story, story re-ask, narration repair, world
+        # plan, delegation repair, helper round, map retry, creation summary) +
+        # the python-built confirmation request.
+        self.assertEqual(self.text.count('role:"system"'), 8)
         self.assertIn("{'role': 'system', 'content': system}", self.text)
 
     def test_the_memory_is_filled_before_the_first_call_and_reused_after(self):

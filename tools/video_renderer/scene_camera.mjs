@@ -146,7 +146,10 @@ export function chooseSafeCamera(target, desired, blockers, minDistance = 14, ma
  * beat, so the camera must get within a couple of studs without clipping into
  * the head, a wall, or the character's own shoulders.
  */
-export function chooseFaceCamera(target, desired, blockers, distance = 2.5, bounds = null) {
+export function chooseFaceCamera(target, desired, blockers, distance = 3.0, bounds = null) {
+  // Never sneak closer than the planned minimum when the first angle is blocked;
+  // the previous 0.82x retry made already-tight face crops more extreme.
+  distance = clamp(Number.isFinite(Number(distance)) ? Number(distance) : 3.0, 2.8, 4.0);
   const raw = desired.map((value, axis) => value - target[axis]);
   const rawDistance = Math.hypot(...raw) || 1;
   const yaw = Math.atan2(raw[2], raw[0]);
@@ -162,7 +165,7 @@ export function chooseFaceCamera(target, desired, blockers, distance = 2.5, boun
     if (blockers.some((box) => inside(position, box, 0.75))) return false;
     return !blockers.some((box) => segmentHitsBox(target, position, box, 0.35));
   };
-  const radii = [distance, distance * 1.35, distance * 0.82, distance * 1.9];
+  const radii = [distance, distance * 1.2, distance * 1.5, distance * 1.8];
   for (const radius of radii) {
     for (const elevation of [pitch, 0.02, -0.05, 0.16, 0.3]) {
       for (const degrees of [0, 12, -12, 25, -25, 40, -40, 58, -58, 78, -78, 100, -100, 130, -130, 160, 180]) {

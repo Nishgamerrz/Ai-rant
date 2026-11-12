@@ -271,6 +271,7 @@ jobs:
           npx playwright install --with-deps chromium
           npm run test:module-resolution
           npm run test:camera
+          npm run test:render-audit
           npm run test:avatar-rig
           npm run test:avatar-rigid
           npm run test:actor-motion
@@ -326,6 +327,7 @@ jobs:
             npm run test:face && \
             npm run test:caption-overlay && \
             npm run test:projection && \
+            npm run test:render-audit && \
             npm run test:page-template && \
             npm run test:part-colour && \
             npm run test:lighting && \
@@ -931,7 +933,7 @@ jobs:
           export SCENE_BLOCK
           python tools/say.py plan "Scene mode: ${WORLD_MODE} $(printf '%s' "$SCENE_JSON" | jq -r '.reason')"
           cat > map_prompt.txt <<PROMPT
-          MANDATORY FIRST ACTION FOR THE MAP AND CAMERA PLAN: Before you finalize any map prop or camera shot, use the Gemini sub-agent (Groq fallback if needed) in your FIRST JSON response. Include one task with topic=map or topic=cameras to review/design the map and camera storyboard, AND one task with topic=models for the hardest anchors. This map/camera delegation is REQUIRED; a models-only, narration-only or other task does not count. Do not skip the helper or finalize the plan until you have received its result and accepted/declined it. The workflow has an automatic map/camera review only as a safety net if you omit the required task.
+          MANDATORY FIRST ACTION — MANUALLY AUTHOR THE SUB-AGENT TOOL CALLS YOURSELF: In your FIRST JSON response to this map-planning request, write the required calls as real entries in "subagent_tasks": one with topic "map", "cameras", or "faces" to review/design the map and camera storyboard, AND one with topic "models" for the hardest anchors. These must be your own calls in the JSON you return now; the workflow will not create, append, repair, or substitute any calls for you. A models-only, narration-only, later-round, or workflow-generated task does not satisfy this requirement. If either call is missing, the response is invalid and the map step stops instead of pretending delegation happened. Do not finalize the plan until the sub-agent has returned and you have accepted/declined its work.
           The web is NOT searched for you by default: nothing is scraped unless you ask. If a real-world fact would genuinely make this story better (a real place, a real tradition, a real object), return search_queries and the workflow runs those searches and sends you the facts. If you do not need any, return "search_queries":[] and no search happens. Do not repeat a query you already asked. If you notice you are repeating yourself or re-planning the same thing, say so briefly and return the best complete plan you have.
           You have full creative authority over this video and may do anything at any time: invent characters, props, buildings, colours, materials, emotions, camera moves, cut timing and expression timing however you think makes the best YouTube-Shorts-style Roblox story short. If you need current real-world facts at any point, add "search_queries": ["…"] to your JSON and the workflow will run those web searches and ask you again with the results.
           Think through the complete story and invent/design the entire playable, detailed Roblox Studio world plus a cinematic camera plan with animated faces.
@@ -947,12 +949,11 @@ jobs:
           SHAPES: every prop's "shape" is one of Block, Ball, Cylinder, Wedge (a triangle - use it for roofs, ramps, sails, kites, beaks, arrow signs), Prism (a tent shape), CornerWedge (a hip roof), Cone, Pyramid, Torus, Ring, Hemisphere (a dome), Truss (a lattice frame). A world made only of blocks looks unfinished, so use triangles and curves wherever the thing you are building has them.
           LIGHTS: any prop may carry a "light" and become a lamp: {"kind":"Point|Spot|Surface","color":[r,g,b],"brightness":0-5,"range":0-60,"angle":0-180}. Brightness is how strong it is, range is how far the pool of light reaches in studs, and the colour is free - warm gold for windows, cold blue for neon, green for a reef lamp. Raise or lower those numbers per lamp as the scene needs; 0 brightness is off. Light the story's important places, not every wall.
           EFFECTS: any prop may carry an "effect": {"name":"gold sparkles"} plus optional "color":[r,g,b],"rate":0.05-1 (density),"size","speed","life","gravity" (negative falls, positive rises),"spread". There are 520 ready presets: 20 families (sparkles, glitter, stars, embers, fire, flames, smoke, mist, fog, dust, pollen, confetti, snow, rain, bubbles, hearts, petals, leaves, lightning, magic) times 26 colours (gold, amber, copper, ember, red, crimson, rose, pink, magenta, violet, indigo, blue, azure, cyan, teal, mint, emerald, lime, olive, yellow, cream, white, silver, slate, brown, rainbow). Use them where the story feels them: magic around the wish, embers by the fire, rain over the street, confetti at the ending.
-          MAP + CAMERA + BIG MODELS — SUB-AGENT IS MANDATORY AND MUST HAPPEN AT THE START.
-          You are the director, but for this step the sub-agent (Gemini with a Groq fallback) is NOT optional and you must use it in your FIRST response — not after you already invented 12 props and then ask at the end. The big finished models NEED the sub-agent, so delegate them NOW while you are still planning; waiting until the last round wastes the helper and the workflow only gives you 4 helper rounds.
-          In your FIRST "subagent_tasks" you MUST include BOTH jobs together (up to 3 tasks total, IDs t1..t3):
-            (1) MAP or CAMERA job — "topic":"map" or "cameras" (or "faces"). Use kind "write" to have it design/finish a layout or shot list, or "verify" to have it check your draft blueprint: grid alignment (0.5 studs), overlaps, cast lane |x|<20 z 4-54, dark colours (avg <104), floating/clipping, camera inside-buildings/under-roofs/timing.
-            (2) MODELS job — "topic":"models", kind "write" — delegate your 1-2 HARDEST big anchors that become furnished groups: e.g. "Design the Market Hall as 2 finished props: (A) building shell with walls, stepped Wedge roof, Brick material, glass windows, door; (B) interior group with counter, shelves, tables, chairs, ceiling lamp — give model, shape, position [x,y,z], size, color [r,g,b], material, rotation for EACH Part, all on 0.5 grid, bright colours, no overlap, out of cast lane". Be specific — the helper knows ALL your tools (shapes Block/Ball/Cylinder/Wedge/Prism/CornerWedge/Cone/Pyramid/Torus/Ring/Hemisphere/Truss, materials Plastic/SmoothPlastic/Concrete/Grass/Slate/Wood/Metal/Neon/Glass/Brick/Asphalt, lights Point/Spot/Surface with brightness/range, 520 effects, grid/cast-lane/camera rules) so ask for a COMPLETE buildable Part list and you will paste its exact Parts into props.
-          Do NOT wait until the last round. If your first JSON has no tasks with both a map/cameras topic AND a models topic, the workflow will itself inject a required map/camera review AND a required models design task (consuming your helper round) — delegate correctly the first time and keep the helper busy on your own terms.
+          MAP + CAMERA + BIG MODELS — SUB-AGENT CALLS ARE MANDATORY, AND YOU MUST WRITE THEM.
+          In the FIRST map-planning JSON response, manually author BOTH jobs below inside your own "subagent_tasks" array (up to 3 tasks total, IDs t1..t3). These are actual calls for the workflow to execute, not a request for the workflow to invent calls on your behalf:
+            (1) MAP or CAMERA job — "topic":"map" or "cameras" (or "faces"). Use kind "write" to have the helper design/finish a layout or shot list, or "verify" to check your draft: grid alignment (0.5 studs), overlaps, cast lane |x|<20 z 4-54, dark colours (avg <104), floating/clipping, camera inside-buildings/under-roofs/timing.
+            (2) MODELS job — "topic":"models", kind "write" — delegate your 1-2 HARDEST big anchors that become furnished groups: e.g. "Design the Market Hall as 2 finished props: (A) building shell with walls, stepped Wedge roof, Brick material, glass windows, door; (B) interior group with counter, shelves, tables, chairs, ceiling lamp — give model, shape, position [x,y,z], size, color [r,g,b], material, rotation for EACH Part, all on 0.5 grid, bright colours, no overlap, out of cast lane". Be specific — the helper knows ALL your tools (shapes Block/Ball/Cylinder/Wedge/Prism/CornerWedge/Cone/Pyramid/Torus/Ring/Hemisphere/Truss, materials Plastic/SmoothPlastic/Concrete/Grass/Slate/Wood/Metal/Neon/Glass/Brick/Asphalt, lights Point/Spot/Surface with brightness/range, 520 effects, grid/cast-lane/camera rules) so ask for a COMPLETE buildable Part list and paste its exact Parts into props.
+          The untouched response is checked before any sub-agent task file is made. If it does not contain both topics, the workflow fails clearly; it never adds a synthetic "required" task, and a synthetic task can never count as your delegation. Do not wait until the last round: ask the Gemini helper (Groq fallback if needed) now, while you are planning, then review its full reply.
           HOW THE HAND-OFF WORKS — YOU MUST ACCEPT OR DECLINE:
           After you return, the workflow runs every task on the sub-agent and tells you back: "What the Gemini sub-agent did with the tasks you delegated:" with each task's provider (Gemini or Groq fallback — Groq's default order is llama-3.3-70b-versatile → openai/gpt-oss-120b for complete answers, with remaining models as last-resort fallbacks), how many seconds it took, whether it edited a file, and its FULL text.
           You MUST then set "subagent_review":{"accepted":[<ids you KEEP>],"note":"one line: what you kept, what you fixed, or why you declined"}.
@@ -965,7 +966,7 @@ jobs:
           Make the world look lived in and furnished: homes with glass windows, shops with produce and awnings, gardens with trees, pots and flower beds, benches and street lamps along the paths, fences around plots, rocks and statues as landmarks. Glass, plants, leaves, wood and stone should all appear somewhere, matched to the theme.
           REQUIRED TOP-LEVEL KEYS, every one of them present and non-empty: "name", "theme", "props", "character_placements", "camera_shots", "face_expressions". "theme" is one specific sentence describing THIS story's world (for example "A sunny floating city where gravity clocks off every morning, full of pastel rooftops and safety ropes"); it is never empty, never a placeholder, and never the words "AUTO FROM STORY".
           Return ONLY JSON with this structure:
-          {"name":"World name","theme":"one specific sentence for THIS world","ground_material":"Grass","ground_color":[88,166,91],"ambient_color":[185,205,225],"props":[{"name":"Market Hall","model":"house","shape":"Wedge","material":"Brick","position":[-55,8,35],"size":[24,16,20],"color":[30,210,240],"physics":"static"},{"name":"Old Banyan","model":"tree","shape":"Block","material":"Wood","position":[38,4,52],"size":[9,7,9],"color":[104,150,96],"physics":"static"}],"character_placements":[{"username":"${FIRST_CAST}","role":"lead","position":[0,0,24]},{"username":"${SECOND_CAST}","role":"supporting","position":[-6,0,24]}],"camera_shots":[{"time":0,"position":[0,75,170],"target":[0,3,24],"focus_username":"${FIRST_CAST}","transition":"smooth","framing":"auto"},{"time":12.4,"position":[3,6,30],"target":[0,5,24],"focus_username":"${SECOND_CAST}","transition":"snap","framing":"face","face_distance":2.6}],"face_expressions":[{"time":0.5,"expression":"neutral","intensity":0.6,"username":"${FIRST_CAST}"}],"search_queries":[]}
+          {"name":"World name","theme":"one specific sentence for THIS world","ground_material":"Grass","ground_color":[88,166,91],"ambient_color":[185,205,225],"props":[{"name":"Market Hall","model":"house","shape":"Wedge","material":"Brick","position":[-55,8,35],"size":[24,16,20],"color":[30,210,240],"physics":"static"},{"name":"Old Banyan","model":"tree","shape":"Block","material":"Wood","position":[38,4,52],"size":[9,7,9],"color":[104,150,96],"physics":"static"}],"character_placements":[{"username":"${FIRST_CAST}","role":"lead","position":[0,0,24]},{"username":"${SECOND_CAST}","role":"supporting","position":[-6,0,24]}],"camera_shots":[{"time":0,"position":[0,75,170],"target":[0,3,24],"focus_username":"${FIRST_CAST}","transition":"smooth","framing":"auto"},{"time":12.4,"position":[3,6,30],"target":[0,5,24],"focus_username":"${SECOND_CAST}","transition":"snap","framing":"face","face_distance":3.0}],"face_expressions":[{"time":0.5,"expression":"neutral","intensity":0.6,"username":"${FIRST_CAST}"}],"search_queries":[]}
           Quality bar for every anchor you return: X, Y and Z positions and all three size dimensions must sit on a 0.5-stud grid; props must never overlap each other; no prop may be darker than RGB 104 average luminance; no prop may sit in the cast lane (|X| < 20 and Z 4–54) so faces stay unobstructed for the close-ups; assign a material that fits the object (Wood, Brick, Glass, Concrete, Metal, Neon, Grass, SmoothPlastic) and a physics value that fits it (static for buildings/furniture, dynamic only for small loose objects); colours must be bright, saturated and contrast with neighbouring props so shadows read clearly. Check your blueprint once for anything that breaks those rules, that floats above the ground, that clips through a building, or that faces the wrong way, then return it. THINK BRIEFLY: this runs on a CPU-only machine. Do not re-plan the world over and over, do not repeat the JSON in your reasoning, and if you catch yourself looping on the same point, stop and return the complete plan.
           Treat props as blueprint anchors: 3–6 building cores, large distinctive story landmarks, and supporting scene anchors. Give each building its own recognizable footprint; the deterministic build step will model open facades, visible windows, furnishing, and structural details. Add enough diverse anchor locations to fill the map, not one central pile. Keep story-specific landmarks prominent and every named username camera-visible.
           Use the user theme prompt as the source of truth for every design choice. Derive the theme from the story only when the user left the theme blank. Make the theme unmistakable and specific; do not fall back to the same generic city/neon plaza. The finished environment is expanded by code to ${TARGET_PROPS}+ Parts; this compact AI blueprint should prioritize coherence, varied locations, and meaningful design over repeating primitive objects.
@@ -973,7 +974,7 @@ jobs:
           USE THE EXACT KEYS: shape (never type/dimensions), material spelled exactly as listed, ground_material, ground_color, ambient_color, props, character_placements, camera_shots, face_expressions, search_queries. A schema is enforced, so any other key name is rejected. Do not add username labels, screen text, floating numbers, scars, tattoos, badges, or other visual effects unless the user's story/topic explicitly asks for them. When requested, keep the effect attached to the specified avatar body part/location. Keep a clear 30-by-40-stud area around this cast so characters and camera remain unobstructed.
           Use ${SHOT_COUNT:-8} to ${SHOT_MAX:-16} camera_shots with increasing times from 0 through exactly ${DURATION_SECONDS} (${DURATION_LABEL}); the final shot time is exactly ${DURATION_SECONDS}, and intermediate times must be precise moments (e.g. 37.4, 71.2, 118.6), never rounded to tens; show the complete environment, all supplied characters, landmarks, and the ending beat. Coordinates are Roblox X,Y,Z. Each shot must set focus_username to an exact supplied username (or world for a single establishing view); every deliberate snap cut must move both the camera and focus to its named character. Begin wide, use smooth moves and deliberate snap cuts, finish on the lead.
           ANIMATED FACES (required): every character gets a Roblox story-short face rendered from your timeline — white eyes with dark pupils, thick expressive eyebrows and a clean line mouth — so choose the feeling that fits each beat. The whole video is exactly ${DURATION_SECONDS} seconds (${DURATION_LABEL}) and must end there, not on a round minute. Return a face_expressions timeline of 6–16 beats across the whole ${DURATION_SECONDS} seconds, with precise non-round timestamps tied to the narration beats. Each beat is {"time": seconds, "expression": one of neutral|happy|sad|surprised|worried|angry|excited|thinking, "intensity": 0..1, "username": exact supplied username}. Time every switch to the exact second the narration changes feeling, so the face changes on the beat, never at random.
-          FACE CAMERAS (required): mark at least 3 shots with "framing":"face" (the close-up that Roblox story shorts cut to) and set "face_distance" between 2.0 and 3.4 studs. A face shot must focus a named character whose expression changes at that moment. All other shots use "framing":"auto" or "wide". Fill position/target normally; the renderer pulls the face camera in to the head safely.
+          FACE CAMERAS (required): mark at least 3 shots with "framing":"face" (a readable close-up, not an extreme crop) and set "face_distance" between 2.8 and 4.0 studs. A face shot must focus a named character whose expression changes at that moment. All other shots use "framing":"auto" or "wide". Fill position/target normally; the renderer moves the face camera to the head while preserving that minimum distance.
           PROMPT
           # Ask the selected model for a compact, story-specific anchor blueprint; Python expands it into a furnished map.
           # This avoids forcing small local models to emit hundreds of repetitive JSON objects and caps stalled requests.
@@ -981,6 +982,7 @@ jobs:
           # the material/shape spelling, the exact cast usernames, and the minimum
           # counts, so a long blueprint is not thrown away for inventing its own keys.
           python tools/plan_schema.py --usernames dist/characters.json --output map_schema.json
+          python tools/plan_schema.py --usernames dist/characters.json --allow-empty-subagent-tasks --output map_followup_schema.json
           # The story is finished by now: put it in the shared memory so the world
           # plan, every helper round and the summary all remember it.
           python tools/ai_memory.py --set-file narration=dist/narration.txt \
@@ -1000,6 +1002,50 @@ jobs:
               python tools/say.py warning "Map request failed with curl exit ${curl_status}."
               if [ "$attempt" -lt 2 ]; then sleep 5; continue; fi
               break
+            fi
+            # Validate the untouched AI response before any helper-task JSON is
+            # assembled. If the model omitted either required topic, reject its plan
+            # and explicitly ask the model to author both calls itself; never append a
+            # workflow-generated substitute. A valid retry must pass the same checker.
+            if [ ! -f map_subagent_review.done ]; then
+              delegation_valid=0
+              for delegation_retry in 1 2 3; do
+                delegation_status=0
+                python tools/map_delegation.py map_response.json > map_delegation.log 2>&1 || delegation_status=$?
+                if [ "$delegation_status" -eq 0 ]; then
+                  cat map_delegation.log
+                  delegation_valid=1
+                  break
+                fi
+                cat map_delegation.log
+                if [ "$delegation_retry" -eq 3 ]; then
+                  python tools/say.py error "The map-planning AI still omitted required sub-agent calls after two explicit re-prompts; no workflow-generated substitute will be run."
+                  exit 1
+                fi
+                python tools/say.py warning "Rejected map response: asking the model to manually author its missing map/camera and/or models sub-agent call(s) (repair ${delegation_retry}/2)."
+                DELEGATION_ERROR=$(cat map_delegation.log)
+                cat >> map_prompt.txt <<RETRY
+          CORRECTION — YOUR PREVIOUS MAP RESPONSE WAS REJECTED: ${DELEGATION_ERROR}
+          Return a complete corrected map-plan JSON yourself. Keep the useful world plan, but manually author BOTH required entries in your own "subagent_tasks": one with topic "map", "cameras", or "faces" and one with topic "models". Each must have a non-empty instruction. Do not say the workflow or another tool supplied them; the workflow will not create, append, or substitute calls. This response is still only a draft until your own JSON passes the validator.
+          RETRY
+                jq -n --argjson ctx "$AI_NUM_CTX" --arg model "$AI_MODEL" --argjson think "$OLLAMA_THINKING" --rawfile prompt map_prompt.txt --rawfile system system_prompt.txt --argjson tokens "$MAP_TOKENS" --slurpfile schema map_schema.json \
+                  '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$prompt}], format:$schema[0], think:$think, stream:false, keep_alive:"60m", options:{temperature:2.0, top_p:0.99, num_ctx:$ctx, num_predict:$tokens}}' > map_repair_request.json
+                repair_status=0
+                python tools/ollama_stream.py --request map_repair_request.json \
+                  --output map_repair_response.json --label "repair AI-authored map delegation ${delegation_retry}/2" \
+                  --timeout "${AI_TIMEOUT:-900}" \
+                  --stall-seconds "${AI_STALL:-900}" \
+                  --fallback-model "${AI_FALLBACK_MODEL:-qwen3:8b}" || repair_status=$?
+                if [ "$repair_status" -ne 0 ] || [ ! -s map_repair_response.json ]; then
+                  python tools/say.py error "The AI-authored delegation repair request failed; refusing to synthesize the missing calls."
+                  exit 1
+                fi
+                cp map_repair_response.json map_response.json
+              done
+              if [ "$delegation_valid" -ne 1 ]; then
+                python tools/say.py error "Map delegation was not validated; refusing to continue."
+                exit 1
+              fi
             fi
             # The AI can ask for help at any time: fresh web research, or the
             # Gemini sub-agent to do a fiddly job (edit text, fix JSON, name a
@@ -1041,72 +1087,13 @@ jobs:
               story = Path('dist/narration.txt').read_text(encoding='utf-8')[:2000]
           except OSError:
               pass
-          # THE SUB-AGENT IS REQUIRED FOR THE MAP AND THE CAMERAS. If the plan delegated
-          # nothing about them, the workflow sends that review itself, once, from the
-          # AI's own draft - so the map and camera plan is always reviewed by the
-          # sub-agent even when the model forgets. Once per run: sending it on every
-          # round would loop forever, which is what the marker file prevents.
-          MAP_TOPICS = {'map', 'cameras', 'faces'}
-          marker = Path('map_subagent_review.done')
-          already_reviewed = marker.exists()
-          topics_asked = {str(task.get('topic') or '').lower() for task in tasks}
-          delegated = bool(topics_asked & MAP_TOPICS)
-          ask_models = 'models' not in topics_asked
-          if not delegated and not already_reviewed:
-              draft = json.dumps({key: plan.get(key) for key in (
-                  'name', 'theme', 'props', 'character_placements',
-                  'camera_shots', 'face_expressions')}, ensure_ascii=False)
-              tasks.append({
-                  'id': 'required-map-camera-review',
-                  'kind': 'verify',
-                  'topic': 'cameras',
-                  'instruction': (
-                      'REQUIRED REVIEW of the map and the camera plan for this short. '
-                      'Check every prop (grid alignment, overlaps, the cast lane, dark '
-                      'colours, floating or clipping geometry) and every camera shot '
-                      '(no shot from below its subject, none inside a wall or under a '
-                      'roof, timings inside the video length, every named character '
-                      'seen at least once). Return the corrected complete JSON for the '
-                      'world and camera plan.'),
-                  'input': draft[:6000],
-              })
-              marker.write_text('sent', encoding='utf-8')
-              print('The AI delegated nothing for the map/cameras, so the workflow sent '
-                    'the required map + camera review to the sub-agent itself.')
-          # The models half of the requirement: 1-2 finished props, part by part.
-          if ask_models and not already_reviewed:
-              tasks.append({
-                  'id': 'required-model-design',
-                  'kind': 'write',
-                  'topic': 'models',
-                  'instruction': (
-                      'Design ONE or TWO of the hardest anchor props for this world as '
-                      'finished models, part by part - the shell (walls, stepped roof, '
-                      'glass windows, door) and the interior group (counter, shelves, '
-                      'tables, chairs, lamp) - and give every Part its model, shape, '
-                      'position, size, colour, material and rotation on the 0.5-stud '
-                      'grid. Buildings 18-40 wide, 10-22 tall, 16-34 deep; grid-aligned; '
-                      'nothing darker than RGB 104; nothing inside the cast lane '
-                      '(|X| < 20 and Z 4-54).'),
-                  'input': draft[:4000],
-              })
-              marker.write_text('sent', encoding='utf-8')
-              print('The AI delegated nothing for the models, so the workflow sent the '
-                    'required 1-2 finished model designs to the sub-agent itself.')
-          # Out of quota AND no Groq fallback: sending the tasks would fail every one
-          # of them and then buy a fresh ten-minute re-plan for nothing, so keep the
-          # draft plan. With a Groq key the tasks still run - on the fallback.
+          # Only the calls present in the untouched AI response are forwarded. The
+          # first-response validator has already required map/camera AND models topics;
+          # never synthesize a replacement task in this workflow.
           if tasks and Path('dist/gemini_quota_exhausted').is_file() \
                   and not os.environ.get('GROQ_API_KEY', '').strip():
-              print('Gemini is out of quota for this run, so the delegated tasks are '
-                    'skipped and the plan you already wrote stands.')
-              tasks = []
-          # Never let the cap of three steal the required jobs: the mandated tasks go
-          # first, then whichever of the AI's own tasks still fit.
-          if len(tasks) > 3:
-              required = [task for task in tasks if task['id'].startswith('required-')]
-              others = [task for task in tasks if not task['id'].startswith('required-')]
-              tasks = required[:3] + others[:max(0, 3 - len(required[:3]))]
+              raise SystemExit('Gemini quota is exhausted and GROQ_API_KEY is absent; '
+                               'cannot execute the AI-authored mandatory map sub-agent calls.')
           Path('map_queries.txt').write_text("\n".join(queries) + ("\n" if queries else ""), encoding='utf-8')
           Path('subagent_tasks.json').write_text(json.dumps(
               {'context': 'Planning the world, cameras and faces for this short. Story: ' + story,
@@ -1263,7 +1250,7 @@ jobs:
                 python tools/say.py notice "The AI asked for changes, so it gets one more world plan round (round ${helper_round})."
               fi
               # Only reached for web research or when the AI asked for changes.
-              jq -n --argjson ctx "$AI_NUM_CTX" --arg model "$AI_MODEL" --argjson think "$OLLAMA_THINKING" --rawfile prompt map_prompt.txt --rawfile system system_prompt.txt --argjson tokens "$MAP_TOKENS" --slurpfile schema map_schema.json \
+              jq -n --argjson ctx "$AI_NUM_CTX" --arg model "$AI_MODEL" --argjson think "$OLLAMA_THINKING" --rawfile prompt map_prompt.txt --rawfile system system_prompt.txt --argjson tokens "$MAP_TOKENS" --slurpfile schema map_followup_schema.json \
                 '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$prompt}], format:$schema[0], think:$think, stream:false, keep_alive:"60m", options:{temperature:2.0, top_p:0.99, num_ctx:$ctx, num_predict:$tokens}}' > map_request.json
               python tools/ollama_stream.py --request map_request.json --output map_response.json \
                 --label "world plan + AI help round ${helper_round}" \
@@ -1292,43 +1279,9 @@ jobs:
                 break
               fi
             done
-            if [ ! -f map_subagent_review.done ] && [ -f dist/gemini_quota_exhausted ] && [ -z "${GROQ_API_KEY:-}" ]; then
-              python tools/say.py warning "Gemini is out of quota, so the required map/camera review could not run; the AI's own plan is used as-is and the run continues."
-              touch map_subagent_review.done
-            fi
             if [ ! -f map_subagent_review.done ]; then
-              python tools/say.py warning "The required map/camera sub-agent review did not run; sending it once from the draft plan so a map is never shipped unreviewed."
-              python - <<'PYR'
-          import json
-          from pathlib import Path
-          try:
-              envelope = json.loads(Path('map_response.json').read_text(encoding='utf-8'))
-              plan = json.loads((envelope.get('message') or {}).get('content', envelope.get('response', '{}')))
-          except Exception:
-              plan = {}
-          plan = plan if isinstance(plan, dict) else {}
-          draft = json.dumps({key: plan.get(key) for key in (
-              'name', 'theme', 'props', 'character_placements',
-              'camera_shots', 'face_expressions')}, ensure_ascii=False)
-          Path('subagent_tasks.json').write_text(json.dumps({
-              'context': 'Required review of the world and camera plan.',
-              'tasks': [{
-                  'id': 'required-map-camera-review',
-                  'kind': 'verify',
-                  'topic': 'cameras',
-                  'instruction': ('REQUIRED REVIEW of the map and the camera plan. Check '
-                                  'prop alignment, overlaps, the cast lane, dark colours, '
-                                  'and every camera shot (nothing from below its subject, '
-                                  'nothing inside geometry, timings inside the length, '
-                                  'every named character seen). Return the corrected '
-                                  'complete JSON.'),
-                  'input': draft[:6000],
-              }],
-          }), encoding='utf-8')
-          PYR
-              python tools/gemini_subagent.py --request subagent_tasks.json \
-                --output subagent_results.json --stdout || true
-              touch map_subagent_review.done
+              python tools/say.py error "The AI-authored map/camera and models calls did not run; refusing to mark the map plan reviewed or ship it as if delegation happened."
+              exit 1
             fi
             python - <<'PYS' || true
           import json
@@ -1378,9 +1331,13 @@ jobs:
             cat >> map_prompt.txt <<RETRY
           CORRECTION: re-read the whole blueprint, then regenerate it and fix this validation error: ${VALIDATION_ERROR}. Return 16–28 unique, valid anchors including 3 building cores, 3 story landmarks, theme-specific scenic props, complete camera/cast data, a face_expressions timeline of at least 6 AI-timed beats, and at least 3 shots with "framing":"face". Do not enumerate hundreds of small parts; the build step expands anchors into ${TARGET_PROPS}+ furnished Parts. Preserve the user's exact theme and story. Return only JSON.
           RETRY
-            jq -n --argjson ctx "$AI_NUM_CTX" --arg model "$AI_MODEL" --argjson think "$OLLAMA_THINKING" --rawfile prompt map_prompt.txt --rawfile system system_prompt.txt --argjson tokens "$MAP_TOKENS" --slurpfile schema map_schema.json \
+            jq -n --argjson ctx "$AI_NUM_CTX" --arg model "$AI_MODEL" --argjson think "$OLLAMA_THINKING" --rawfile prompt map_prompt.txt --rawfile system system_prompt.txt --argjson tokens "$MAP_TOKENS" --slurpfile schema map_followup_schema.json \
               '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$prompt}], format:$schema[0], think:$think, stream:false, keep_alive:"60m", options:{temperature:2.0, top_p:0.99, num_ctx:$ctx, num_predict:$tokens}}' > map_request.json
           done
+          if [ ! -f map_subagent_review.done ]; then
+            python tools/say.py error "No AI-authored map/camera and models sub-agent calls ran; refusing to continue with an unreviewed map."
+            exit 1
+          fi
           if [ "$MAP_READY" -eq 0 ]; then
             python tools/say.py warning "AI map planning did not complete; creating a detailed procedural world from the user's theme and story instead."
             FALLBACK_STORY="${STORY_TOPIC}. $(cat dist/narration.txt)"

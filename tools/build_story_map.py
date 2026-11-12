@@ -270,13 +270,16 @@ def default_camera_shots(duration, usernames=()):
          "transition": "smooth" if index == 0 else mode,
          "focus_username": usernames[index % len(usernames)] if usernames else "world",
          "framing": "face" if usernames and index in {max(1, last // 3), max(2, (2 * last) // 3)} else "auto",
-         "face_distance": 2.45}
+         "face_distance": FACE_DISTANCE_DEFAULT}
         for index, (pos, target, mode) in enumerate(chosen)
     ]
 
 
 FACE_EXPRESSIONS = ("neutral", "happy", "sad", "surprised", "worried", "angry", "excited", "thinking")
 FACE_FRAMINGS = {"auto", "wide", "face", "close", "closeup", "close-up"}
+FACE_DISTANCE_MIN = 2.8
+FACE_DISTANCE_DEFAULT = 3.0
+FACE_DISTANCE_MAX = 4.0
 
 
 def default_face_expressions(duration, usernames=()):
@@ -361,10 +364,10 @@ def normalize_camera_shots(shots, duration, usernames=()):
         framing = str(shot.get("framing", "auto") or "auto").strip().lower()
         if framing not in FACE_FRAMINGS:
             framing = "auto"
-        shot_face_distance = shot.get("face_distance", 2.45)
+        shot_face_distance = shot.get("face_distance", FACE_DISTANCE_DEFAULT)
         if isinstance(shot_face_distance, bool) or not isinstance(shot_face_distance, (int, float)):
-            shot_face_distance = 2.45
-        shot_face_distance = min(4.0, max(1.6, float(shot_face_distance)))
+            shot_face_distance = FACE_DISTANCE_DEFAULT
+        shot_face_distance = min(FACE_DISTANCE_MAX, max(FACE_DISTANCE_MIN, float(shot_face_distance)))
         clean.append({
             "time": round(float(time), 2),
             "position": [round(float(v), 2) for v in pos],
@@ -2022,7 +2025,7 @@ def interior_camera_shots(cast, room, duration, usernames=()):
     sx, sz = float(second[0]), float(second[2])
 
     def face(person_x, person_z, from_x, from_z):
-        """A camera 2-3 studs in front of a head, inside the room."""
+        """A camera a few studs in front of a head, inside the room."""
         return [max(-hx, min(hx, person_x + from_x)), min(height - 1.5, 5.4),
                 max(z0 - hz, min(z0 + hz, person_z + from_z))]
 
@@ -2030,33 +2033,33 @@ def interior_camera_shots(cast, room, duration, usernames=()):
     shots = [
         # 1. Establishing: front corner of the room, walls + ceiling + floor in frame.
         (0.0, [-hx, min(height - 2.5, 7.2), z0 - hz], [lx, 4.2, lz], first,
-         "smooth", "wide", 2.6),
+         "smooth", "wide", FACE_DISTANCE_DEFAULT),
         # 2. Two-shot from the front, cast centred.
         (0.10, [0.0, eye, z0 - hz * 0.85], [(lx + sx) / 2, 4.4, (lz + sz) / 2], first,
-         "smooth", "auto", 2.6),
-        # 3. Face close-up on the lead, inside the room.
-        (0.20, face(lx, lz, 1.7, -2.0), [lx, 4.9, lz], first, "snap", "face", 2.6),
+         "smooth", "auto", FACE_DISTANCE_DEFAULT),
+        # 3. Face close-up on the lead, inside the room, with a little more headroom.
+        (0.20, face(lx, lz, 1.7, -2.0), [lx, 4.9, lz], first, "snap", "face", FACE_DISTANCE_DEFAULT),
         # 4. Side angle from the left wall (sees the bunk bed).
         (0.30, [-hx, min(height - 2.0, 5.6), z0 + hz * 0.5], [0.0, 4.2, z0], first,
-         "smooth", "auto", 2.6),
+         "smooth", "auto", FACE_DISTANCE_DEFAULT),
         # 5. Face close-up on the second brother.
         (0.40, face(sx, sz, -1.7, -2.0), [sx, 4.9, sz], second_name,
-         "snap", "face", 2.6),
+         "snap", "face", FACE_DISTANCE_DEFAULT),
         # 6. Over-the-shoulder from behind the lead, looking at the second.
         (0.50, [lx + 1.4, min(height - 1.6, 5.6), min(z0 + hz, lz + 2.8)], [sx, 4.3, sz],
-         first, "smooth", "close", 2.6),
+         first, "smooth", "close", FACE_DISTANCE_DEFAULT),
         # 7. Wide from the back corner, looking down across the beds at the cast.
         (0.60, [hx, min(height - 1.8, 6.8), z0 + hz], [lx, 3.6, lz], first,
-         "smooth", "wide", 2.6),
+         "smooth", "wide", FACE_DISTANCE_DEFAULT),
         # 8. Low angle from the floor: dramatic, still inside.
         (0.70, [min(hx, lx + 3.2), 3.2, max(z0 - hz, lz - 3.4)], [lx, 5.0, lz], first,
-         "snap", "auto", 2.6),
+         "snap", "auto", FACE_DISTANCE_DEFAULT),
         # 9. Air shot from the ceiling corner, bed + cast in frame.
         (0.80, [-hx * 0.7, height - 1.5, z0 + hz * 0.7], [lx, 3.0, lz + 1.5], first,
-         "smooth", "auto", 2.6),
+         "smooth", "auto", FACE_DISTANCE_DEFAULT),
         # 10. Final two-shot from the front, both brothers in frame and warm.
         (0.90, [(lx + sx) / 2, 5.0, max(z0 - hz, min(lz, sz) - 7.0)],
-         [(lx + sx) / 2, 4.4, (lz + sz) / 2], first, "snap", "auto", 2.6),
+         [(lx + sx) / 2, 4.4, (lz + sz) / 2], first, "snap", "auto", FACE_DISTANCE_DEFAULT),
     ]
     shots[-1] = (1.0,) + tuple(shots[-1][1:])
     output = []
@@ -2088,12 +2091,12 @@ def clamp_cameras_to_room(plan, room):
         target[0] = max(-half_x, min(half_x, float(target[0])))
         target[1] = max(2.0, min(height - 1.0, float(target[1])))
         target[2] = max(ROOM_CENTRE_Z - half_z, min(ROOM_CENTRE_Z + half_z, float(target[2])))
-        # A face close-up needs the camera 2-3.4 studs from the head, never inside it.
+        # Keep face framing at least a few studs away: readable expression, not an extreme crop.
         if str(shot.get("framing")) == "face":
             dx, dy, dz = (target[0] - position[0], target[1] - position[1],
                           target[2] - position[2])
             span = max(0.001, (dx * dx + dy * dy + dz * dz) ** 0.5)
-            need = float(shot.get("face_distance") or 2.6)
+            need = float(shot.get("face_distance") or FACE_DISTANCE_DEFAULT)
             if span < need:
                 scale = need / span
                 position = [target[0] - dx * scale, target[1] - dy * scale,

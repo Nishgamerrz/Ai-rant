@@ -1,8 +1,9 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { SubagentTimeline } from "./SubagentTimeline";
+import { encodeFaceReference } from "@/lib/faceReference";
 
-type Msg = { role: string; content: string; thought?: string; tool_calls?: any[]; time?: string; tool?: string; output?: any };
+type Msg = { role: string; content: string; thought?: string; tool_calls?: any[]; time?: string; tool?: string; output?: any; id?: string; queue_id?: string; delivery?: string };
 
 function parseLiveLogTail(tail: string): { msgs: Msg[]; tools: any[] } {
   const msgs: Msg[] = [];
@@ -56,7 +57,7 @@ function parseLiveLogTail(tail: string): { msgs: Msg[]; tools: any[] } {
   return { msgs, tools };
 }
 
-export function ChatWindow({ runId }: { runId: number | null }) {
+export function ChatWindow({ runId, notice = "" }: { runId: number | null; notice?: string }) {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [tools, setTools] = useState<any[]>([]);
   const [liveLog, setLiveLog] = useState<string>("");
@@ -64,28 +65,63 @@ export function ChatWindow({ runId }: { runId: number | null }) {
   const [liveTools, setLiveTools] = useState<any[]>([]);
   const [status, setStatus] = useState("idle");
   const [err, setErr] = useState("");
+  const [chatToken, setChatToken] = useState("");
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [uploadingReference, setUploadingReference] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
 
   async function fetchChat() {
     if (!runId) return;
+    let artifactMessages: Msg[] = [];
     try {
       const res = await fetch(`/api/github/artifact?run=${runId}&name=nish-agent-${runId}&json=agent_chat.json`, { cache: "no-store" });
-      if (!res.ok) return;
-      const ct = res.headers.get("content-type") || "";
-      let data: any;
-      if (ct.includes("json")) data = await res.json();
-      else {
-        const txt = await res.text();
-        try { data = JSON.parse(txt); } catch { return; }
-      }
-      if (Array.isArray(data) && data.length) setMessages(data);
-      const toolsRes = await fetch(`/api/github/artifact?run=${runId}&name=nish-agent-${runId}&json=agent_tools.jsonl`, { cache: "no-store" }).then((r) => r.text()).catch(() => "");
-      if (toolsRes && toolsRes.trim()) {
-        const lines = toolsRes.trim().split("\n").filter(Boolean);
-        const parsed = lines.map((l) => { try { return JSON.parse(l); } catch { return { raw: l }; } }).slice(-20);
-        if (parsed.length) setTools(parsed);
+      if (res.ok) {
+        const ct = res.headers.get("content-type") || "";
+        let data: any;
+        if (ct.includes("json")) data = await res.json();
+        else {
+          const txt = await res.text();
+          try { data = JSON.parse(txt); } catch { data = null; }
+        }
+        if (Array.isArray(data)) artifactMessages = data;
       }
     } catch {}
+
+    let queuedMessages: Msg[] = [];
+    if (chatToken) {
+      try {
+        const response = await fetch(`/api/agent/chat?run=${runId}`, {
+          headers: { Authorization: `Bearer ${chatToken}` }, cache: "no-store",
+        });
+        if (response.ok) {
+          const data = await response.json();
+          queuedMessages = (data.messages || []).map((item: any) => ({
+            role: "user", content: String(item.message || ""), time: item.createdAt,
+            id: item.id, queue_id: item.clientId || item.id, delivery: "queued",
+          }));
+        }
+      } catch {}
+    }
+
+    const toolsRes = await fetch(`/api/github/artifact?run=${runId}&name=nish-agent-${runId}&json=agent_tools.jsonl`, { cache: "no-store" }).then((r) => r.text()).catch(() => "");
+    if (toolsRes && toolsRes.trim()) {
+      const lines = toolsRes.trim().split("\n").filter(Boolean);
+      const parsed = lines.map((l) => { try { return JSON.parse(l); } catch { return { raw: l }; } }).slice(-20);
+      if (parsed.length) setTools(parsed);
+    }
+
+    setMessages((previous) => {
+      const merged = [...artifactMessages];
+      for (const item of queuedMessages) {
+        if (!merged.some((message) => message.queue_id === item.queue_id)) merged.push(item);
+      }
+      for (const pending of previous.filter((message) => message.delivery === "sending" || message.delivery === "failed" || message.delivery === "queued")) {
+        if (!merged.some((message) => message.queue_id === pending.queue_id)) merged.push(pending);
+      }
+      return merged;
+    });
   }
 
   async function fetchLive() {
@@ -103,6 +139,88 @@ export function ChatWindow({ runId }: { runId: number | null }) {
     } catch {}
   }
 
+  async function sendMessage(event: any) {
+    event.preventDefault();
+    const message = draft.trim();
+    if (!runId || !chatToken || !message || sending) return;
+    if (!status.includes("in_progress") && !status.includes("queued")) {
+      setErr("This agent run has ended. Start a new workflow to send another prompt.");
+      return;
+    }
+    const clientId = typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const optimistic: Msg = {
+      role: "user", content: message, time: new Date().toISOString(),
+      queue_id: clientId, delivery: "sending",
+    };
+    setMessages((previous) => [...previous, optimistic]);
+    setDraft("");
+    setSending(true);
+    setErr("");
+    try {
+      const response = await fetch("/api/agent/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${chatToken}` },
+        body: JSON.stringify({ runId, message, clientId }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Message could not be delivered");
+      setMessages((previous) => previous.map((item) => item.queue_id === clientId
+        ? { ...item, id: data.message?.id, delivery: "queued", time: data.message?.createdAt || item.time }
+        : item));
+    } catch (error: any) {
+      const messageText = String(error?.message || error);
+      setMessages((previous) => previous.map((item) => item.queue_id === clientId
+        ? { ...item, delivery: "failed" }
+        : item));
+      setErr(messageText);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function uploadFaceReference(file: File) {
+    if (!runId || !chatToken) {
+      setErr("This run has no registered image/chat session. Start a new Agent workflow first.");
+      return;
+    }
+    if (!status.includes("in_progress") && !status.includes("queued") && status !== "idle") {
+      setErr("This agent run has ended; it cannot accept another image.");
+      return;
+    }
+    const clientId = typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID() : `image-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setUploadingReference(true);
+    setErr("");
+    try {
+      const encoded = await encodeFaceReference(file);
+      const response = await fetch("/api/agent/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${chatToken}` },
+        body: JSON.stringify({ runId, action: "image", ...encoded, clientId }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Reference image could not be queued");
+      setMessages((previous) => [...previous, {
+        role: "user", content: data.message?.message || "Supplied face reference image.",
+        time: data.message?.createdAt || new Date().toISOString(), id: data.message?.id,
+        queue_id: clientId, delivery: "queued",
+      }]);
+    } catch (error: any) {
+      setErr(String(error?.message || error));
+    } finally {
+      setUploadingReference(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  useEffect(() => {
+    setChatToken(runId ? sessionStorage.getItem(`nishagent_chat_${runId}`) || "" : "");
+    setDraft("");
+    setSending(false);
+    setErr("");
+  }, [runId]);
+
   useEffect(() => {
     if (!runId) {
       setMessages([]);
@@ -117,7 +235,7 @@ export function ChatWindow({ runId }: { runId: number | null }) {
     fetchLive();
     const id = setInterval(() => { fetchChat(); fetchLive(); }, 3500);
     return () => clearInterval(id);
-  }, [runId]);
+  }, [runId, chatToken]);
 
   useEffect(() => {
     scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight, behavior: "smooth" });
@@ -274,7 +392,10 @@ export function ChatWindow({ runId }: { runId: number | null }) {
                       ))}
                     </div>
                   )}
-                  {m.time && <div className={`mt-2 text-[11px] ${isUser ? "text-zinc-500" : "text-zinc-600"}`}>{new Date(m.time).toLocaleTimeString()}</div>}
+                  {(m.time || (isUser && m.delivery)) && <div className={`mt-2 flex items-center gap-2 text-[11px] ${isUser ? "text-zinc-500" : "text-zinc-600"}`}>
+                    {m.time && <span>{new Date(m.time).toLocaleTimeString()}</span>}
+                    {isUser && m.delivery && <span>{m.delivery === "failed" ? "not sent" : m.delivery === "sending" ? "sending…" : "queued to this run"}</span>}
+                  </div>}
                 </div>
                 {isUser && <div className="h-8 w-8 rounded-xl bg-white border border-zinc-200 grid place-items-center shrink-0 mt-0.5"><span className="text-xs">●</span></div>}
               </div>
@@ -292,12 +413,50 @@ export function ChatWindow({ runId }: { runId: number | null }) {
         </div>
       </div>
 
-      {/* Composer — direct API mode, no tunnel */}
+      {/* Same-run message composer — encrypted GitHub Actions variable queue, no tunnel */}
       <div className="shrink-0 p-3 sm:p-4 border-t border-zinc-800 bg-zinc-900/30">
         <div className="max-w-3xl mx-auto">
-          <div className="rounded-xl bg-zinc-800/50 border border-zinc-800 px-3 py-2.5 text-xs leading-relaxed text-zinc-400">
-            Direct API mode — no Cloudflare tunnel. Start a new workflow with <span className="text-zinc-200 font-medium">New workflow</span> to send a prompt. The AI then works in a single persistent plan until the workflow dies, streaming thinking, tools, and files below via GitHub API. Next message = new run.
-          </div>
+          {chatToken && (status === "idle" || status.includes("in_progress") || status.includes("queued")) ? (
+            <form onSubmit={sendMessage} className="rounded-2xl bg-zinc-950 border border-zinc-800 focus-within:border-zinc-700 p-2 flex items-end gap-2">
+              <input ref={fileInputRef} type="file" accept="image/*" className="hidden" aria-label="Attach a face reference image" onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) void uploadFaceReference(file);
+              }} />
+              <textarea
+                value={draft}
+                onChange={(event) => setDraft(event.target.value.slice(0, 4000))}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    if (draft.trim() && !sending) void sendMessage(event);
+                  }
+                }}
+                placeholder="Send a follow-up to this same running plan…"
+                rows={1}
+                maxLength={4000}
+                className="min-h-10 max-h-32 flex-1 resize-y bg-transparent outline-none px-2 py-2 text-sm text-zinc-100 placeholder:text-zinc-600"
+                aria-label="Message the active agent run"
+              />
+              <button type="button" onClick={() => fileInputRef.current?.click()} disabled={uploadingReference || sending} className="h-9 px-3 rounded-xl border border-zinc-700 bg-zinc-900 text-zinc-300 text-xs font-medium hover:bg-zinc-800 disabled:opacity-40 transition-colors" title="Upload and encrypt a face reference image">
+                {uploadingReference ? "Photo…" : "Photo"}
+              </button>
+              <button type="submit" disabled={!draft.trim() || sending || uploadingReference} className="h-9 px-3.5 rounded-xl bg-white text-zinc-900 text-xs font-semibold hover:bg-zinc-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                {sending ? "Sending…" : "Send"}
+              </button>
+              <div className="absolute sr-only" aria-live="polite">{err}</div>
+            </form>
+          ) : (
+            <div className="rounded-xl bg-zinc-800/50 border border-zinc-800 px-3 py-2.5 text-xs leading-relaxed text-zinc-400">
+              {!chatToken && (status.includes("in_progress") || status.includes("queued"))
+                ? "This older run has no registered live-message session. Start a new Agent workflow to chat in the same plan."
+                : status.includes("completed") || status.includes("success") || status.includes("failure")
+                  ? "This run has ended. Start a new workflow to continue."
+                  : "Select an active Agent run to send a follow-up in the same persistent plan. Logs and artifacts use the direct GitHub API — no Cloudflare tunnel."}
+            </div>
+          )}
+          {notice && <div className="mt-2 text-xs text-amber-300" role="status">{notice}</div>}
+          {err && <div className="mt-2 text-xs text-amber-300" role="status">{err}</div>}
+          {chatToken && <div className="mt-1.5 px-1 text-[10px] text-zinc-600">Enter to send · Shift+Enter for a new line · same run · direct GitHub API</div>}
         </div>
       </div>
     </div>
