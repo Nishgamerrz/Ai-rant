@@ -5,10 +5,11 @@ The Actions form is typed by hand, so the topic arrives with typos: "a stdent
 finds a lost wallett on the way to shcool". Every later prompt repeats that text
 verbatim, and a small local model happily inherits the mistakes.
 
-So the raw text is cleaned once, up front, by Gemini: spelling, grammar and
-punctuation fixed, the user's meaning and characters kept exactly, plus one or
-two concrete details that make it a better prompt for a vertical Roblox-style
-story short. The reply is used as the run's story/theme prompt from then on.
+So the raw text is cleaned once, up front, by the shared text provider
+(BazaarLink first, then Gemini, then Groq): spelling, grammar and punctuation
+fixed, the user's meaning and characters kept exactly, plus one or two concrete
+details that make it a better prompt for a vertical Roblox-style story short.
+The reply is used as the run's story/theme prompt from then on.
 
 Rules the model is given (see TOPIC_NOTE):
 
@@ -35,6 +36,7 @@ from console_style import paint  # noqa: E402
 
 from gemini_subagent import (  # noqa: E402
     API_KEY_ENV,
+    BAZAAR_LINK_KEY_ENV,
     DEFAULT_MODEL,
     DEFAULT_MODEL_VAR,
     GROQ_KEY_ENV,
@@ -42,8 +44,8 @@ from gemini_subagent import (  # noqa: E402
     call_any,
 )
 
-# This parenthetical is the note the workflow promised: Gemini is told that the
-# text came from a person and may be misspelled, and that fixing it is silent.
+# This parenthetical tells whichever text provider runs that the typed input
+# may be misspelled, and that fixing it is silent.
 TOPIC_NOTE = (
     "(Note: the text below was typed by the user of this workflow and may contain "
     "spelling, grammar or punctuation mistakes. Correct them silently. Never mention "
@@ -197,34 +199,41 @@ def sanitize(reply: str, raw: str) -> tuple[str | None, str]:
 
 
 def refine(text: str, *, api_key: str, model: str = DEFAULT_MODEL,
-           kind: str = "story", url: str | None = None,
+           kind: str = "story", bazaar_key: str | None = None,
+           bazaar_url: str | None = None, url: str | None = None,
            timeout: float = 60.0, groq_key: str = "",
            groq_url: str | None = None) -> dict:
     """Clean one prompt. Never raises: falls back to the text as typed.
 
-    Gemini is asked first; if it is out of quota, unreachable or broken the Groq
-    fallback key cleans the prompt instead, exactly as the sub-agent does.
+    The shared provider helper tries BazaarLink, then Gemini, then Groq.
     """
     raw = str(text or "").strip()
-    groq_key = groq_key or os.environ.get(GROQ_KEY_ENV, "").strip()
+    api_key = str(api_key or "").strip()
+    if bazaar_key is None:
+        bazaar_key = os.environ.get(BAZAAR_LINK_KEY_ENV, "")
+    bazaar_key = str(bazaar_key or "").strip()
+    groq_key = str(groq_key or os.environ.get(GROQ_KEY_ENV, "")).strip()
     if not raw:
         return {"ok": False, "skipped": True, "text": "", "reason": "nothing to clean"}
-    if not api_key and not groq_key:
+    if not bazaar_key and not api_key and not groq_key:
         return {"ok": False, "skipped": True, "text": raw, "reason": "no API key"}
     try:
-        reply, provider = call_any(build_prompt(raw, kind), gemini_key=api_key,
-                                   gemini_model=model, groq_key=groq_key,
-                                   timeout=timeout, url=url, groq_url=groq_url)
+        reply, provider = call_any(build_prompt(raw, kind),
+                                   bazaar_key=bazaar_key, bazaar_url=bazaar_url,
+                                   gemini_key=api_key, gemini_model=model,
+                                   groq_key=groq_key, timeout=timeout,
+                                   url=url, groq_url=groq_url)
     except GeminiUnavailable as exc:
         return {"ok": False, "skipped": False, "text": raw, "reason": str(exc)[:300]}
-    if provider != "gemini":
-        print(f"The Gemini key could not clean the prompt ({provider} answered instead); "
-              f"using that spelling fix.", flush=True)
+    if provider == "groq":
+        print("BazaarLink and the Gemini key could not clean the prompt; "
+              "using the Groq fallback.", flush=True)
     cleaned, reason = sanitize(reply, raw)
     if cleaned is None:
-        return {"ok": False, "skipped": False, "text": raw, "reason": reason}
+        return {"ok": False, "skipped": False, "text": raw, "reason": reason,
+                "provider": provider}
     return {"ok": True, "skipped": False, "text": cleaned, "reason": "ok",
-            "original": raw}
+            "original": raw, "provider": provider}
 
 
 def _write_outputs(path: str | None, values: dict) -> None:
@@ -257,31 +266,40 @@ def main() -> int:
     args = parser.parse_args()
 
     api_key = os.environ.get(API_KEY_ENV, "").strip()
+    bazaar_key = os.environ.get(BAZAAR_LINK_KEY_ENV, "").strip()
     groq_key = os.environ.get(GROQ_KEY_ENV, "").strip()
     story_raw = os.environ.get(args.story_env, "")
     theme_raw = os.environ.get(args.theme_env, "")
 
-    story = refine(story_raw, api_key=api_key, model=args.model, kind="story",
-                   url=args.url, timeout=args.timeout, groq_key=groq_key)
-    theme = (refine(theme_raw, api_key=api_key, model=args.model, kind="theme",
-                    url=args.url, timeout=args.timeout, groq_key=groq_key)
+    story = refine(story_raw, api_key=api_key, bazaar_key=bazaar_key,
+                   model=args.model, kind="story", url=args.url,
+                   timeout=args.timeout, groq_key=groq_key)
+    theme = (refine(theme_raw, api_key=api_key, bazaar_key=bazaar_key,
+                    model=args.model, kind="theme", url=args.url,
+                    timeout=args.timeout, groq_key=groq_key)
              if theme_raw.strip() else {"ok": False, "skipped": True, "text": "",
                                         "reason": "no theme typed"})
 
-    if not api_key and not groq_key:
-        print(paint("[gemini topic] neither GEMINI_API_KEY nor GROQ_API_KEY is "
-                    "configured; using the prompt exactly as typed. Add a secret to fix "
-                    "spelling automatically.", "warning"), flush=True)
+    if not bazaar_key and not api_key and not groq_key:
+        print(paint(f"[gemini topic] none of {BAZAAR_LINK_KEY_ENV}, {API_KEY_ENV} or "
+                    f"{GROQ_KEY_ENV} is configured; using the prompt exactly as typed. "
+                    "Add a provider secret to fix spelling automatically.", "warning"),
+              flush=True)
     for label, entry, raw in (("story prompt", story, story_raw),
                               ("world theme", theme, theme_raw)):
         if entry["skipped"]:
             continue
         if entry["ok"]:
-            print(paint(f"[gemini topic] cleaned the {label} with {args.model}:", "tool"),
-                  flush=True)
-            print(paint(f"[gemini topic]   as typed : {' '.join(raw.split())}", "thought"),
-                  flush=True)
-            print(paint(f"[gemini topic]   cleaned  : {entry['text']}", "answer"), flush=True)
+            if entry.get("provider") == "bazaarlink":
+                print(paint(f"[gemini topic] cleaned the {label} with BazaarLink auto:free; "
+                            "the completion was passed to workflow inputs and omitted from logs.",
+                            "tool"), flush=True)
+            else:
+                print(paint(f"[gemini topic] cleaned the {label} with {args.model}:", "tool"),
+                      flush=True)
+                print(paint(f"[gemini topic]   as typed : {' '.join(raw.split())}", "thought"),
+                      flush=True)
+                print(paint(f"[gemini topic]   cleaned  : {entry['text']}", "answer"), flush=True)
         else:
             print(paint(f"[gemini topic] kept the {label} as typed ({entry['reason']}).",
                         "notice"), flush=True)

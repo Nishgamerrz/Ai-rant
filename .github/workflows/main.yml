@@ -100,7 +100,7 @@ on:
         required: false
         default: ''
         type: string
-    # The Gemini and other keys are passed straight through by the caller.
+    # BazaarLink, Gemini, Groq and other keys are passed through by the caller.
 
 permissions:
   contents: read
@@ -143,14 +143,14 @@ jobs:
           # The raw form input: this step is what produces the cleaned outputs.
           RAW_STORY_TOPIC: ${{ inputs.story_topic }}
           RAW_WORLD_THEME: ${{ inputs.world_theme }}
+          BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
-          # Fallback: when Gemini is out of quota, unreachable or broken, the
-          # sub-agent uses these free Groq models instead, then tries Gemini again.
+          # Text provider order: BazaarLink auto:free, Gemini, then Groq.
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_MODEL: llama-3.3-70b-versatile
         run: |
-          python tools/say.py tool "Cleaning the typed story prompt and theme with the Gemini sub-agent (spelling, grammar, a little more detail). It never says anything about the fix."
+          python tools/say.py tool "Cleaning the typed story prompt and theme with the text provider helper (BazaarLink auto:free → Gemini → Groq; spelling, grammar, a little more detail). It never says anything about the fix."
           python tools/gemini_topic.py \
             --output dist/refined_prompts.json \
             --github-output "$GITHUB_OUTPUT" || true
@@ -239,7 +239,7 @@ jobs:
                   '- **Lighting:** the AI chooses a story-fitting global hour and any scene-hour changes from the narration and theme.\n'
                   f'- **Avatar cast:** {clean(os.environ.get("CAST_NAMES", ""))}\n'
                   '- **Tools:** selected Ollama model, Roblox public avatar APIs, optional web research, edge-tts, Three.js + Rapier, Chromium, FFmpeg, Python validation, ReportLab, ZIP.\n'
-                  '- **Prompt cleanup:** the typed story prompt and theme are spell-checked and lightly enriched by the Gemini sub-agent before planning; the correction is never mentioned in the text.\n'
+                  '- **Prompt cleanup:** the typed story prompt and theme are spell-checked and lightly enriched by the BazaarLink-first text provider before planning; the correction is never mentioned in the text.\n'
                   '- **Pipeline:** story and furnished world/camera plan → narration audio → MP4 with the narration captions burned in + Studio project → quality checks and package.\n'
                   '- **Captions:** Edge TTS word timings drive one lower-case word at a time in the lower third, with bold white text, a black outline, a small pop and natural hidden gaps.\n'
                   '- **Username lookup:** the public Roblox Users API resolves entered usernames to IDs keylessly; no manual ID is needed.\n'
@@ -666,10 +666,10 @@ jobs:
         env:
           STORY_TOPIC: ${{ steps.refine.outputs.story_topic || inputs.story_topic }}
           VOICE_STYLE: ${{ inputs.voice_style || 'thin_male' }}
+          BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
-          # Fallback: when Gemini is out of quota, unreachable or broken, the
-          # sub-agent uses these free Groq models instead, then tries Gemini again.
+          # Text provider order: BazaarLink auto:free, Gemini, then Groq.
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_MODEL: llama-3.3-70b-versatile
         run: |
@@ -792,7 +792,7 @@ jobs:
               python tools/say.py success "Narration passed the ${MAX_WORDS}-word hard cap on attempt ${attempt}."
               break
             fi
-            if [ "$GEMINI_EDIT_DONE" -eq 0 ] && { [ -n "${GEMINI_API_KEY:-}" ] || [ -n "${GROQ_API_KEY:-}" ]; }; then
+            if [ "$GEMINI_EDIT_DONE" -eq 0 ] && { [ -n "${BAZAAR_LINK_API:-}" ] || [ -n "${GEMINI_API_KEY:-}" ] || [ -n "${GROQ_API_KEY:-}" ]; }; then
               python tools/say.py tool "Draft missed the length gate; asking the Gemini sub-agent to edit it to ${TARGET_WORDS} words."
               python - <<'PYE' || true
           import json
@@ -832,7 +832,7 @@ jobs:
           path = Path('dist/narration_gemini.txt')
           if not path.is_file():
               if Path('dist/gemini_quota_exhausted').is_file():
-                  print("Neither Gemini nor the Groq fallback edited the narration; "
+                  print("Neither BazaarLink, Gemini nor the Groq fallback edited the narration; "
                         "the AI's own draft (and its own repair) stands.")
               else:
                   print("Gemini left no edited file.")
@@ -890,10 +890,10 @@ jobs:
           AI_MODEL: ${{ env.AI_MODEL }}
           OLLAMA_THINKING: ${{ env.OLLAMA_THINKING }}
           WORLD_THEME: ${{ steps.refine.outputs.world_theme || inputs.world_theme }}
+          BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
-          # Fallback: when Gemini is out of quota, unreachable or broken, the
-          # sub-agent uses these free Groq models instead, then tries Gemini again.
+          # Text provider order: BazaarLink auto:free, Gemini, then Groq.
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_MODEL: llama-3.3-70b-versatile
         run: |
@@ -959,9 +959,9 @@ jobs:
           In the FIRST map-planning JSON response, manually author BOTH jobs below inside your own "subagent_tasks" array (up to 3 tasks total, IDs t1..t3). These are actual calls for the workflow to execute, not a request for the workflow to invent calls on your behalf:
             (1) MAP or CAMERA job — "topic":"map" or "cameras" (or "faces"). Use kind "write" to have the helper design/finish a layout or shot list, or "verify" to check your draft: grid alignment (0.5 studs), overlaps, cast lane |x|<20 z 4-54, dark colours (avg <104), floating/clipping, camera inside-buildings/under-roofs/timing.
             (2) MODELS job — "topic":"models", kind "write" — delegate your 1-2 HARDEST big anchors that become furnished groups: e.g. "Design the Market Hall as 2 finished props: (A) building shell with walls, stepped Wedge roof, Brick material, glass windows, door; (B) interior group with counter, shelves, tables, chairs, ceiling lamp — give model, shape, position [x,y,z], size, color [r,g,b], material, rotation for EACH Part, all on 0.5 grid, bright colours, no overlap, out of cast lane". Be specific — the helper knows ALL your tools (shapes Block/Ball/Cylinder/Wedge/Prism/CornerWedge/Cone/Pyramid/Torus/Ring/Hemisphere/Truss, materials Plastic/SmoothPlastic/Concrete/Grass/Slate/Wood/Metal/Neon/Glass/Brick/Asphalt, lights Point/Spot/Surface with brightness/range, 520 effects, grid/cast-lane/camera rules) so ask for a COMPLETE buildable Part list and paste its exact Parts into props.
-          The untouched response is checked before any sub-agent task file is made. If it does not contain both topics, the workflow fails clearly; it never adds a synthetic "required" task, and a synthetic task can never count as your delegation. Do not wait until the last round: ask the Gemini helper (Groq fallback if needed) now, while you are planning, then review its full reply.
+          The untouched response is checked before any sub-agent task file is made. If it does not contain both topics, the workflow fails clearly; it never adds a synthetic "required" task, and a synthetic task can never count as your delegation. Do not wait until the last round: ask the text helper now (BazaarLink auto:free → Gemini → Groq), while you are planning, then review its full reply.
           HOW THE HAND-OFF WORKS — YOU MUST ACCEPT OR DECLINE:
-          After you return, the workflow runs every task on the sub-agent and tells you back: "What the Gemini sub-agent did with the tasks you delegated:" with each task's provider (Gemini or Groq fallback — Groq's default order is llama-3.3-70b-versatile → openai/gpt-oss-120b for complete answers, with remaining models as last-resort fallbacks), how many seconds it took, whether it edited a file, and its FULL text.
+          After you return, the workflow runs every task on the sub-agent and tells you back: "What the Gemini sub-agent did with the tasks you delegated:" with each task's provider (BazaarLink auto:free, Gemini, or Groq fallback — Groq's default order is llama-3.3-70b-versatile → openai/gpt-oss-120b for complete answers, with remaining models as last-resort fallbacks), how many seconds it took, whether it edited a file, and its FULL text.
           You MUST then set "subagent_review":{"accepted":[<ids you KEEP>],"note":"one line: what you kept, what you fixed, or why you declined"}.
           - If you ACCEPT a task (put its id in "accepted"), the workflow KEEPS that helper's props/cameras exactly as returned and you MUST include them verbatim in your next props/camera_shots; you then move to the NEXT step (do not re-ask the same task, do not waste another round).
           - If you DECLINE (leave it out of "accepted"), you MUST create your OWN replacement for that piece in the same JSON — do not leave it empty, do not re-ask the identical task twice, build the missing building/shot yourself.
@@ -1097,8 +1097,10 @@ jobs:
           # first-response validator has already required map/camera AND models topics;
           # never synthesize a replacement task in this workflow.
           if tasks and Path('dist/gemini_quota_exhausted').is_file() \
+                  and not os.environ.get('BAZAAR_LINK_API', '').strip() \
                   and not os.environ.get('GROQ_API_KEY', '').strip():
-              raise SystemExit('Gemini quota is exhausted and GROQ_API_KEY is absent; '
+              raise SystemExit('Gemini quota is exhausted and neither BAZAAR_LINK_API nor '
+                               'GROQ_API_KEY is configured; '
                                'cannot execute the AI-authored mandatory map sub-agent calls.')
           Path('map_queries.txt').write_text("\n".join(queries) + ("\n" if queries else ""), encoding='utf-8')
           Path('subagent_tasks.json').write_text(json.dumps(
@@ -1164,7 +1166,7 @@ jobs:
           PYA
                 )
                 python tools/say.py success "The Gemini sub-agent finished. The local AI is being told what it did, how long it took and which file it edited."
-                printf '\nWhat the Gemini sub-agent did with the tasks you delegated:\n%s\n\neach entry shows provider (Gemini or Groq fallback — Groq defaults to llama-3.3-70b-versatile → openai/gpt-oss-120b for complete answers, then other models only as last-resort fallbacks), how many seconds it took, whether it edited a file, ALL tool specs it was given (shapes, materials, lights, 520 effects, grid/cast-lane/camera rules), and its FULL text.\nYOU MUST ACCEPT OR DECLINE BEFORE YOU CONTINUE:\n- If a result is good, put its id in \"subagent_review\":{\"accepted\":[\"t1\",\"t2\"],\"note\":\"kept market hall shell+interior verbatim\"} and INCLUDE those exact Parts/cameras verbatim in your next props/camera_shots — then you MOVE TO THE NEXT STEP (do not re-ask the same task, set subagent_tasks:[]).\n- If a result is wrong/half-finished, LEAVE it out of \"accepted\" and BUILD YOUR OWN replacement for that piece in the same JSON — do not leave it empty, do not re-ask the identical task twice.\nSay what you decided in "subagent_review": {"accepted":["<task ids you kept>"], "note":"one line on what you kept, fixed, or asked for"}. Then return the complete corrected JSON, with "subagent_tasks":[] when you need nothing else.\n' "$SUBAGENT_ANSWERS" >> map_prompt.txt
+                printf '\nWhat the Gemini sub-agent did with the tasks you delegated:\n%s\n\neach entry shows provider (BazaarLink auto:free, Gemini, or Groq fallback — Groq defaults to llama-3.3-70b-versatile → openai/gpt-oss-120b for complete answers, then other models only as last-resort fallbacks), how many seconds it took, whether it edited a file, ALL tool specs it was given (shapes, materials, lights, 520 effects, grid/cast-lane/camera rules), and its FULL text.\nYOU MUST ACCEPT OR DECLINE BEFORE YOU CONTINUE:\n- If a result is good, put its id in \"subagent_review\":{\"accepted\":[\"t1\",\"t2\"],\"note\":\"kept market hall shell+interior verbatim\"} and INCLUDE those exact Parts/cameras verbatim in your next props/camera_shots — then you MOVE TO THE NEXT STEP (do not re-ask the same task, set subagent_tasks:[]).\n- If a result is wrong/half-finished, LEAVE it out of \"accepted\" and BUILD YOUR OWN replacement for that piece in the same JSON — do not leave it empty, do not re-ask the identical task twice.\nSay what you decided in "subagent_review": {"accepted":["<task ids you kept>"], "note":"one line on what you kept, fixed, or asked for"}. Then return the complete corrected JSON, with "subagent_tasks":[] when you need nothing else.\n' "$SUBAGENT_ANSWERS" >> map_prompt.txt
                 export SUBAGENT_ANSWERS
                 # A SHORT CONFIRMATION, not another ten-minute world plan: the AI is
                 # shown what the sub-agent did (with its seconds and the file it

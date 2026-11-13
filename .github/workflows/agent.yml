@@ -213,6 +213,7 @@ jobs:
           MODEL_QUALITY: ${{ inputs.model_quality }}
           AI_MODEL: ${{ env.AI_MODEL }}
           AI_FALLBACK_MODEL: ${{ env.AI_FALLBACK_MODEL }}
+          BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}

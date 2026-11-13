@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Gemini sub-agent the local model can delegate work to at any time.
+"""Text sub-agent the local model can delegate work to at any time.
 
 The small local models (qwen3:4b/8b/14b) are good at the story but can stall on
 fiddly jobs: fixing a schema-shaped JSON blob, rewriting a narration to an exact
 word count, checking a fact, or naming a location. This tool lets the workflow
-hand those jobs to Gemini and feed the answer straight back into the prompt.
+hand those jobs to BazaarLink first, then Gemini and Groq, and feed the answer
+straight back into the prompt.
 
 The local AI decides *when*: it returns a `subagent_tasks` array in any plan or
 narration response, and the workflow runs them here and re-asks with the answers.
@@ -20,9 +21,9 @@ Request file (JSON):
          "apply_to": "dist/narration.txt"}      # optional, edit only
       ]
 
-Before the task, Gemini is given the rules of the files it may be changing
-(`gemini_workspace.py`): the blueprint's key names, enums and ranges, the prop
-grid/lane/overlap rules, the camera and face timing rules, the narration rules,
+Before the task, the selected text provider is given the rules of the files it
+may be changing (`gemini_workspace.py`): the blueprint's key names, enums and
+ranges, the prop grid/lane/overlap rules, the camera and face timing rules, the narration rules,
 the R15 animation format, the users/ model rules and the tooling conventions -
 plus the instruction to hand back a complete file, never a diff.
     }
@@ -35,15 +36,17 @@ Output file (JSON):
 
 Credentials
 -----------
-Add repository **secrets** named ``GEMINI_API_KEY`` and ``GROQ_API_KEY``.
-Gemini is tried first; when it is out of quota, unreachable or truncated, Groq
-tries ``llama-3.3-70b-versatile`` and then ``openai/gpt-oss-120b`` for a complete
-reply. Optionally add ``GEMINI_MODEL`` to choose Gemini's model. If neither
-secret is set, delegated tasks are skipped and the workflow continues.
+Add repository **secrets** named ``BAZAAR_LINK_API``, ``GEMINI_API_KEY`` and
+``GROQ_API_KEY``. BazaarLink's OpenAI-compatible ``auto:free`` route is tried
+first, followed by Gemini, then Groq's ``llama-3.3-70b-versatile`` and
+``openai/gpt-oss-120b`` fallbacks. Empty, failed or truncated responses are
+never passed on as completions. Optionally add ``GEMINI_MODEL`` to choose
+Gemini's model. If no provider secret is set, delegated tasks are skipped.
 """
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -61,6 +64,9 @@ from gemini_workspace import guide as file_guide  # noqa: E402
 from gemini_workspace import topics_for  # noqa: E402
 from agent_tools import TOOL_GUIDE, execute_tool, safe_path  # noqa: E402
 
+BAZAAR_LINK_ENDPOINT = "https://api.bazaarlink.ai/v1/chat/completions"
+BAZAAR_LINK_KEY_ENV = "BAZAAR_LINK_API"
+BAZAAR_LINK_MODEL = "auto:free"
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 DEFAULT_MODEL = "gemini-2.5-flash"
 DEFAULT_MODEL_VAR = "GEMINI_MODEL"
@@ -89,7 +95,15 @@ SYSTEM_RULES = (
 
 
 class GeminiUnavailable(Exception):
-    """Raised when the key is missing, the quota is gone, or the API errors."""
+    """Raised when no provider can complete a request."""
+
+
+class BazaarLinkUnavailable(GeminiUnavailable):
+    """The BazaarLink route is unavailable, returned no text, or failed."""
+
+
+class BazaarLinkTruncated(BazaarLinkUnavailable):
+    """BazaarLink returned an incomplete completion at its output ceiling."""
 
 
 class QuotaExhausted(GeminiUnavailable):
@@ -98,7 +112,7 @@ class QuotaExhausted(GeminiUnavailable):
     Retrying is pointless: the quota is per project and per day, so every later
     call in this run would fail the same way - run #99 spent minutes watching a
     429 come back while the story step waited. The first 429 sets a marker file
-    and every following call returns at once, without touching the network.
+    and every later Gemini attempt returns at once, without touching that network.
     """
 
 
@@ -302,6 +316,7 @@ def _required_image_paths(task: dict, root: Path) -> list[str]:
 
 def run_tool_agent(task: dict, context: str, *, model: str, api_key: str,
                    groq_key: str, groq_model_name: str, root: Path,
+                   bazaar_key: str = "", bazaar_url: str | None = None,
                    url: str | None = None, groq_url: str | None = None,
                    timeout: float = 120.0) -> dict:
     """Run a bounded tool loop, executing only calls the model authored."""
@@ -332,10 +347,10 @@ def run_tool_agent(task: dict, context: str, *, model: str, api_key: str,
         else:
             prompt = base_prompt
         text, provider = call_any(
-            prompt, gemini_key=api_key, gemini_model=model,
+            prompt, bazaar_key=bazaar_key, bazaar_url=bazaar_url,
+            gemini_key=api_key, gemini_model=model,
             groq_key=groq_key, groq_model_name=groq_model_name,
-            timeout=timeout, url=url, groq_url=groq_url,
-            prefer="groq" if quota_is_exhausted(root) else "gemini")
+            timeout=timeout, url=url, groq_url=groq_url)
         if provider not in providers:
             providers.append(provider)
         parsed = parse_agent_turn(text)
@@ -448,6 +463,72 @@ def _generation_config(model: str, max_tokens: int, thinking_off: bool) -> dict:
     return config
 
 
+def _openai_completion_parts(payload) -> tuple[str, str]:
+    """Extract the first OpenAI-compatible choice without logging its contents."""
+    try:
+        choice = payload["choices"][0]
+        message = choice.get("message") or {}
+        content = message.get("content")
+        if isinstance(content, str):
+            text = content.strip()
+        elif isinstance(content, list):
+            fragments = [part["text"] for part in content
+                         if isinstance(part, dict) and isinstance(part.get("text"), str)]
+            text = "".join(fragments).strip()
+        else:
+            text = ""
+        finish = str(choice.get("finish_reason") or "").strip().lower()
+        return text, finish
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return "", ""
+
+
+def call_bazaarlink(prompt: str, *, api_key: str, timeout: float = 120.0,
+                    url: str | None = None) -> str:
+    """Make a quiet OpenAI-compatible BazaarLink call using its auto:free route.
+
+    No request, response, credential, or provider error body is written to the
+    console. The completion is returned to the caller; empty or truncated
+    responses raise so call_any can continue directly to Gemini.
+    """
+    api_key = str(api_key or "").strip()
+    if not api_key:
+        raise BazaarLinkUnavailable("no API key configured")
+    endpoint = url or BAZAAR_LINK_ENDPOINT
+    body = json.dumps({
+        "model": BAZAAR_LINK_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.4,
+        "max_tokens": 8192,
+        "stream": False,
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint, data=body,
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {api_key}",
+                 "User-Agent": "Ai-rant-short-render/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", "replace")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise BazaarLinkUnavailable("the response was not valid JSON") from exc
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        raise BazaarLinkUnavailable(f"HTTP {exc.code}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+        raise BazaarLinkUnavailable(f"network failure ({type(exc).__name__})") from exc
+
+    text, finish = _openai_completion_parts(payload)
+    if finish in ("length", "max_tokens", "max_output_tokens"):
+        raise BazaarLinkTruncated("response was truncated at max_tokens=8192")
+    if not text:
+        raise BazaarLinkUnavailable("the response contained no text")
+    return text
+
+
 def call_gemini(prompt: str, *, api_key: str, model: str = DEFAULT_MODEL,
                 timeout: float = 120.0, url: str | None = None) -> str:
     """One Gemini call. Raises GeminiUnavailable on quota/auth/network trouble.
@@ -541,7 +622,7 @@ def groq_model(requested: str = "") -> str:
 
 def call_groq(prompt: str, *, api_key: str, model: str = "", timeout: float = 120.0,
               url: str | None = None, max_tokens: int = 8192) -> str:
-    """One Groq (OpenAI-compatible) chat call - the fallback when Gemini is out.
+    """One Groq (OpenAI-compatible) chat call - the last provider in the chain.
 
     A retired model answers 404/decommissioned; that is reported as such so the
     caller can try the next configured model instead of failing the whole task.
@@ -611,62 +692,72 @@ def should_try_next_groq_model(exc: Exception) -> bool:
     return any(word in detail for word in ("http 429", "rate_limit", "rate limit", "too many requests"))
 
 
-def call_any(prompt: str, *, gemini_key: str = "", gemini_model: str = "",
-             groq_key: str = "", groq_model_name: str = "", timeout: float = 120.0,
+def call_any(prompt: str, *, bazaar_key: str = "", bazaar_url: str | None = None,
+             gemini_key: str = "", gemini_model: str = "", groq_key: str = "",
+             groq_model_name: str = "", timeout: float = 120.0,
              url: str | None = None, groq_url: str | None = None,
              prefer: str = "gemini") -> tuple[str, str]:
-    """Ask Gemini; when it is out of quota or broken, ask Groq instead.
+    """Use BazaarLink, then Gemini, then Groq for complete text completions.
 
-    Returns (text, provider). Every Gemini failure - a 429, a network error, a
-    dead key - hands the job to the Groq fallback, so a run never loses a task
-    because one free provider ran dry. The next request asks Gemini again (the
-    quota marker only blocks it for a short retry window), so the helper returns
-    to Gemini as soon as it can answer.
+    ``prefer`` remains accepted for compatibility but cannot change the configured
+    provider order. Every missing key, provider error, empty response, or
+    persistently truncated response falls through to the next provider. The
+    returned tuple carries the completion back to the calling code; BazaarLink
+    request/response details are never printed.
     """
+    del prefer  # provider order is intentionally fixed: BazaarLink -> Gemini -> Groq
+    bazaar_key = str(bazaar_key or "").strip()
+    gemini_key = str(gemini_key or "").strip()
+    groq_key = str(groq_key or "").strip()
     failures: list[str] = []
-    order = ("groq", "gemini") if prefer == "groq" else ("gemini", "groq")
-    for provider in order:
-        if provider == "gemini":
-            if not gemini_key:
-                failures.append("Gemini: no API key")
-                continue
-            if quota_is_exhausted():
-                failures.append("Gemini: quota exhausted")
-                continue
+
+    if not bazaar_key:
+        failures.append("BazaarLink: no API key")
+    else:
+        try:
+            return call_bazaarlink(prompt, api_key=bazaar_key, timeout=timeout,
+                                   url=bazaar_url), "bazaarlink"
+        except BazaarLinkUnavailable as exc:
+            failures.append(f"BazaarLink: {exc}")
+
+    if not gemini_key:
+        failures.append("Gemini: no API key")
+    elif quota_is_exhausted():
+        failures.append("Gemini: quota exhausted")
+    else:
+        try:
+            return call_gemini(prompt, api_key=gemini_key, model=gemini_model,
+                               timeout=timeout, url=url), "gemini"
+        except GeminiUnavailable as exc:
+            failures.append(f"Gemini: {exc}")
+
+    if not groq_key:
+        failures.append("Groq: no API key")
+    else:
+        candidates: list[str] = []
+        first = groq_model(groq_model_name)
+        candidates.append(first)
+        for choice in GROQ_MODEL_CHOICES:
+            if choice not in candidates:
+                candidates.append(choice)
+        for index, candidate in enumerate(candidates):
             try:
-                return call_gemini(prompt, api_key=gemini_key, model=gemini_model,
-                                   timeout=timeout, url=url), "gemini"
-            except GeminiUnavailable as exc:
-                failures.append(f"Gemini: {exc}")
-                continue
-        else:
-            if not groq_key:
-                failures.append("Groq: no API key")
-                continue
-            candidates: list[str] = []
-            first = groq_model(groq_model_name)
-            candidates.append(first)
-            for choice in GROQ_MODEL_CHOICES:
-                if choice not in candidates:
-                    candidates.append(choice)
-            for index, candidate in enumerate(candidates):
-                try:
-                    text = call_groq(prompt, api_key=groq_key, model=candidate,
-                                     timeout=timeout, url=groq_url)
-                    if candidate != first:
-                        print(paint(f"[gemini sub-agent] Groq model {first} could not provide a "
-                                    f"complete answer, so {candidate} answered instead.",
-                                    "warning"), flush=True)
-                    return text, "groq"
-                except GroqUnavailable as exc:
-                    failures.append(f"Groq ({candidate}): {exc}")
-                    # Keep the first complete response: a retired/rate-limited
-                    # model or one that still truncates hands off to the next.
-                    if not should_try_next_groq_model(exc) or index == len(candidates) - 1:
-                        break
-                    print(f"[gemini sub-agent] Groq model {candidate} failed to produce a complete "
-                          f"answer ({exc}); trying {candidates[index + 1]}.", flush=True)
-            continue
+                text = call_groq(prompt, api_key=groq_key, model=candidate,
+                                 timeout=timeout, url=groq_url)
+                if candidate != first:
+                    print(paint(f"[gemini sub-agent] Groq model {first} could not provide a "
+                                f"complete answer, so {candidate} answered instead.",
+                                "warning"), flush=True)
+                return text, "groq"
+            except GroqUnavailable as exc:
+                failures.append(f"Groq ({candidate}): {exc}")
+                # Keep the first complete response: a retired/rate-limited
+                # model or one that still truncates hands off to the next.
+                if not should_try_next_groq_model(exc) or index == len(candidates) - 1:
+                    break
+                print(f"[gemini sub-agent] Groq model {candidate} failed to produce a complete "
+                      f"answer ({exc}); trying {candidates[index + 1]}.", flush=True)
+
     raise GeminiUnavailable("no provider could answer (" + "; ".join(failures) + ")")
 
 
@@ -693,6 +784,7 @@ def _is_oversized_instruction(instr: str) -> bool:
     return False
 
 def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = None,
+              bazaar_key: str | None = None, bazaar_url: str | None = None,
               url: str | None = None, timeout: float = 120.0,
               groq_key: str = "", groq_model_name: str = "",
               groq_url: str | None = None) -> dict:
@@ -700,13 +792,18 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
     # Accept an unnormalised request too: ids, kind fallbacks and the three-task
     # cap are all applied here so callers cannot bypass them.
     request = normalize_request(request)
-    groq_key = groq_key or os.environ.get(GROQ_KEY_ENV, "").strip()
+    if bazaar_key is None:
+        bazaar_key = os.environ.get(BAZAAR_LINK_KEY_ENV, "")
+    bazaar_key = str(bazaar_key or "").strip()
+    api_key = str(api_key or "").strip()
+    groq_key = str(groq_key or os.environ.get(GROQ_KEY_ENV, "")).strip()
     results = []
-    skipped = not api_key and not groq_key
+    skipped = not bazaar_key and not api_key and not groq_key
     if skipped:
-        print(paint(f"[gemini sub-agent] neither {API_KEY_ENV} nor {GROQ_KEY_ENV} is "
-                    f"configured; skipping {len(request.get('tasks', []))} delegated "
-                    f"task(s) and continuing.", "warning"), flush=True)
+        print(paint(f"[gemini sub-agent] none of {BAZAAR_LINK_KEY_ENV}, {API_KEY_ENV} or "
+                    f"{GROQ_KEY_ENV} is configured; skipping "
+                    f"{len(request.get('tasks', []))} delegated task(s) and continuing.",
+                    "warning"), flush=True)
     started_all = time.monotonic()
     providers: list[str] = []
     for task in request.get("tasks", []):
@@ -714,7 +811,7 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
             results.append({"id": task["id"], "kind": task["kind"], "ok": False,
                             "error": "no API key"})
             continue
-        if not api_key and not groq_key:
+        if not bazaar_key and not api_key and not groq_key:
             results.append({"id": task["id"], "kind": task["kind"], "ok": False,
                             "error": "no API key"})
             continue
@@ -724,7 +821,8 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
             task["instruction"] = task["instruction"][:400] + " — IMPORTANT: Provide ONLY a 1-page outline with 3 design concepts, not the full 20 pages. Keep reply under 3000 chars."
             task["input"] = (task.get("input") or "")[:2000]
 
-        print(paint(f"[gemini sub-agent] {task['kind']} task {task['id']} -> {model}: "
+        print(paint(f"[text sub-agent] {task['kind']} task {task['id']} -> "
+                    f"BazaarLink {BAZAAR_LINK_MODEL}, Gemini {model}, then Groq: "
                     f"{task['instruction'][:100]}", "tool"), flush=True)
         topics = topics_for({**task, "context": request.get("context", "")})
         if topics:
@@ -739,16 +837,17 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
                     task, request.get("context", ""), model=model,
                     api_key=api_key, groq_key=groq_key,
                     groq_model_name=groq_model_name, root=root,
+                    bazaar_key=bazaar_key, bazaar_url=bazaar_url,
                     url=url, groq_url=groq_url, timeout=timeout)
                 text = str(agent_run.get("text") or "")
                 provider = str(agent_run.get("provider") or "")
             else:
                 text, provider = call_any(
                     build_prompt(task, request.get("context", "")),
+                    bazaar_key=bazaar_key, bazaar_url=bazaar_url,
                     gemini_key=api_key, gemini_model=model,
                     groq_key=groq_key, groq_model_name=groq_model_name,
-                    timeout=timeout, url=url, groq_url=groq_url,
-                    prefer="groq" if quota_is_exhausted(root) else "gemini")
+                    timeout=timeout, url=url, groq_url=groq_url)
         except GeminiUnavailable as exc:
             print(paint(f"[gemini sub-agent] task {task['id']} failed ({exc}); "
                         f"continuing without it.", "error"), file=sys.stderr, flush=True)
@@ -757,8 +856,8 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
                             "error": str(exc)[:300]})
             continue
         if provider == "groq":
-            print(paint("[gemini sub-agent] Gemini could not answer this one, so the "
-                        "Groq fallback key did the job instead.", "warning"), flush=True)
+            print(paint("[gemini sub-agent] BazaarLink and Gemini could not answer this one, "
+                        "so the Groq fallback key did the job instead.", "warning"), flush=True)
         providers.append(provider)
         entry = {"id": task["id"], "kind": task["kind"], "ok": True, "text": text,
                  "provider": provider,
@@ -783,12 +882,13 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
                 entry["applied_to"] = str(target.relative_to(root))
                 print(paint(f"[gemini sub-agent] applied the edit to "
                             f"{entry['applied_to']}.", "success"), flush=True)
-        # Show the reply itself in the console so the exchange is visible:
-        # local AI asks -> Gemini answers -> the answer goes back to the local AI.
-        preview = " ".join(text.split())
-        print(paint(f"[gemini sub-agent] reply to {task['id']} ({task['kind']}, "
-                    f"{len(text)} chars): {preview[:700]}{'...' if len(preview) > 700 else ''}",
-                    "answer"), flush=True)
+        # BazaarLink completions are intentionally quiet in logs and plan-facing
+        # summaries. Their full text remains in the results file for the caller.
+        if provider != "bazaarlink":
+            preview = " ".join(text.split())
+            print(paint(f"[gemini sub-agent] reply to {task['id']} ({task['kind']}, "
+                        f"{len(text)} chars): {preview[:700]}{'...' if len(preview) > 700 else ''}",
+                        "answer"), flush=True)
         # The local AI is told how long each job took and what file it touched, so it
         # can confirm or correct the result before the workflow moves on.
         took = entry["seconds"]
@@ -798,7 +898,8 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
         results.append(entry)
     return {"model": model, "skipped": skipped,
             "quota_exhausted": quota_is_exhausted(root),
-            "fallback_used": "groq" in providers,
+            "bazaar_link_used": "bazaarlink" in providers,
+            "fallback_used": any(provider != "bazaarlink" for provider in providers),
             "providers": providers,
             "seconds": round(time.monotonic() - started_all, 1),
             "results": results}
@@ -812,13 +913,15 @@ def main() -> None:
                         help="where to write the results JSON")
     parser.add_argument("--model", default=os.environ.get(DEFAULT_MODEL_VAR) or DEFAULT_MODEL)
     parser.add_argument("--timeout", type=float, default=120.0)
-    parser.add_argument("--url", default="", help="override endpoint (tests)")
+    parser.add_argument("--url", default="", help="override the Gemini endpoint (tests)")
+    parser.add_argument("--bazaar-url", default="",
+                        help="override the BazaarLink endpoint (tests)")
     parser.add_argument("--groq-model", default="",
                         help=f"Groq fallback model (default: ${GROQ_MODEL_VAR} or "
                              f"{DEFAULT_GROQ_MODEL})")
     parser.add_argument("--groq-url", default="", help="override the Groq endpoint (tests)")
     parser.add_argument("--stdout", action="store_true",
-                        help="also print the answers, for the live console")
+                        help="print non-BazaarLink answers in the live console")
     args = parser.parse_args()
 
     raw = json.loads(args.request.read_text(encoding="utf-8"))
@@ -832,8 +935,10 @@ def main() -> None:
         return
 
     result = run_tasks(request, api_key=os.environ.get(API_KEY_ENV, "").strip(),
-                       model=args.model, root=Path.cwd(), url=args.url or None,
-                       timeout=args.timeout,
+                       model=args.model, root=Path.cwd(),
+                       bazaar_key=os.environ.get(BAZAAR_LINK_KEY_ENV, "").strip(),
+                       bazaar_url=args.bazaar_url or None,
+                       url=args.url or None, timeout=args.timeout,
                        groq_key=os.environ.get(GROQ_KEY_ENV, "").strip(),
                        groq_model_name=args.groq_model,
                        groq_url=args.groq_url or None)
@@ -842,26 +947,35 @@ def main() -> None:
                           encoding="utf-8")
     if args.stdout:
         for entry in result["results"]:
-            if entry.get("ok"):
+            if entry.get("ok") and entry.get("provider") != "bazaarlink":
                 print(paint(f"[gemini sub-agent] full answer for {entry['id']}:\n{entry['text']}",
                     "answer"), flush=True)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
-        lines = ["## Gemini sub-agent", ""]
+        lines = ["## Text sub-agent", ""]
         if result["skipped"]:
-            lines.append(f"- No `{API_KEY_ENV}` secret configured, so delegated tasks were skipped.")
-        if result.get("fallback_used"):
-            lines.append("- **Gemini could not answer, so the Groq fallback key did the "
-                         "work** (free models). No task was lost; Gemini is tried again "
-                         "on the next call.")
-        if result.get("quota_exhausted") and not result.get("fallback_used"):
-            lines.append("- **The free Gemini key is out of quota** and no Groq fallback "
+            lines.append(f"- No `{BAZAAR_LINK_KEY_ENV}`, `{API_KEY_ENV}` or "
+                         f"`{GROQ_KEY_ENV}` secret configured, so delegated tasks were skipped.")
+        if result.get("bazaar_link_used"):
+            lines.append("- BazaarLink `auto:free` answered; its completion was returned to "
+                         "the caller and omitted from this summary.")
+        if "gemini" in result.get("providers", []):
+            lines.append("- Gemini answered after the BazaarLink route was unavailable.")
+        if "groq" in result.get("providers", []):
+            lines.append("- Groq answered after the BazaarLink route and Gemini were unavailable.")
+        if (result.get("quota_exhausted") and not result.get("fallback_used")
+                and not result.get("bazaar_link_used")):
+            lines.append("- **The free Gemini key is out of quota** and no later provider "
                          "answered, so the remaining sub-agent tasks were skipped and the "
                          "run continued with the AI's own work.")
         for entry in result["results"]:
             if entry.get("ok"):
-                text = " ".join(str(entry.get("text", "")).split())[:300]
-                lines.append(f"- **{entry['id']}** ({entry['kind']}): {text}")
+                if entry.get("provider") == "bazaarlink":
+                    lines.append(f"- **{entry['id']}** ({entry['kind']}): answered by "
+                                 "BazaarLink; completion omitted from this summary.")
+                else:
+                    text = " ".join(str(entry.get("text", "")).split())[:300]
+                    lines.append(f"- **{entry['id']}** ({entry['kind']}): {text}")
             else:
                 lines.append(f"- **{entry['id']}** failed: {entry.get('error', 'unknown')}")
         if result["results"]:
