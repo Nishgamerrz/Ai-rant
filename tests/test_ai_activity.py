@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
@@ -42,31 +43,47 @@ class ActivityLogTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ai_activity.jsonl"
             preview = "The model is still writing the next beat."
-            with patch("sys.stdout") as stdout:
+            with patch("sys.stdout") as stdout, patch("sys.stderr") as stderr:
                 append_activity({"type": "model_progress", "stage": "ollama",
                                  "status": "streaming", "channel": "thinking",
                                  "preview": preview, "characters": 800},
-                                path=path, persist=False)
+                                path=path, persist=False, live_stream=sys.stderr)
             self.assertFalse(path.exists())
-            live_text = "".join(str(call.args[0]) for call in stdout.write.call_args_list)
+            self.assertFalse(stdout.write.called, "progress telemetry must not share model stdout")
+            live_text = "".join(str(call.args[0]) for call in stderr.write.call_args_list)
             self.assertIn(preview, live_text)
             self.assertIn("model_progress", live_text)
+            self.assertEqual(len(parse_live_records(live_text)), 1)
+
+    def test_explicit_falsey_live_stream_is_not_replaced_by_stdout(self):
+        class FalseyStream(io.StringIO):
+            def __bool__(self):
+                return False
+
+        sink = FalseyStream()
+        with patch("sys.stdout") as stdout:
+            append_activity({"type": "diagnostic", "stage": "test", "status": "ok"},
+                            persist=False, live_stream=sink)
+        self.assertIn("[ai-log]", sink.getvalue())
+        self.assertFalse(stdout.write.called)
 
     def test_known_provider_secrets_and_bearer_tokens_are_redacted(self):
         with patch.dict(os.environ, {
             "BAZAAR_LINK_API": "bazaar-secret-value",
+            "BAZAARLINK_API_KEY": "bazaar-request-secret",
             "GEMINI_API_KEY": "gemini-secret-value",
             "GROQ_API_KEY": "groq-secret-value",
         }):
             safe = redact_secrets(
-                "bazaar-secret-value gemini-secret-value groq-secret-value "
+                "bazaar-secret-value bazaar-request-secret gemini-secret-value groq-secret-value "
                 "Authorization: Bearer abcdefghijklmnopqrstuvwxyz1234"
             )
         self.assertNotIn("bazaar-secret-value", safe)
+        self.assertNotIn("bazaar-request-secret", safe)
         self.assertNotIn("gemini-secret-value", safe)
         self.assertNotIn("groq-secret-value", safe)
         self.assertNotIn("abcdefghijklmnopqrstuvwxyz1234", safe)
-        self.assertEqual(safe.count("[REDACTED]"), 4)
+        self.assertEqual(safe.count("[REDACTED]"), 5)
 
     def test_secret_field_names_and_json_style_credentials_are_redacted(self):
         raw = '{"BAZAAR_LINK_API":"bazaar-json-secret","api_key":"generic-api-secret"}'

@@ -42,7 +42,7 @@ WORKFLOW = ROOT / ".github" / "workflows" / "main.yml"
 os.environ.setdefault("GEMINI_QUOTA_MARKER",
                       str(Path(tempfile.mkdtemp(prefix="quota-marker-")) / "gemini_quota_exhausted"))
 # Keep API coverage hermetic; every provider call in these tests uses a local stub.
-for _credential in ("BAZAAR_LINK_API", "GEMINI_API_KEY", "GROQ_API_KEY"):
+for _credential in ("BAZAAR_LINK_API", "BAZAARLINK_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY"):
     os.environ.pop(_credential, None)
 
 GOOD = ("A nervous student finds a lost wallet on the way to school and has to decide "

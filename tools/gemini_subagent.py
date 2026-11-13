@@ -69,6 +69,10 @@ from agent_tools import TOOL_GUIDE, execute_tool, safe_path  # noqa: E402
 
 BAZAAR_LINK_ENDPOINT = "https://api.bazaarlink.ai/v1/chat/completions"
 BAZAAR_LINK_KEY_ENV = "BAZAAR_LINK_API"
+# The OpenAI-compatible request contract uses BAZAARLINK_API_KEY. Workflows map
+# that runtime name to the existing BAZAAR_LINK_API repository secret; the latter
+# remains the single credential source and a fallback for older callers.
+BAZAAR_LINK_REQUEST_KEY_ENV = "BAZAARLINK_API_KEY"
 BAZAAR_LINK_MODEL = "auto:free"
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 DEFAULT_MODEL = "gemini-2.5-flash"
@@ -95,6 +99,26 @@ SYSTEM_RULES = (
     "parenthetical is only here so you understand the context. Ignore it: do not answer "
     "it, do not mention it, and do not treat it as part of the task.)"
 )
+
+AGENT_TOOL_USAGE_GUIDANCE = (
+    "You are the tool-enabled sub-agent. For this task, you may use the listed tools. "
+    "If one is needed, YOU must author its call in your own first response as a JSON "
+    "object inside a json code fence, shaped like "
+    "{\\\"thought\\\":\\\"brief reason\\\",\\\"answer\\\":\\\"status\\\","
+    "\\\"tool_calls\\\":[{\\\"tool\\\":\\\"inspect_image\\\","
+    "\\\"path\\\":\\\"reference.png\\\"}]}. The runner will only execute calls "
+    "present in your response; it will never invent or inject delegation or asset-search "
+    "calls. After tool results arrive, continue until finished, then return an empty "
+    "tool_calls array and a concise final answer. Keep each round's call list to six or "
+    "fewer tools."
+)
+
+
+def bazaar_link_api_key_from_env() -> str:
+    """Read the request-facing alias sourced from the canonical repository secret."""
+    return str(os.environ.get(BAZAAR_LINK_REQUEST_KEY_ENV)
+               or os.environ.get(BAZAAR_LINK_KEY_ENV)
+               or "").strip()
 
 
 class GeminiUnavailable(Exception):
@@ -219,8 +243,9 @@ def normalize_request(raw) -> dict:
     return {"context": context[:MAX_INPUT_CHARS], "tasks": cleaned}
 
 
-def build_prompt(task: dict, context: str = "") -> str:
-    parts = [SYSTEM_RULES]
+def build_prompt(task: dict, context: str = "", *, include_system_rules: bool = True,
+                 include_tool_guidance: bool = True) -> str:
+    parts = [SYSTEM_RULES] if include_system_rules else []
     if context:
         parts.append(f"Run context:\n{context}")
     # Tell Gemini exactly how the files it may be asked to change are shaped:
@@ -240,20 +265,8 @@ def build_prompt(task: dict, context: str = "") -> str:
                      if task.get("apply_to") else "Return only the edited text.")
     elif task["kind"] == "code":
         parts.append("Return only the complete code, no fences and no commentary.")
-    elif task["kind"] == "agent":
-        parts.append(TOOL_GUIDE)
-        parts.append(
-            "You are the tool-enabled sub-agent. For this task, you may use the "
-            "listed tools. If one is needed, YOU must author its call in your own "
-            "first response as a JSON object inside a json code fence, shaped like "
-            "{\\\"thought\\\":\\\"brief reason\\\",\\\"answer\\\":\\\"status\\\","
-            "\\\"tool_calls\\\":[{\\\"tool\\\":\\\"inspect_image\\\","
-            "\\\"path\\\":\\\"reference.png\\\"}]}. The runner will only "
-            "execute calls present in your response; it will never invent or inject "
-            "delegation or asset-search calls. After tool results arrive, continue "
-            "until finished, then return an empty tool_calls array and a concise final "
-            "answer. Keep each round's call list to six or fewer tools."
-        )
+    elif task["kind"] == "agent" and include_tool_guidance:
+        parts.extend((TOOL_GUIDE, AGENT_TOOL_USAGE_GUIDANCE))
     return "\n\n".join(parts)
 
 
@@ -325,10 +338,12 @@ def run_tool_agent(task: dict, context: str, *, model: str, api_key: str,
                    on_attempt: Callable[[dict], None] | None = None) -> dict:
     """Run a bounded tool loop, executing only calls the model authored."""
     required_images = _required_image_paths(task, root)
-    base_prompt = build_prompt(task, context)
+    agent_system_prompt = "\n\n".join((SYSTEM_RULES, TOOL_GUIDE, AGENT_TOOL_USAGE_GUIDANCE))
+    base_prompt = build_prompt(task, context, include_system_rules=False,
+                               include_tool_guidance=False)
     if required_images:
         image_list = ", ".join(f"`{path}`" for path in required_images)
-        base_prompt += (
+        agent_system_prompt += (
             "\n\nMANDATORY PROVIDED-IMAGE CHECK: you must inspect every supplied workspace image yourself. "
             f"Your own JSON tool_calls must include inspect_image (or read_image) for {image_list}. "
             "The runner rejects and re-prompts if you omit the inspection call; it will not inject one."
@@ -356,6 +371,7 @@ def run_tool_agent(task: dict, context: str, *, model: str, api_key: str,
 
         text, provider = call_any(
             prompt, bazaar_key=bazaar_key, bazaar_url=bazaar_url,
+            system_prompt=agent_system_prompt,
             gemini_key=api_key, gemini_model=model,
             groq_key=groq_key, groq_model_name=groq_model_name,
             timeout=timeout, url=url, groq_url=groq_url,
@@ -493,7 +509,7 @@ def _openai_completion_parts(payload) -> tuple[str, str]:
 
 
 def call_bazaarlink(prompt: str, *, api_key: str, timeout: float = 120.0,
-                    url: str | None = None) -> str:
+                    url: str | None = None, system_prompt: str | None = None) -> str:
     """Make a quiet OpenAI-compatible BazaarLink call using its auto:free route.
 
     No request, response, credential, or provider error body is written to the
@@ -504,10 +520,14 @@ def call_bazaarlink(prompt: str, *, api_key: str, timeout: float = 120.0,
     if not api_key:
         raise BazaarLinkUnavailable("no API key configured")
     endpoint = url or BAZAAR_LINK_ENDPOINT
+    system_content = str(system_prompt or SYSTEM_RULES).strip() or SYSTEM_RULES
     body = json.dumps({
         "model": BAZAAR_LINK_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.4,
+        "messages": [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 5,
         "max_tokens": 8192,
         "stream": False,
     }).encode("utf-8")
@@ -747,6 +767,7 @@ def _report_provider_attempt(callback: Callable[[dict], None] | None, *,
 
 
 def call_any(prompt: str, *, bazaar_key: str = "", bazaar_url: str | None = None,
+             system_prompt: str | None = None,
              gemini_key: str = "", gemini_model: str = "", groq_key: str = "",
              groq_model_name: str = "", timeout: float = 120.0,
              url: str | None = None, groq_url: str | None = None,
@@ -763,6 +784,8 @@ def call_any(prompt: str, *, bazaar_key: str = "", bazaar_url: str | None = None
     bazaar_key = str(bazaar_key or "").strip()
     gemini_key = str(gemini_key or "").strip()
     groq_key = str(groq_key or "").strip()
+    system_prompt = str(system_prompt or "").strip()
+    fallback_prompt = (f"{system_prompt}\n\n{prompt}" if system_prompt else prompt)
     failures: list[str] = []
 
     if not bazaar_key:
@@ -774,7 +797,8 @@ def call_any(prompt: str, *, bazaar_key: str = "", bazaar_url: str | None = None
     else:
         started = time.monotonic()
         try:
-            text = call_bazaarlink(prompt, api_key=bazaar_key, timeout=timeout, url=bazaar_url)
+            text = call_bazaarlink(prompt, api_key=bazaar_key, timeout=timeout,
+                                   url=bazaar_url, system_prompt=system_prompt or None)
             _report_provider_attempt(on_attempt, provider="bazaarlink", model=BAZAAR_LINK_MODEL,
                                      status="answered", seconds=time.monotonic() - started)
             return text, "bazaarlink"
@@ -802,7 +826,7 @@ def call_any(prompt: str, *, bazaar_key: str = "", bazaar_url: str | None = None
     else:
         started = time.monotonic()
         try:
-            text = call_gemini(prompt, api_key=gemini_key, model=gemini_model,
+            text = call_gemini(fallback_prompt, api_key=gemini_key, model=gemini_model,
                                timeout=timeout, url=url)
             _report_provider_attempt(on_attempt, provider="gemini", model=gemini_model or DEFAULT_MODEL,
                                      status="answered", seconds=time.monotonic() - started)
@@ -830,7 +854,7 @@ def call_any(prompt: str, *, bazaar_key: str = "", bazaar_url: str | None = None
         for index, candidate in enumerate(candidates):
             started = time.monotonic()
             try:
-                text = call_groq(prompt, api_key=groq_key, model=candidate,
+                text = call_groq(fallback_prompt, api_key=groq_key, model=candidate,
                                  timeout=timeout, url=groq_url)
                 _report_provider_attempt(on_attempt, provider="groq", model=candidate,
                                          status="answered", seconds=time.monotonic() - started)
@@ -972,7 +996,7 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
     root = (root or Path.cwd()).resolve()
     request = normalize_request(request)
     if bazaar_key is None:
-        bazaar_key = os.environ.get(BAZAAR_LINK_KEY_ENV, "")
+        bazaar_key = bazaar_link_api_key_from_env()
     bazaar_key = str(bazaar_key or "").strip()
     api_key = str(api_key or "").strip()
     groq_key = str(groq_key or os.environ.get(GROQ_KEY_ENV, "")).strip()
@@ -1171,7 +1195,7 @@ def main() -> None:
 
     result = run_tasks(request, api_key=os.environ.get(API_KEY_ENV, "").strip(),
                        model=args.model, root=Path.cwd(),
-                       bazaar_key=os.environ.get(BAZAAR_LINK_KEY_ENV, "").strip(),
+                       bazaar_key=bazaar_link_api_key_from_env(),
                        bazaar_url=args.bazaar_url or None,
                        url=args.url or None, timeout=args.timeout,
                        groq_key=os.environ.get(GROQ_KEY_ENV, "").strip(),

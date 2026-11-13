@@ -15,7 +15,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 DEFAULT_ACTIVITY_PATH = Path("dist/ai_activity.jsonl")
 _PRIVATE_FIELDS = {
@@ -107,11 +107,15 @@ def sanitize_data(value: Any) -> Any:
 
 
 def append_activity(event: dict[str, Any], *, path: str | Path | None = None,
-                    emit: bool = True, persist: bool = True) -> dict[str, Any]:
+                    emit: bool = True, persist: bool = True,
+                    live_stream: TextIO | None = None) -> dict[str, Any]:
     """Append a complete safe record; emit only a concise structured live line.
 
     Failures to write a diagnostic artifact must never stop video generation.
     The caller should pass a run-local path in tests or for a non-default root.
+    High-frequency stream telemetry can use ``live_stream=sys.stderr`` so its
+    structured records remain available in Actions logs without being inserted
+    into the model's human-readable stdout stream.
     """
     record = _sanitize({
         "schema_version": 1,
@@ -131,7 +135,7 @@ def append_activity(event: dict[str, Any], *, path: str | Path | None = None,
         try:
             live = _live_record(record)
             print("[ai-log] " + json.dumps(live, ensure_ascii=False, separators=(",", ":")),
-                  flush=True)
+                  file=live_stream if live_stream is not None else sys.stdout, flush=True)
         except (OSError, TypeError, ValueError):
             pass
     return record

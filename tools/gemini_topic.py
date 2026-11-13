@@ -38,7 +38,7 @@ from ai_activity import append_activity, redact_secrets, sanitize_data  # noqa: 
 
 from gemini_subagent import (  # noqa: E402
     API_KEY_ENV,
-    BAZAAR_LINK_KEY_ENV,
+    bazaar_link_api_key_from_env,
     DEFAULT_MODEL,
     DEFAULT_MODEL_VAR,
     GROQ_KEY_ENV,
@@ -214,7 +214,7 @@ def refine(text: str, *, api_key: str, model: str = DEFAULT_MODEL,
     raw = str(text or "").strip()
     api_key = str(api_key or "").strip()
     if bazaar_key is None:
-        bazaar_key = os.environ.get(BAZAAR_LINK_KEY_ENV, "")
+        bazaar_key = bazaar_link_api_key_from_env()
     bazaar_key = str(bazaar_key or "").strip()
     groq_key = str(groq_key or os.environ.get(GROQ_KEY_ENV, "")).strip()
     attempts = []
@@ -290,7 +290,7 @@ def main() -> int:
     args = parser.parse_args()
 
     api_key = os.environ.get(API_KEY_ENV, "").strip()
-    bazaar_key = os.environ.get(BAZAAR_LINK_KEY_ENV, "").strip()
+    bazaar_key = bazaar_link_api_key_from_env()
     groq_key = os.environ.get(GROQ_KEY_ENV, "").strip()
     story_raw = os.environ.get(args.story_env, "")
     theme_raw = os.environ.get(args.theme_env, "")
