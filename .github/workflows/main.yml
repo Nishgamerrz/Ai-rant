@@ -1466,15 +1466,10 @@ jobs:
           # than leaving silence: one retry, capped at -20% so it still sounds like a
           # story short and never like an audiobook. Measured, then kept only if closer.
           if python -c "import sys; sys.exit(0 if $NARRATION_SECONDS < $DURATION_SECONDS * 0.9 else 1)"; then
-            # Speaking MORE SLOWLY makes the audio longer, so a short take needs a
-            # negative rate. The first version of this divided the wrong way round
-            # and asked for "+0%", which changed nothing: run #84 kept a 74-second
-            # voiceover in a 128-second video.
-            FILL_RATE=$(python -c "
-          seconds=max(0.1, float('$NARRATION_SECONDS')); target=float('$DURATION_SECONDS')
-          percent=round((seconds / target - 1) * 100)
-          percent=max(-20, min(4, percent))
-          print(('+' if percent >= 0 else '') + str(percent) + '%')")
+            # Speaking MORE SLOWLY makes the audio longer. Calculate against the
+            # current Edge TTS rate as well as the measured duration: ignoring the
+            # initial +4% rate over-slowed run #124 (112.27s became 137.38s at -15%).
+            FILL_RATE=$(python tools/narration_rate.py "$NARRATION_SECONDS" "$DURATION_SECONDS" --current-rate="$RATE")
             python tools/say.py warning "The narration is ${NARRATION_SECONDS}s for a ${DURATION_SECONDS}s video; speaking it once more at ${FILL_RATE} to fill the length."
             cp dist/narration.mp3 dist/narration_first_take.mp3
             cp dist/narration.srt dist/narration_first_take.srt
@@ -1482,7 +1477,7 @@ jobs:
               --file dist/narration.txt --write-media dist/narration.mp3 \
               --write-subtitles dist/narration.srt && [ -s dist/narration.mp3 ]; then
               FILLED=$(python -c "from mutagen.mp3 import MP3; print(f'{MP3(\"dist/narration.mp3\").info.length:.2f}')")
-              if python -c "import sys; sys.exit(0 if abs($FILLED - $DURATION_SECONDS) < abs($NARRATION_SECONDS - $DURATION_SECONDS) else 1)"; then
+              if python -c "import sys; sys.exit(0 if $FILLED <= $maximum and abs($FILLED - $DURATION_SECONDS) < abs($NARRATION_SECONDS - $DURATION_SECONDS) else 1)"; then
                 NARRATION_SECONDS=$FILLED
                 RATE="$FILL_RATE"
                 echo "NARRATION_SECONDS=$NARRATION_SECONDS" >> "$GITHUB_ENV"
