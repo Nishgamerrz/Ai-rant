@@ -846,11 +846,11 @@ class ColourTests(unittest.TestCase):
         self.assertIn("CODES[kind]", workflow)
         self.assertIn("sys.stdout.isatty()", workflow)
 
-    def test_gemini_replies_are_coloured_too(self):
+    def test_live_subagent_answer_stream_uses_its_own_colour(self):
         helper = (ROOT / "tools" / "gemini_subagent.py").read_text(encoding="utf-8")
         self.assertIn("from console_style import paint", helper)
-        self.assertIn('_subagent_tag(provider)', helper)
-        self.assertIn('paint(f"{tag} full response for', helper)
+        self.assertIn('sys.stdout.write(paint(text, "answer", stream=sys.stdout))', helper)
+        self.assertNotIn('paint(f"{tag} full response for', helper)
 
 
 class _AlwaysAnswers(BaseHTTPRequestHandler):

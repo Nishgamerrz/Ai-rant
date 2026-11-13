@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
 import gemini_subagent  # noqa: E402
+from console_style import strip as strip_ansi  # noqa: E402
 from gemini_subagent import (  # noqa: E402
     build_prompt,
     normalize_request,
@@ -126,6 +128,37 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(parsed["tool_calls"], [{"tool": "inspect_image", "path": "face.jpg"}])
         plain = parse_agent_turn("No tool call was authored.")
         self.assertEqual(plain["tool_calls"], [])
+
+    def test_agent_live_stream_extracts_only_the_authored_answer_field(self):
+        visible = []
+        streamer = gemini_subagent._AgentAnswerStreamer(
+            lambda channel, text: visible.append(text) if channel == "answer" else None)
+        encoded = json.dumps({"thought": "private", "tool_calls": [
+            {"tool": "read_file", "arguments": {"path": "hidden.txt"}}],
+            "answer": "The answer is user-facing.\nSecond line."})
+        cut = encoded.index("Second")
+        for chunk in ("```json\n" + encoded[:cut], encoded[cut:] + "\n```"):
+            streamer("answer", chunk)
+
+        self.assertEqual("".join(visible), "The answer is user-facing.\nSecond line.")
+        self.assertNotIn("private", "".join(visible))
+        self.assertNotIn("tool_calls", "".join(visible))
+
+    def test_gemini_stream_drops_parts_marked_as_internal_thought(self):
+        events = [
+            {"candidates": [{"content": {"parts": [
+                {"text": "private Gemini thought", "thought": True},
+                {"text": "The user-facing Gemini answer."},
+            ]}, "finishReason": "STOP"}]},
+        ]
+        stream = [("data: " + json.dumps(event) + "\n\n").encode() for event in events]
+        visible = []
+        text, finish = gemini_subagent._gemini_stream_parts(
+            stream, lambda channel, chunk: visible.append((channel, chunk)))
+
+        self.assertEqual(text, "The user-facing Gemini answer.")
+        self.assertEqual(finish, "STOP")
+        self.assertEqual(visible, [("answer", "The user-facing Gemini answer.")])
 
     def test_subagent_executes_only_tool_calls_present_in_its_response(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -681,8 +714,9 @@ class QuotaTests(unittest.TestCase):
             cwd=self.marker.parent, env={**os.environ, "GEMINI_API_KEY": "k"},
             capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr[-800:])
-        self.assertIn("quota", proc.stdout.lower())
-        self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["quota_exhausted"], True)
+        result = json.loads(output.read_text(encoding="utf-8"))
+        self.assertTrue(result["quota_exhausted"])
+        self.assertTrue(self.marker.is_file())
 
 
 class QuotaWorkflowTests(unittest.TestCase):
@@ -787,6 +821,7 @@ class _BazaarStub(BaseHTTPRequestHandler):
             "system": messages[0].get("content") if messages else "",
             "prompt": messages[-1].get("content") if messages else "",
             "messages": messages,
+            "keys": set(payload),
             "temperature": payload.get("temperature"),
             "max_tokens": payload.get("max_tokens"),
             "stream": payload.get("stream"),
@@ -828,7 +863,7 @@ class BazaarLinkFallbackTests(unittest.TestCase):
         threading.Thread(target=self.bazaar_server.serve_forever, daemon=True).start()
         self.addCleanup(self.bazaar_server.shutdown)
         self.addCleanup(self.bazaar_server.server_close)
-        self.bazaar_url = f"http://127.0.0.1:{self.bazaar_server.server_port}/v1/chat/completions"
+        self.bazaar_url = f"http://127.0.0.1:{self.bazaar_server.server_port}/api/v1/chat/completions"
 
         self.gemini = type("G", (_StubGemini,), {"calls": []})
         self.gemini_server = HTTPServer(("127.0.0.1", 0), self.gemini)
@@ -869,10 +904,10 @@ class BazaarLinkFallbackTests(unittest.TestCase):
                                      "instruction": "Answer the question completely."}]},
                          **kwargs)
 
-    def test_bazaarlink_is_first_and_uses_the_requested_openai_route(self):
+    def test_bazaarlink_uses_the_latest_curl_endpoint_headers_and_body(self):
         result = self._run(api_key="gemini-secret", groq_key="groq-secret")
         self.assertEqual(gemini_subagent.BAZAAR_LINK_ENDPOINT,
-                         "https://api.bazaarlink.ai/v1/chat/completions")
+                         "https://bazaarlink.ai/api/v1/chat/completions")
         self.assertEqual(gemini_subagent.BAZAAR_LINK_MODEL, "auto:free")
         self.assertEqual(result["providers"], ["bazaarlink"])
         self.assertEqual(result["results"][0]["text"], "BAZAAR ANSWER")
@@ -880,15 +915,30 @@ class BazaarLinkFallbackTests(unittest.TestCase):
         self.assertEqual(request["auth"], "Bearer bazaar-secret")
         self.assertEqual(request["content_type"], "application/json")
         self.assertEqual(request["model"], "auto:free")
-        self.assertEqual(request["path"], "/v1/chat/completions")
-        self.assertEqual(request["roles"], ["system", "user"])
-        self.assertIn("helper sub-agent", request["system"])
-        self.assertEqual(request["temperature"], 5)
-        self.assertEqual(request["max_tokens"], 8192)
-        self.assertEqual(request["stream"], False)
+        self.assertEqual(request["path"], "/api/v1/chat/completions")
+        self.assertEqual(request["keys"], {"model", "messages"})
+        self.assertEqual(request["roles"], ["user"])
+        self.assertEqual(request["temperature"], None)
+        self.assertEqual(request["max_tokens"], None)
+        self.assertIsNone(request["stream"])
         self.assertNotIn("bazaar-secret", json.dumps(request["messages"]))
         self.assertEqual(self.gemini.calls, [])
         self.assertEqual(self.groq.calls, [])
+
+    def test_streaming_http_400_retries_with_the_plain_curl_request(self):
+        self.bazaar.status_by_call = {0: 400}
+        chunks = []
+        text = gemini_subagent.call_bazaarlink(
+            "Answer briefly.", api_key="bazaar-secret", url=self.bazaar_url,
+            on_chunk=lambda channel, chunk: chunks.append((channel, chunk)))
+
+        self.assertEqual(text, "BAZAAR ANSWER")
+        self.assertEqual(len(self.bazaar.calls), 2)
+        self.assertEqual(self.bazaar.calls[0]["keys"], {"model", "messages", "stream"})
+        self.assertTrue(self.bazaar.calls[0]["stream"])
+        self.assertEqual(self.bazaar.calls[1]["keys"], {"model", "messages"})
+        self.assertIsNone(self.bazaar.calls[1]["stream"])
+        self.assertEqual(chunks, [("answer", "BAZAAR ANSWER")])
 
     def test_bazaarlink_agent_guidance_is_in_the_system_role(self):
         run_tool_agent({"kind": "agent", "instruction": "Review this map plan."}, "",
@@ -943,7 +993,7 @@ class BazaarLinkFallbackTests(unittest.TestCase):
         self.assertEqual(result["providers"], ["gemini"])
         self.assertEqual(result["results"][0]["text"], "Paris")
         self.assertEqual(len(self.bazaar.calls), 1)
-        self.assertEqual(self.bazaar.calls[0]["max_tokens"], 8192)
+        self.assertIsNone(self.bazaar.calls[0]["max_tokens"])
 
     def test_gemini_error_after_bazaar_falls_through_to_groq(self):
         self.bazaar.status = 503
@@ -975,7 +1025,7 @@ class BazaarLinkFallbackTests(unittest.TestCase):
         self.assertEqual(self.bazaar.calls[0]["auth"], "Bearer runtime-secret")
         self.assertNotIn("runtime-secret", json.dumps(self.bazaar.calls[0]["messages"]))
 
-    def test_cli_shows_the_bazaar_answer_in_logs_and_summary_without_leaking_secrets(self):
+    def test_cli_streams_only_the_secret_safe_answer_and_keeps_telemetry_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             request = root / "request.json"
@@ -997,11 +1047,170 @@ class BazaarLinkFallbackTests(unittest.TestCase):
             result = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(result["results"][0]["text"], "BAZAAR ANSWER")
             self.assertEqual(result["results"][0]["provider"], "bazaarlink")
-            visible = proc.stdout + proc.stderr + summary.read_text(encoding="utf-8")
-            self.assertIn("BAZAAR ANSWER", visible)
-            self.assertIn("Full returned text", visible)
-            self.assertIn("BazaarLink `auto:free`", visible)
-            self.assertNotIn("bazaar-secret", visible)
+            console = proc.stdout + proc.stderr
+            self.assertIn("Sub-agent: working.", console)
+            self.assertIn("BAZAAR ANSWER", console)
+            self.assertIn("Sub-agent step done.", console)
+            self.assertNotIn("[ai-log]", console)
+            self.assertNotIn("[bazaar", console)
+            self.assertNotIn("provider answered", console)
+            self.assertNotIn("BazaarLink `auto:free`", console)
+            self.assertIn("Full returned text", summary.read_text(encoding="utf-8"))
+            self.assertIn("BazaarLink `auto:free`", summary.read_text(encoding="utf-8"))
+            self.assertNotIn("bazaar-secret", console + summary.read_text(encoding="utf-8"))
+            activity = [json.loads(line) for line in
+                        (root / "dist" / "ai_activity.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertTrue(any(event.get("type") == "provider_attempt" for event in activity))
+
+
+class LiveSubagentConsoleTests(unittest.TestCase):
+    def test_answer_stream_is_live_colored_clean_and_secret_safe(self):
+        first_answer = "The answer is genuinely streaming to the console. "
+        release = threading.Event()
+        first_chunk_sent = threading.Event()
+
+        class StreamingHandler(BaseHTTPRequestHandler):
+            calls = []
+
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                payload = json.loads(self.rfile.read(length))
+                type(self).calls.append({"payload": payload,
+                                         "authorization": self.headers.get("Authorization")})
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+
+                def send(event):
+                    self.wfile.write(("data: " + json.dumps(event) + "\n\n").encode())
+                    self.wfile.flush()
+
+                send({"choices": [{"delta": {"reasoning_content": "private internal thought"}}]})
+                send({"choices": [{"delta": {"content": first_answer}}]})
+                first_chunk_sent.set()
+                release.wait(8)
+                send({"choices": [{"delta": {"content": "bazaar-secret-"}}]})
+                send({"choices": [{"delta": {"content": "value is hidden. The final explanation follows."}}]})
+                send({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+
+        server = HTTPServer(("127.0.0.1", 0), StreamingHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        bazaar_url = f"http://127.0.0.1:{server.server_port}/api/v1/chat/completions"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request = root / "request.json"
+            output = root / "results.json"
+            request.write_text(json.dumps({"tasks": [{"id": "live", "kind": "answer",
+                                                        "instruction": "Answer live."}]}),
+                               encoding="utf-8")
+            env = {**os.environ, "BAZAAR_LINK_API": "bazaar-secret-value",
+                   "PYTHONPATH": str(ROOT), "AI_COLOR": "1"}
+            env.pop("NO_COLOR", None)
+            env.pop("GEMINI_API_KEY", None)
+            env.pop("GROQ_API_KEY", None)
+            env.pop("GITHUB_STEP_SUMMARY", None)
+            proc = subprocess.Popen(
+                [sys.executable, str(ROOT / "tools" / "gemini_subagent.py"),
+                 "--request", str(request), "--output", str(output), "--stdout",
+                 "--bazaar-url", bazaar_url],
+                cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=env, bufsize=0)
+
+            captured = bytearray()
+
+            def read_until(needle: bytes, timeout: float) -> bool:
+                deadline = time.monotonic() + timeout
+                while needle not in captured and time.monotonic() < deadline:
+                    ready, _, _ = select.select([proc.stdout], [], [],
+                                                max(0.0, deadline - time.monotonic()))
+                    if not ready:
+                        break
+                    chunk = os.read(proc.stdout.fileno(), 4096)
+                    if not chunk:
+                        break
+                    captured.extend(chunk)
+                return needle in captured
+
+            try:
+                self.assertTrue(read_until(b"Sub-agent: working.", 3),
+                                "the brief progress state should be flushed immediately")
+                self.assertTrue(first_chunk_sent.wait(3), "the stub should start its SSE response")
+                self.assertTrue(read_until(b"The answer is", 3),
+                                "answer text should arrive before the provider finishes")
+                self.assertIsNone(proc.poll(), "the first answer text must stream while the response is open")
+            finally:
+                release.set()
+
+            remaining, stderr = proc.communicate(timeout=8)
+            captured.extend(remaining)
+            console = captured.decode("utf-8", "replace") + stderr.decode("utf-8", "replace")
+            plain_console = strip_ansi(console)
+            self.assertEqual(proc.returncode, 0, msg=console[-1000:])
+            self.assertIn("The answer is genuinely streaming to the console.", plain_console)
+            self.assertIn("[REDACTED]", plain_console)
+            self.assertIn("Sub-agent step done.", plain_console)
+            self.assertIn("\033[36m", console)
+            for forbidden in ("private internal thought", "reasoning_content", "choices",
+                              "provider_reset", "[ai-log]", "[bazaar", "provider answered",
+                              "bazaar-secret-value"):
+                self.assertNotIn(forbidden, plain_console)
+
+            result = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(result["results"][0]["text"],
+                             first_answer + "[REDACTED] is hidden. The final explanation follows.")
+            self.assertTrue(StreamingHandler.calls[0]["payload"]["stream"])
+            self.assertEqual(StreamingHandler.calls[0]["authorization"],
+                             "Bearer bazaar-secret-value")
+
+    def test_agent_answer_stream_discards_a_failed_provider_tail_before_fallback(self):
+        primary_answer = "The primary provider's answer began before it disconnected."
+        fallback_answer = "The fallback provider completed the clean final answer."
+        primary_json = json.dumps({"thought": "private primary reasoning",
+                                   "answer": primary_answer, "tool_calls": []})
+        fallback_json = json.dumps({"thought": "private fallback reasoning",
+                                    "answer": fallback_answer, "tool_calls": []})
+        visible = []
+
+        def fail_after_streaming_answer(prompt, *, on_chunk=None, **kwargs):
+            del prompt, kwargs
+            boundary = primary_json.index("disconnected") + len("disconnected")
+            on_chunk("answer", primary_json[:boundary])
+            raise gemini_subagent.BazaarLinkUnavailable("HTTP 503")
+
+        def stream_fallback_answer(prompt, *, on_chunk=None, **kwargs):
+            del prompt, kwargs
+            on_chunk("answer", fallback_json)
+            return fallback_json
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.dict(os.environ, {"BAZAAR_LINK_API": "bazaar-secret-value"}), \
+                patch.object(gemini_subagent, "call_bazaarlink",
+                             side_effect=fail_after_streaming_answer), \
+                patch.object(gemini_subagent, "call_gemini",
+                             side_effect=stream_fallback_answer):
+            result = run_tasks(
+                {"tasks": [{"kind": "agent", "instruction": "Review the map."}]},
+                api_key="gemini-secret-value", model="gemini-2.5-flash",
+                root=Path(tmp), bazaar_key="bazaar-secret-value", quiet_console=True,
+                on_text_chunk=lambda channel, text: visible.append((channel, text)))
+
+        answer_stream = "".join(text for channel, text in visible if channel == "answer")
+        self.assertIn(primary_answer[:20], answer_stream)
+        self.assertIn("\n" + fallback_answer, answer_stream)
+        self.assertNotIn("private primary reasoning", answer_stream)
+        self.assertNotIn("private fallback reasoning", answer_stream)
+        self.assertNotIn("bazaar-secret-value", answer_stream)
+        self.assertEqual(result["providers"], ["gemini"])
+        self.assertEqual(result["results"][0]["text"], fallback_answer)
 
 
 class GroqFallbackTests(unittest.TestCase):

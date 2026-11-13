@@ -170,13 +170,9 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_MODEL: llama-3.3-70b-versatile
         run: |
-          python tools/say.py tool "Cleaning the typed story prompt and theme with the text provider helper (BazaarLink auto:free → Gemini → Groq; spelling, grammar, a little more detail). It never says anything about the fix."
           python tools/gemini_topic.py \
             --output dist/refined_prompts.json \
             --github-output "$GITHUB_OUTPUT" --stdout || true
-          if [ ! -s dist/refined_prompts.json ]; then
-            python tools/say.py plan "No cleaned prompt was produced; the run uses the text exactly as typed."
-          fi
 
       - name: Set short timing — AI picks the exact ending
         env:
