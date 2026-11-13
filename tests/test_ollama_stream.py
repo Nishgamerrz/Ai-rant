@@ -21,7 +21,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from ai_activity import parse_live_records  # noqa: E402
 from ollama_stream import MAX_PREDICT_CEILING, next_token_budget  # noqa: E402
 
 
@@ -199,26 +198,23 @@ class LiveStreamingTests(unittest.TestCase):
         # structured telemetry stays off the human-readable prose stream.
         self.assertIn("\u001b[37m", stdout)
         self.assertIn("\u001b[36m", stdout)
-        self.assertNotIn("[ai-log]", stdout)
-        self.assertIn("model_response", " ".join(
-            event.get("type", "") for event in parse_live_records(stderr)))
+        self.assertNotIn("[ai-log]", stdout + stderr)
+        self.assertTrue(any(event.get("type") == "model_response" for event in activity))
+        # Structured progress remains available in JSONL without being mirrored
+        # into the Actions log alongside the live, human-readable stream.
+        artifact_progress = [event for event in activity if event.get("type") == "model_progress"]
+        self.assertEqual({event.get("channel") for event in artifact_progress}, {"thinking", "answer"})
+        thinking_previews = [event["preview"] for event in artifact_progress
+                             if event["channel"] == "thinking"]
+        answer_previews = [event["preview"] for event in artifact_progress
+                           if event["channel"] == "answer"]
+        self.assertIn("Thinking about the beats.", thinking_previews[-1])
+        self.assertIn("Maya found it.", answer_previews[-1])
         # No "reappearing" summary lines that reprint a truncated tail.
         self.assertNotIn("thinking\u2026", stdout)
         self.assertNotIn("writing\u2026", stdout)
         self.assertNotIn("reasoning preview", stdout)
         self.assertNotIn("\u2026", stdout)
-        live_records = parse_live_records(stderr)
-        progress = [event for event in live_records if event.get("type") == "model_progress"]
-        self.assertEqual({event.get("channel") for event in progress}, {"thinking", "answer"})
-        thinking_previews = [event["preview"] for event in progress
-                             if event["channel"] == "thinking"]
-        answer_previews = [event["preview"] for event in progress
-                           if event["channel"] == "answer"]
-        self.assertIn("Thinking about the beats.", thinking_previews[-1])
-        self.assertIn("Maya found it.", answer_previews[-1])
-        artifact_progress = [event for event in activity if event.get("type") == "model_progress"]
-        self.assertEqual({event.get("channel") for event in artifact_progress}, {"thinking", "answer"})
-        self.assertTrue(any(event.get("type") == "model_response" for event in activity))
 
 
 class RuntimeSpeedTests(unittest.TestCase):

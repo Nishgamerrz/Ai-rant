@@ -2,10 +2,11 @@
 """Write safe, structured AI activity records for the Roblox Short dashboard.
 
 The JSONL artifact keeps complete prompts, answers, sub-agent instructions and
-file edits. The Actions console gets only a small metadata/preview line so the
-live dashboard can filter it from runner commands, package installation and
-network chatter. Provider credentials and common token formats are redacted from
-both copies; raw provider HTTP request/response bodies are never accepted here.
+file edits. Console emission is optional: callers that need a live structured
+feed can request a compact metadata/preview line, while human-facing workflow
+steps should keep it disabled so it does not pollute the Actions log. Provider
+credentials and common token formats are redacted from both copies; raw provider
+HTTP request/response bodies are never accepted here.
 """
 from __future__ import annotations
 
@@ -158,13 +159,12 @@ def sanitize_data(value: Any) -> Any:
 def append_activity(event: dict[str, Any], *, path: str | Path | None = None,
                     emit: bool = True, persist: bool = True,
                     live_stream: TextIO | None = None) -> dict[str, Any]:
-    """Append a complete safe record; emit only a concise structured live line.
+    """Append a complete safe record and optionally emit a concise live line.
 
     Failures to write a diagnostic artifact must never stop video generation.
     The caller should pass a run-local path in tests or for a non-default root.
-    High-frequency stream telemetry can use ``live_stream=sys.stderr`` so its
-    structured records remain available in Actions logs without being inserted
-    into the model's human-readable stdout stream.
+    Note that stderr is also part of the visible Actions log: high-frequency
+    model progress should use ``emit=False`` when that log is meant for people.
     """
     record = _sanitize({
         "schema_version": 1,
