@@ -396,15 +396,15 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
         last_activity_channel = channel
         last_activity_emit = now
         preview = " ".join(accumulated.split())[-200:]
-        # Keep these [ai-log] events live for /api/github/logs?logs=1 and in
-        # the uploaded activity artifact, but off stdout so they never interrupt
-        # the human-readable thinking/answer stream.
+        # Keep structured progress in the uploaded activity artifact. The live
+        # thinking/answer text is already streamed below; do not inject JSON logs
+        # into the Actions console or the user's readable model output.
         append_activity({
             "type": "model_progress", "stage": "ollama",
             "activity_id": activity_id, "tag": f"[{label} AI]", "label": label,
             "provider": "ollama", "model": model_name, "status": "streaming",
             "channel": channel, "preview": preview, "characters": len(accumulated),
-        }, live_stream=sys.stderr)
+        }, path=Path("dist/ai_activity.jsonl"), emit=False)
 
     def hand_off_if_silent_timeout(exc: BaseException) -> None:
         """Turn an idle socket timeout into a hand-off only after the stall window."""
@@ -819,7 +819,7 @@ def main() -> None:
                              "provider": "ollama", "model": model,
                              "status": "failed",
                              "reason": "selected and configured fallback models produced no answer"},
-                            path=Path("dist/ai_activity.jsonl"), live_stream=sys.stderr)
+                            path=Path("dist/ai_activity.jsonl"), emit=False)
             raise SystemExit(1)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         print(paint(f"[{args.label}] streaming request failed: {type(exc).__name__}.",
@@ -828,7 +828,7 @@ def main() -> None:
                          "tag": f"[{args.label} AI]", "label": args.label,
                          "provider": "ollama", "model": model,
                          "status": "failed", "reason": f"network failure ({type(exc).__name__})"},
-                        path=Path("dist/ai_activity.jsonl"), live_stream=sys.stderr)
+                        path=Path("dist/ai_activity.jsonl"), emit=False)
         raise SystemExit(1) from exc
     if not result["response"].strip():
         print(paint(f"[{args.label}] the model returned an empty answer.", "error"),
@@ -837,7 +837,7 @@ def main() -> None:
                          "tag": f"[{args.label} AI]", "label": args.label,
                          "provider": "ollama", "model": model,
                          "status": "failed", "reason": "empty answer"},
-                        path=Path("dist/ai_activity.jsonl"), live_stream=sys.stderr)
+                        path=Path("dist/ai_activity.jsonl"), emit=False)
         raise SystemExit(1)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     result["model"] = request.get("model") if "fallback_model" not in result else result["fallback_model"]
@@ -850,7 +850,7 @@ def main() -> None:
         "prompt_messages": request.get("messages", []),
         "thinking": result.get("thinking", ""),
         "output": result.get("response", ""),
-    }, path=Path("dist/ai_activity.jsonl"), live_stream=sys.stderr)
+    }, path=Path("dist/ai_activity.jsonl"), emit=False)
     args.output.write_text(json.dumps(result, ensure_ascii=False) + "\n", encoding="utf-8")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     first_word = result.get("first_char_seconds")
