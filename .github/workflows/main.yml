@@ -153,7 +153,7 @@ jobs:
           python tools/say.py tool "Cleaning the typed story prompt and theme with the text provider helper (BazaarLink auto:free → Gemini → Groq; spelling, grammar, a little more detail). It never says anything about the fix."
           python tools/gemini_topic.py \
             --output dist/refined_prompts.json \
-            --github-output "$GITHUB_OUTPUT" || true
+            --github-output "$GITHUB_OUTPUT" --stdout || true
           if [ ! -s dist/refined_prompts.json ]; then
             python tools/say.py plan "No cleaned prompt was produced; the run uses the text exactly as typed."
           fi
@@ -821,7 +821,7 @@ jobs:
               GEMINI_EDIT_DONE=1
               rm -f dist/narration_gemini.txt
               python tools/gemini_subagent.py --request narration_edit_tasks.json \
-                --output narration_edit_results.json || true
+                --output narration_edit_results.json --stdout || true
               if python - <<'PYV'
           import os
           import re

@@ -34,7 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from console_style import paint  # noqa: E402
-from ai_activity import append_activity, sanitize_data  # noqa: E402
+from ai_activity import append_activity, redact_secrets, sanitize_data  # noqa: E402
 
 from gemini_subagent import (  # noqa: E402
     API_KEY_ENV,
@@ -241,10 +241,15 @@ def refine(text: str, *, api_key: str, model: str = DEFAULT_MODEL,
         return {"ok": False, "skipped": False, "text": raw, "reason": str(exc)[:300],
                 "provider_attempts": attempts,
                 "seconds": round(time.monotonic() - started, 2)}
-    provider_model = next((attempt.get("model") for attempt in reversed(attempts)
-                           if attempt.get("status") == "answered"), "")
+    answered = next((attempt for attempt in reversed(attempts)
+                     if str(attempt.get("status") or "").lower() == "answered"), {})
+    # Provider-attempt telemetry is authoritative for the visible label. This
+    # prevents a stale/incorrect compatibility return value from calling a
+    # BazaarLink completion a Gemini answer (or vice versa).
+    actual_provider = str(answered.get("provider") or provider or "").strip().lower()
+    provider_model = str(answered.get("model") or "").strip()
     cleaned, reason = sanitize(reply, raw)
-    common = {"provider": provider, "provider_model": provider_model,
+    common = {"provider": actual_provider, "provider_model": provider_model,
               "provider_attempts": attempts,
               "seconds": round(time.monotonic() - started, 2)}
     if cleaned is None:
@@ -278,7 +283,8 @@ def main() -> int:
     parser.add_argument("--model", default=os.environ.get(DEFAULT_MODEL_VAR) or DEFAULT_MODEL)
     parser.add_argument("--output", type=Path, help="write the cleaned prompts here as JSON")
     parser.add_argument("--github-output", help="path of $GITHUB_OUTPUT")
-    parser.add_argument("--stdout", action="store_true", help="print the cleaned story prompt")
+    parser.add_argument("--stdout", action="store_true",
+                        help="print the actual provider outcome and complete topic response")
     parser.add_argument("--url", help="override the Gemini endpoint (tests)")
     parser.add_argument("--timeout", type=float, default=60.0)
     args = parser.parse_args()
@@ -292,18 +298,46 @@ def main() -> int:
     activity_path = (args.output.parent if args.output else Path("dist")) / "ai_activity.jsonl"
 
     def topic_tag(provider: str = "") -> str:
+        provider = str(provider or "").strip().lower()
         if not provider:
             return "[topic cleanup]"
         label = {"bazaarlink": "bazaar", "gemini": "gemini", "groq": "groq"}.get(
-            str(provider).lower(), str(provider).lower())
+            provider, provider)
         return f"[{label} topic]"
+
+    def provider_label(provider: str, model: str = "") -> str:
+        name = {"bazaarlink": "BazaarLink", "gemini": "Gemini", "groq": "Groq"}.get(
+            str(provider or "").strip().lower(), str(provider or "Provider unknown"))
+        return f"{name} {model}".strip()
 
     def attempt_logger(label: str):
         def log_attempt(attempt: dict) -> None:
-            provider = str(attempt.get("provider") or "")
+            provider = str(attempt.get("provider") or "").strip().lower()
+            tag = topic_tag(provider)
             append_activity({"type": "provider_attempt", "stage": "topic",
-                             "label": label, "tag": topic_tag(provider), **attempt},
+                             "label": label, "tag": tag, **attempt},
                             path=activity_path)
+            status = str(attempt.get("status") or "unknown").lower()
+            model_name = provider_label(provider, str(attempt.get("model") or ""))
+            reason = str(attempt.get("reason") or "").strip()
+            fallback = str(attempt.get("fallback_to") or "").strip()
+            fallback_name = (f"Groq model {fallback}"
+                             if provider == "groq" and fallback.lower() not in {
+                                 "", "bazaarlink", "gemini", "groq"}
+                             else provider_label(fallback))
+            if status == "answered":
+                print(paint(f"{tag} provider answered {label} with {model_name} "
+                            f"in {attempt.get('seconds', 0)}s.", "tool"), flush=True)
+            elif status in {"fallback", "failed"}:
+                detail = f" ({reason})" if reason else ""
+                next_step = (f"; falling back to {fallback_name}"
+                             if fallback else "; no provider fallback remains")
+                print(paint(f"{tag} could not answer {label}{detail}{next_step}.",
+                            "warning" if fallback else "error"), flush=True)
+            elif status == "skipped":
+                next_step = (f"; next: {provider_label(fallback)}" if fallback else "")
+                print(paint(f"{tag} skipped for {label} ({reason or 'not configured'}){next_step}.",
+                            "notice"), flush=True)
         return log_attempt
 
     story = refine(story_raw, api_key=api_key, bazaar_key=bazaar_key,
@@ -324,16 +358,23 @@ def main() -> int:
                                     ("world theme", "theme", theme, theme_raw)):
         if not raw.strip():
             continue
-        provider = entry.get("provider", "")
+        attempts = entry.get("provider_attempts", [])
+        answered = next((attempt for attempt in reversed(attempts)
+                         if str(attempt.get("status") or "").lower() == "answered"), {})
+        # Use the last provider whose request actually answered, not a planned
+        # provider or the model name, to select the visible topic label.
+        provider = str(answered.get("provider") or entry.get("provider") or "").strip().lower()
+        provider_model = str(answered.get("model") or entry.get("provider_model") or "").strip()
+        tag = topic_tag(provider)
         status = "cleaned" if entry.get("ok") else (
             "skipped" if entry.get("skipped") else "kept_input")
         candidate = entry.get("candidate")
         append_activity({
-            "type": "topic_cleanup", "stage": "topic", "tag": topic_tag(provider),
+            "type": "topic_cleanup", "stage": "topic", "tag": tag,
             "label": label, "kind": kind, "status": status,
-            "provider": provider, "model": entry.get("provider_model") or "",
+            "provider": provider, "model": provider_model,
             "seconds": entry.get("seconds"),
-            "provider_attempts": entry.get("provider_attempts", []),
+            "provider_attempts": attempts,
             "input": raw,
             "prompt": build_prompt(raw, kind) if provider else "",
             "output": candidate if candidate is not None else entry.get("text", raw),
@@ -341,12 +382,20 @@ def main() -> int:
             "reason": entry.get("reason", ""),
         }, path=activity_path)
         if entry.get("ok"):
-            print(paint(f"{topic_tag(provider)} cleaned the {label} with "
-                        f"{entry.get('provider_model') or provider}.", "tool"), flush=True)
+            print(paint(f"{tag} cleaned the {label} with "
+                        f"{provider_label(provider, provider_model)} "
+                        f"in {entry.get('seconds', 0)}s.", "tool"), flush=True)
+            if args.stdout:
+                authored_text = redact_secrets(entry.get("text", ""))
+                print(paint(f"{tag} complete AI-written {label}:\n{authored_text}",
+                            "answer"), flush=True)
         else:
-            print(paint(f"{topic_tag(provider)} kept the {label} as typed "
+            print(paint(f"{tag} kept the {label} as typed "
                         f"({entry.get('reason', 'no provider result')}).",
                         "notice" if entry.get("skipped") else "warning"), flush=True)
+            if args.stdout and candidate:
+                print(paint(f"{tag} returned text that was rejected by the local check:\n"
+                            f"{redact_secrets(candidate)}", "warning"), flush=True)
 
     values = {"story_topic": story["text"], "world_theme": theme["text"]}
     _write_outputs(args.github_output, values)
@@ -355,8 +404,6 @@ def main() -> int:
         record = sanitize_data({"model": args.model, "story": story, "theme": theme})
         args.output.write_text(json.dumps(record, ensure_ascii=False, indent=2),
                                encoding="utf-8")
-    if args.stdout:
-        print(story["text"])
     return 0
 
 

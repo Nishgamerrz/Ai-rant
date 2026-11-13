@@ -96,12 +96,20 @@ function providerName(provider?: string, model?: string) {
   return model ? `${name} · ${model}` : name;
 }
 
+function fallbackName(attempt: Pick<ActivityEvent, "provider" | "fallback_to">) {
+  const target = String(attempt.fallback_to || "");
+  if (!target) return "";
+  if (["bazaarlink", "gemini", "groq"].includes(target.toLowerCase())) return providerName(target);
+  return String(attempt.provider || "").toLowerCase() === "groq"
+    ? providerName("groq", target) : target;
+}
+
 function eventTitle(event: ActivityEvent) {
   const type = String(event.type || "AI activity");
   const label = event.label || event.task_id || event.id || event.stage || "AI";
   if (type === "provider_attempt") {
     const state = event.status === "answered" ? "answered"
-      : event.status === "fallback" ? `failed${event.fallback_to ? ` · falling back to ${event.fallback_to}` : ""}`
+      : event.status === "fallback" ? `failed${event.fallback_to ? ` · falling back to ${fallbackName(event)}` : " · no fallback available"}`
       : event.status === "skipped" ? "skipped" : "failed";
     return `${providerName(event.provider, event.model)} ${state}`;
   }
@@ -245,7 +253,7 @@ export function AiActivityTimeline({ runId, liveLog, runStatus }: {
                     {(event.preview || event.reason || event.error) && (
                       <div className={`mt-1.5 text-xs leading-relaxed break-words ${event.reason || event.error ? "text-amber-200" : "text-zinc-400"}`}>
                         {event.preview || event.reason || event.error}
-                        {event.fallback_to && <span className="text-amber-300"> · fallback: {event.fallback_to}</span>}
+                        {event.fallback_to && <span className="text-amber-300"> · fallback: {fallbackName(event)}</span>}
                         {event.characters !== undefined && <span className="ml-2 text-[10px] text-zinc-600">{event.characters.toLocaleString()} chars</span>}
                       </div>
                     )}
@@ -280,7 +288,7 @@ export function AiActivityTimeline({ runId, liveLog, runStatus }: {
                       <TextSection title="Provider attempts">
                         {attempts.map((attempt, attemptIndex) => {
                           const suffix = attempt.reason ? ` — ${attempt.reason}` : "";
-                          const fallback = attempt.fallback_to ? ` → ${attempt.fallback_to}` : "";
+                          const fallback = attempt.fallback_to ? ` → ${fallbackName(attempt)}` : "";
                           return `${attemptIndex + 1}. ${providerName(attempt.provider, attempt.model)}: ${attempt.status || "unknown"}${fallback}${suffix}`;
                         }).join("\n")}
                       </TextSection>
