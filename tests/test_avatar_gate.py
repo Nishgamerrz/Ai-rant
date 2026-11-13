@@ -22,6 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
+from narration_rate import rate_for_target  # noqa: E402
 from validate_short import avatar_asset_type  # noqa: E402
 
 
@@ -93,36 +94,42 @@ class AvatarGateTests(unittest.TestCase):
 
 
 class NarrationFillTests(unittest.TestCase):
-    """A short voiceover is stretched by speaking slower - not by asking for +0%.
+    """Fill-rate corrections must include the rate used for the measured take.
 
-    Run #84: 74.09 s of narration in a 128 s video. The fill pass computed
-    `+0%` and changed nothing, so 54 seconds of the finished short were silent.
+    Run #124: 112.27 s at +4% was retried at -15%, producing 137.38 s for a
+    132 s video. The old calculation treated the first take as normal speed.
     """
 
     WORKFLOW = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
 
     @staticmethod
-    def fill_rate(seconds: float, target: float) -> int:
-        percent = round((max(0.1, seconds) / target - 1) * 100)
-        return max(-20, min(4, percent))
+    def fill_rate(seconds: float, target: float, current_rate: str = "+4%") -> int:
+        return rate_for_target(seconds, target, current_rate)
 
-    def test_the_formula_runs_the_right_way_round(self):
-        self.assertIn("seconds / target - 1", self.WORKFLOW)
-        self.assertNotIn("min(seconds, target)) / max(seconds", self.WORKFLOW)
+    def test_the_workflow_uses_the_measured_rate_in_its_correction(self):
+        self.assertIn("python tools/narration_rate.py", self.WORKFLOW)
+        self.assertIn('"$NARRATION_SECONDS" "$DURATION_SECONDS" --current-rate="$RATE"', self.WORKFLOW)
+        self.assertNotIn("seconds / target - 1", self.WORKFLOW)
 
-    def test_a_short_take_slows_down(self):
-        self.assertEqual(self.fill_rate(74.09, 128), -20)
-        self.assertEqual(self.fill_rate(120, 128), -6)
-        self.assertLess(self.fill_rate(74.09, 128), 0)
+    def test_run_124_short_take_does_not_get_over_slowed(self):
+        self.assertEqual(self.fill_rate(112.27, 132, "+4%"), -12)
 
-    def test_a_long_take_speeds_up_a_little(self):
-        self.assertGreater(self.fill_rate(140, 128), 0)
-        self.assertLessEqual(self.fill_rate(140, 128), 4)
+    def test_a_second_measurement_accounts_for_the_rate_of_the_first_retry(self):
+        self.assertEqual(self.fill_rate(137.38, 132, "-15%"), -12)
+
+    def test_a_short_take_slows_down_and_respects_the_cap(self):
+        self.assertEqual(self.fill_rate(74.09, 128, "+4%"), -20)
+        self.assertEqual(self.fill_rate(120, 128, "+4%"), -2)
+        self.assertLess(self.fill_rate(74.09, 128, "+4%"), 0)
+
+    def test_a_long_take_speeds_up_only_to_the_lively_rate_cap(self):
+        self.assertEqual(self.fill_rate(140, 128, "+4%"), 4)
 
     def test_the_cap_keeps_it_a_story_short(self):
-        self.assertEqual(self.fill_rate(10, 180), -20)
+        self.assertEqual(self.fill_rate(10, 180, "+4%"), -20)
 
-    def test_the_slower_take_is_only_kept_if_it_fits_better(self):
+    def test_an_overlong_fill_candidate_is_never_selected(self):
+        self.assertIn("$FILLED <= $maximum", self.WORKFLOW)
         self.assertIn("abs($FILLED - $DURATION_SECONDS) < abs($NARRATION_SECONDS - $DURATION_SECONDS)",
                       self.WORKFLOW)
         self.assertIn("the first take stands", self.WORKFLOW)
