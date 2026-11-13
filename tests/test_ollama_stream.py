@@ -21,6 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
+from ai_activity import parse_live_records  # noqa: E402
 from ollama_stream import MAX_PREDICT_CEILING, next_token_budget  # noqa: E402
 
 
@@ -164,6 +165,7 @@ class LiveStreamingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             request_path = Path(tmp) / "request.json"
             output_path = Path(tmp) / "response.json"
+            activity_path = Path(tmp) / "dist" / "ai_activity.jsonl"
             request_path.write_text(json.dumps({
                 "model": "qwen3:8b",
                 "messages": [{"role": "user", "content": "hi"}],
@@ -172,15 +174,19 @@ class LiveStreamingTests(unittest.TestCase):
                 "options": {"num_predict": 4000},
             }), encoding="utf-8")
             result = subprocess.run(
-                [sys.executable, "tools/ollama_stream.py",
+                [sys.executable, str(ROOT / "tools" / "ollama_stream.py"),
                  "--request", str(request_path), "--output", str(output_path),
                  "--label", "world plan", "--timeout", "30",
                  "--fallback-model", "qwen3:4b",
                  "--url", f"http://127.0.0.1:{server.server_port}/api/chat"],
-                cwd=ROOT, capture_output=True, text=True,
+                cwd=tmp, capture_output=True, text=True,
+                env={**os.environ, "AI_COLOR": "1", "PYTHONUNBUFFERED": "1",
+                     "GITHUB_ACTIONS": "true", "CI": "true"},
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr[-2000:])
             stdout = result.stdout
+            stderr = result.stderr
+            activity = [json.loads(line) for line in activity_path.read_text(encoding="utf-8").splitlines()]
 
         # The reasoning and the answer arrive verbatim, in order, joined together.
         # The reasoning is printed inside its frame, so the body line carries the
@@ -189,16 +195,19 @@ class LiveStreamingTests(unittest.TestCase):
         self.assertIn("\u2502 Thinking about the beats.", stdout)
         self.assertIn("\u2514", stdout)
         self.assertIn('[world plan] answer \u25b8 {"narration":"Maya found it."}', stdout)
+        # The actual Actions non-TTY path gets basic ANSI colors, while all
+        # structured telemetry stays off the human-readable prose stream.
+        self.assertIn("\u001b[37m", stdout)
+        self.assertIn("\u001b[36m", stdout)
+        self.assertNotIn("[ai-log]", stdout)
+        self.assertIn("model_response", " ".join(
+            event.get("type", "") for event in parse_live_records(stderr)))
         # No "reappearing" summary lines that reprint a truncated tail.
         self.assertNotIn("thinking\u2026", stdout)
         self.assertNotIn("writing\u2026", stdout)
         self.assertNotIn("reasoning preview", stdout)
         self.assertNotIn("\u2026", stdout)
-        live_records = []
-        for line in stdout.splitlines():
-            marker = "[ai-log] "
-            if marker in line:
-                live_records.append(json.loads(line.split(marker, 1)[1]))
+        live_records = parse_live_records(stderr)
         progress = [event for event in live_records if event.get("type") == "model_progress"]
         self.assertEqual({event.get("channel") for event in progress}, {"thinking", "answer"})
         thinking_previews = [event["preview"] for event in progress
@@ -207,6 +216,9 @@ class LiveStreamingTests(unittest.TestCase):
                            if event["channel"] == "answer"]
         self.assertIn("Thinking about the beats.", thinking_previews[-1])
         self.assertIn("Maya found it.", answer_previews[-1])
+        artifact_progress = [event for event in activity if event.get("type") == "model_progress"]
+        self.assertEqual({event.get("channel") for event in artifact_progress}, {"thinking", "answer"})
+        self.assertTrue(any(event.get("type") == "model_response" for event in activity))
 
 
 class RuntimeSpeedTests(unittest.TestCase):
@@ -826,9 +838,13 @@ class ColourTests(unittest.TestCase):
         self.assertIn("\x1b[36m", "".join(recorder.writes))
         self.assertNotIn("38;5;", "".join(recorder.writes))
 
-    def test_the_job_turns_colour_on(self):
+    def test_the_job_turns_colour_on_and_emits_a_real_actions_probe(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
         self.assertIn("AI_COLOR: '1'", workflow)
+        self.assertIn("Verify ANSI colours in the Actions console", workflow)
+        self.assertIn("GITHUB_ACTIONS", workflow)
+        self.assertIn("CODES[kind]", workflow)
+        self.assertIn("sys.stdout.isatty()", workflow)
 
     def test_gemini_replies_are_coloured_too(self):
         helper = (ROOT / "tools" / "gemini_subagent.py").read_text(encoding="utf-8")

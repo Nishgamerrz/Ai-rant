@@ -136,6 +136,25 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Verify ANSI colours in the Actions console
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          sys.path.insert(0, 'tools')
+          from console_style import CODES, RESET, ansi
+
+          if os.environ.get('GITHUB_ACTIONS') != 'true':
+              raise SystemExit('this probe must run in GitHub Actions')
+          if os.environ.get('AI_COLOR') != '1':
+              raise SystemExit('AI_COLOR=1 is required for the non-TTY Actions log')
+          for kind in ('thinking', 'answer', 'success', 'error'):
+              if ansi(kind) != CODES[kind]:
+                  raise SystemExit(f'ANSI colour disabled for {kind}; check NO_COLOR/AI_COLOR')
+              print(f'{ansi(kind)}[ANSI color probe] {kind} ({"TTY" if sys.stdout.isatty() else "non-TTY"})'
+                    f' is emitted by the same console palette.{RESET}', flush=True)
+          PY
+
       - name: Fix the spelling in the typed prompt
         id: refine
         continue-on-error: true
@@ -144,6 +163,7 @@ jobs:
           RAW_STORY_TOPIC: ${{ inputs.story_topic }}
           RAW_WORLD_THEME: ${{ inputs.world_theme }}
           BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}
+          BAZAARLINK_API_KEY: ${{ secrets.BAZAAR_LINK_API }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           # Text provider order: BazaarLink auto:free, Gemini, then Groq.
@@ -667,6 +687,7 @@ jobs:
           STORY_TOPIC: ${{ steps.refine.outputs.story_topic || inputs.story_topic }}
           VOICE_STYLE: ${{ inputs.voice_style || 'thin_male' }}
           BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}
+          BAZAARLINK_API_KEY: ${{ secrets.BAZAAR_LINK_API }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           # Text provider order: BazaarLink auto:free, Gemini, then Groq.
@@ -891,6 +912,7 @@ jobs:
           OLLAMA_THINKING: ${{ env.OLLAMA_THINKING }}
           WORLD_THEME: ${{ steps.refine.outputs.world_theme || inputs.world_theme }}
           BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}
+          BAZAARLINK_API_KEY: ${{ secrets.BAZAAR_LINK_API }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           # Text provider order: BazaarLink auto:free, Gemini, then Groq.
@@ -936,6 +958,8 @@ jobs:
           SCENE_BLOCK=$(cat scene_prompt.txt)
           export SCENE_BLOCK
           python tools/say.py plan "Scene mode: ${WORLD_MODE} $(printf '%s' "$SCENE_JSON" | jq -r '.reason')"
+          # This heredoc must stay unquoted so workflow variables expand. Avoid raw backticks:
+          # Bash would execute them as command substitutions and corrupt the prompt.
           cat > map_prompt.txt <<PROMPT
           MANDATORY FIRST ACTION — MANUALLY AUTHOR THE SUB-AGENT TOOL CALLS YOURSELF: In your FIRST JSON response to this map-planning request, write the required calls as real entries in "subagent_tasks": one with topic "map", "cameras", or "faces" to review/design the map and camera storyboard, AND one with topic "models" for the hardest anchors. These must be your own calls in the JSON you return now; the workflow will not create, append, repair, or substitute any calls for you. A models-only, narration-only, later-round, or workflow-generated task does not satisfy this requirement. If either call is missing, the response is invalid and the map step stops instead of pretending delegation happened. Do not finalize the plan until the sub-agent has returned and you have accepted/declined its work.
           The web is NOT searched for you by default: nothing is scraped unless you ask. If a real-world fact would genuinely make this story better (a real place, a real tradition, a real object), return search_queries and the workflow runs those searches and sends you the facts. If you do not need any, return "search_queries":[] and no search happens. Do not repeat a query you already asked. If you notice you are repeating yourself or re-planning the same thing, say so briefly and return the best complete plan you have.
@@ -947,7 +971,7 @@ jobs:
           User's visual-theme cue: "${WORLD_THEME:-AUTO FROM STORY}"
           If the cue is AUTO FROM STORY, invent a distinctive, coherent theme from the story/topic. Otherwise, treat the user's cue as a required design constraint: preserve its meaning in the world theme, architecture, landmarks, palette, materials, props, lighting, and atmosphere. For example, a daylight cue means a clearly bright, naturally sunlit daytime world; do not turn it into a night/neon scene. Never replace a supplied theme with a different story-derived theme or generic city unless it genuinely fits the user's cue.
           REFERENCE VIDEO LOOK (style only; invent a new story/world and never copy characters): portrait 9:16 Roblox-like cinematic storytelling; textured storybook buildings and streets, short angle changes, prop cutaways, expressive characters, and cozy practical lights. The supplied clip contrasts cool blue night outdoors with warm lantern/window pools, snowy ground, and warm interiors; echo that cool/warm contrast and use snow only when it fits the story/theme.
-          AUTOMATIC LIGHTING PLAN (required): no user lighting controls are supplied. YOU choose the global `time_of_day` from dawn, day, sunset, or night to fit the narration, theme, and emotional arc. Use story-time cues when present; otherwise pick one coherent, readable look suited to the setting and mood (night is appropriate for sleep, moonlight, snow-at-night, or after-dark stories; warm practical lamps must keep faces readable). You also author optional `camera_shots[].time_of_day` overrides at meaningful story transitions only; each override holds until the next, unmarked shots inherit the previous/global hour. Use 0–3 overrides unless the plot clearly needs more. Keep ordinary scenes at one consistent hour, avoid decorative time changes, and align smooth blends or crisp snap cuts to the camera transition. Return the required top-level global hour and any per-shot overrides in your JSON.
+          AUTOMATIC LIGHTING PLAN (required): no user lighting controls are supplied. YOU choose the global "time_of_day" from dawn, day, sunset, or night to fit the narration, theme, and emotional arc. Use story-time cues when present; otherwise pick one coherent, readable look suited to the setting and mood (night is appropriate for sleep, moonlight, snow-at-night, or after-dark stories; warm practical lamps must keep faces readable). You also author optional "camera_shots[].time_of_day" overrides at meaningful story transitions only; each override holds until the next, unmarked shots inherit the previous/global hour. Use 0–3 overrides unless the plot clearly needs more. Keep ordinary scenes at one consistent hour, avoid decorative time changes, and align smooth blends or crisp snap cuts to the camera transition. Return the required top-level global hour and any per-shot overrides in your JSON.
           Story usernames in order (first is lead): ${CAST_NAMES:-none supplied}. The Studio experience loads public R15 avatars at runtime without visible username labels or overlays. Add an avatar-body visual effect (such as a number, scar, tattoo, badge, or symbol) only when the user's story/topic explicitly requests that effect; otherwise add none.
           The ONLY usernames that exist are: ${CAST_NAMES:-none supplied}. Use those exact strings in character_placements, camera_shots[].focus_username and face_expressions[].username. "LeadName", "FriendName" and "NoobName" below are placeholders for the shape of the JSON only -- never output a placeholder, and never invent a username.
           Put the lead at the center of the action. Place every additional username in a distinct nearby, camera-visible position, and plan at least one shot that includes each named character.

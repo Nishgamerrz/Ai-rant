@@ -39,7 +39,7 @@ WORKFLOW = ROOT / ".github" / "workflows" / "main.yml"
 _MODULE_MARKER_DIR = tempfile.mkdtemp(prefix="quota-marker-")
 os.environ["GEMINI_QUOTA_MARKER"] = str(Path(_MODULE_MARKER_DIR) / "gemini_quota_exhausted")
 # Tests always use local stubs; never let a developer's shell secret trigger a real call.
-for _credential in ("BAZAAR_LINK_API", "GEMINI_API_KEY", "GROQ_API_KEY"):
+for _credential in ("BAZAAR_LINK_API", "BAZAARLINK_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY"):
     os.environ.pop(_credential, None)
 
 
@@ -106,6 +106,21 @@ class RequestTests(unittest.TestCase):
         self.assertIn("never invent or inject", prompt)
         self.assertIn("references/face.jpg", prompt)
 
+    def test_agent_tool_instructions_are_a_system_message(self):
+        task = {"kind": "agent", "instruction": "Review this plan"}
+        answer = json.dumps({"answer": "Reviewed.", "tool_calls": []})
+        with patch("gemini_subagent.call_any", return_value=(answer, "bazaarlink")) as mocked:
+            run_tool_agent(task, "", model="m", api_key="", groq_key="",
+                           groq_model_name="", root=Path("."), bazaar_key="key")
+
+        user_prompt = mocked.call_args.args[0]
+        system_prompt = mocked.call_args.kwargs["system_prompt"]
+        self.assertIn("AVAILABLE TOOLS", system_prompt)
+        self.assertIn("YOU must author its call", system_prompt)
+        self.assertIn("After tool results arrive", system_prompt)
+        self.assertIn("Task:\nReview this plan", user_prompt)
+        self.assertNotIn("AVAILABLE TOOLS", user_prompt)
+
     def test_agent_json_parser_does_not_fabricate_missing_calls(self):
         parsed = parse_agent_turn('```json\\n{"answer":"ok","tool_calls":[{"tool":"inspect_image","path":"face.jpg"}]}\\n```')
         self.assertEqual(parsed["tool_calls"], [{"tool": "inspect_image", "path": "face.jpg"}])
@@ -147,7 +162,10 @@ class RequestTests(unittest.TestCase):
                      "input": "references/face.jpg"}, "", model="gemini-2.5-flash", api_key="key",
                     groq_key="key", groq_model_name="", root=root, timeout=1)
             self.assertEqual(mocked.call_count, 3)
-            self.assertIn("MANDATORY PROVIDED-IMAGE CHECK", mocked.call_args_list[0].args[0])
+            self.assertIn("MANDATORY PROVIDED-IMAGE CHECK",
+                          mocked.call_args_list[0].kwargs["system_prompt"])
+            self.assertIn("references/face.jpg",
+                          mocked.call_args_list[0].kwargs["system_prompt"])
             self.assertIn("rejected", mocked.call_args_list[1].args[0])
             self.assertEqual(execute.call_count, 1)
             self.assertEqual(execute.call_args.args[0], "inspect_image")
@@ -759,11 +777,17 @@ class _BazaarStub(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         payload = json.loads(self.rfile.read(length))
         index = len(type(self).calls)
+        messages = payload.get("messages", [])
         type(self).calls.append({
             "auth": self.headers.get("Authorization"),
+            "content_type": self.headers.get("Content-Type"),
             "path": self.path,
             "model": payload.get("model"),
-            "prompt": payload.get("messages", [{}])[0].get("content"),
+            "roles": [message.get("role") for message in messages],
+            "system": messages[0].get("content") if messages else "",
+            "prompt": messages[-1].get("content") if messages else "",
+            "messages": messages,
+            "temperature": payload.get("temperature"),
             "max_tokens": payload.get("max_tokens"),
             "stream": payload.get("stream"),
         })
@@ -852,12 +876,32 @@ class BazaarLinkFallbackTests(unittest.TestCase):
         self.assertEqual(gemini_subagent.BAZAAR_LINK_MODEL, "auto:free")
         self.assertEqual(result["providers"], ["bazaarlink"])
         self.assertEqual(result["results"][0]["text"], "BAZAAR ANSWER")
-        self.assertEqual(self.bazaar.calls[0]["auth"], "Bearer bazaar-secret")
-        self.assertEqual(self.bazaar.calls[0]["model"], "auto:free")
-        self.assertEqual(self.bazaar.calls[0]["path"], "/v1/chat/completions")
-        self.assertEqual(self.bazaar.calls[0]["stream"], False)
+        request = self.bazaar.calls[0]
+        self.assertEqual(request["auth"], "Bearer bazaar-secret")
+        self.assertEqual(request["content_type"], "application/json")
+        self.assertEqual(request["model"], "auto:free")
+        self.assertEqual(request["path"], "/v1/chat/completions")
+        self.assertEqual(request["roles"], ["system", "user"])
+        self.assertIn("helper sub-agent", request["system"])
+        self.assertEqual(request["temperature"], 5)
+        self.assertEqual(request["max_tokens"], 8192)
+        self.assertEqual(request["stream"], False)
+        self.assertNotIn("bazaar-secret", json.dumps(request["messages"]))
         self.assertEqual(self.gemini.calls, [])
         self.assertEqual(self.groq.calls, [])
+
+    def test_bazaarlink_agent_guidance_is_in_the_system_role(self):
+        run_tool_agent({"kind": "agent", "instruction": "Review this map plan."}, "",
+                       model="m", api_key="", groq_key="", groq_model_name="",
+                       root=Path("."), bazaar_key="bazaar-secret",
+                       bazaar_url=self.bazaar_url, timeout=2)
+        request = self.bazaar.calls[0]
+        self.assertEqual(request["roles"], ["system", "user"])
+        self.assertIn("AVAILABLE TOOLS", request["system"])
+        self.assertIn("YOU must author its call", request["system"])
+        self.assertIn("After tool results arrive", request["system"])
+        self.assertIn("Review this map plan", request["prompt"])
+        self.assertNotIn("AVAILABLE TOOLS", request["prompt"])
 
     def test_legacy_groq_preference_cannot_change_the_provider_order(self):
         text, provider = gemini_subagent.call_any(
@@ -919,6 +963,17 @@ class BazaarLinkFallbackTests(unittest.TestCase):
         self.assertEqual(result["providers"], ["bazaarlink"])
         self.assertEqual(self.bazaar.calls[0]["auth"], "Bearer environment-secret")
         self.assertNotIn("environment-secret", self.bazaar.calls[0]["path"])
+
+    def test_request_key_alias_is_read_without_exposing_it_in_the_request_body(self):
+        with patch.dict(os.environ, {"BAZAAR_LINK_API": "",
+                                     "BAZAARLINK_API_KEY": "runtime-secret",
+                                     "GROQ_API_KEY": ""}):
+            result = run_tasks({"tasks": [{"kind": "answer", "instruction": "hi"}]},
+                               api_key="", model="m", root=Path("."),
+                               bazaar_url=self.bazaar_url)
+        self.assertEqual(result["providers"], ["bazaarlink"])
+        self.assertEqual(self.bazaar.calls[0]["auth"], "Bearer runtime-secret")
+        self.assertNotIn("runtime-secret", json.dumps(self.bazaar.calls[0]["messages"]))
 
     def test_cli_shows_the_bazaar_answer_in_logs_and_summary_without_leaking_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1068,10 +1123,12 @@ class BazaarLinkWorkflowTests(unittest.TestCase):
     def test_the_workflows_wire_bazaar_link_only_from_the_repository_secret(self):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertEqual(text.count("BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}"), 3)
+        self.assertEqual(text.count("BAZAARLINK_API_KEY: ${{ secrets.BAZAAR_LINK_API }}"), 3)
         self.assertIn("and not os.environ.get('BAZAAR_LINK_API', '').strip()", text)
         self.assertIn('[ -n "${BAZAAR_LINK_API:-}" ]', text)
         agent = (ROOT / ".github" / "workflows" / "agent.yml").read_text(encoding="utf-8")
         self.assertIn("BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}", agent)
+        self.assertIn("BAZAARLINK_API_KEY: ${{ secrets.BAZAAR_LINK_API }}", agent)
 
 
 class GroqWorkflowTests(unittest.TestCase):

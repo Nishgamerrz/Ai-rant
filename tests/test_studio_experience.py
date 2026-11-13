@@ -167,7 +167,7 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("for attempt in 1 2; do", workflow)
         self.assertIn('--min-props 8 --target-props "$TARGET_PROPS"', workflow)
         self.assertIn("every deliberate snap cut must change both camera and focus", workflow)
-        self.assertIn("camera_shots[].time_of_day` overrides", workflow)
+        self.assertIn('"camera_shots[].time_of_day" overrides', workflow)
         self.assertIn("AUTOMATIC LIGHTING PLAN (required)", workflow)
         self.assertNotIn("inputs.time_of_day", workflow)
         self.assertNotIn("scene_time_notes", workflow)

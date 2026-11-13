@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -84,6 +87,37 @@ class WorkflowTests(unittest.TestCase):
         prompt_start = self.text.index("cat > map_prompt.txt <<PROMPT")
         prompt_end = self.text.index("\n          PROMPT", prompt_start)
         return self.text[prompt_start:prompt_end]
+
+    def test_unquoted_map_heredoc_expands_variables_without_shell_substitution_errors(self) -> None:
+        heredoc = self.map_prompt()
+        command, *source_lines = heredoc.splitlines()
+        self.assertEqual(command.strip(), "cat > map_prompt.txt <<PROMPT")
+        self.assertNotIn("`", heredoc, "raw backticks execute as command substitutions")
+        body = "\n".join(line[10:] if line.startswith("          ") else line
+                           for line in source_lines)
+        script = f"{command.strip()}\n{body}\nPROMPT\n"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                **os.environ,
+                "STORY_TOPIC": "EXPANDED_STORY_TOPIC",
+                "NARRATION": "EXPANDED_NARRATION",
+                "WORLD_THEME": "EXPANDED_WORLD_THEME",
+                "SCENE_BLOCK": "EXPANDED_SCENE_BLOCK",
+                "CAST_NAMES": "EXPANDED_CAST",
+            }
+            result = subprocess.run(["bash", "-c", script], cwd=tmp, env=env,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("command not found", result.stderr)
+            rendered = (Path(tmp) / "map_prompt.txt").read_text(encoding="utf-8")
+
+        self.assertIn("EXPANDED_STORY_TOPIC", rendered)
+        self.assertIn("EXPANDED_NARRATION", rendered)
+        self.assertIn("EXPANDED_WORLD_THEME", rendered)
+        self.assertIn("EXPANDED_SCENE_BLOCK", rendered)
+        self.assertIn('global "time_of_day"', rendered)
+        self.assertIn('"camera_shots[].time_of_day"', rendered)
 
     def test_prompt_says_the_ai_must_manually_author_both_calls_first(self) -> None:
         prompt = self.map_prompt()
