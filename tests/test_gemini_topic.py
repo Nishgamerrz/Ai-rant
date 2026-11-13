@@ -254,7 +254,7 @@ class CommandLineTests(unittest.TestCase):
             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **env},
         )
 
-    def test_stdout_shows_complete_topic_text_and_the_answering_provider(self):
+    def test_stdout_contains_only_the_plain_cleaned_prompt(self):
         attempt = {"provider": "bazaarlink", "model": "auto:free",
                    "status": "answered", "seconds": 0.3}
         entry = {"ok": True, "skipped": False, "text": GOOD, "candidate": GOOD,
@@ -277,11 +277,10 @@ class CommandLineTests(unittest.TestCase):
                     self.assertEqual(topic_main(), 0)
 
             text = captured.getvalue()
-            self.assertIn("[bazaar topic] provider answered story prompt with BazaarLink auto:free", text)
-            self.assertIn("[bazaar topic] complete AI-written story prompt:", text)
-            self.assertIn(GOOD, text)
-            self.assertNotIn("stale-gemini-model", text)
-            self.assertNotIn("bazaar-test-secret", text)
+            self.assertEqual(text, GOOD + "\n")
+            for forbidden in ("[ai-log]", "[bazaar", "[gemini", "provider answered",
+                              "falling back", "stale-gemini-model", "bazaar-test-secret"):
+                self.assertNotIn(forbidden, text)
             activity = [json.loads(line) for line in
                         (Path(tmp) / "ai_activity.jsonl").read_text(encoding="utf-8").splitlines()]
             cleanup = next(event for event in activity
@@ -289,8 +288,9 @@ class CommandLineTests(unittest.TestCase):
             self.assertEqual(cleanup["provider"], "bazaarlink")
             self.assertEqual(cleanup["model"], "auto:free")
             self.assertEqual(cleanup["output"], GOOD)
+            self.assertTrue(any(event.get("type") == "provider_attempt" for event in activity))
 
-    def test_stdout_identifies_failed_provider_and_fallback(self):
+    def test_stdout_does_not_show_provider_or_fallback_chatter(self):
         attempts = [
             {"provider": "bazaarlink", "model": "auto:free", "status": "fallback",
              "reason": "HTTP 429 quota/rate limit", "fallback_to": "gemini", "seconds": 0.2},
@@ -319,19 +319,17 @@ class CommandLineTests(unittest.TestCase):
                     self.assertEqual(topic_main(), 0)
 
             text = captured.getvalue()
-            self.assertIn("[bazaar topic] could not answer story prompt "
-                          "(HTTP 429 quota/rate limit); falling back to Gemini.", text)
-            self.assertIn("[gemini topic] provider answered story prompt with "
-                          "Gemini gemini-2.5-flash", text)
-            self.assertNotIn("bazaar-test-secret", text)
-            self.assertNotIn("gemini-test-secret", text)
+            self.assertEqual(text, GOOD + "\n")
+            for forbidden in ("[ai-log]", "provider", "fallback", "HTTP 429",
+                              "bazaar-test-secret", "gemini-test-secret"):
+                self.assertNotIn(forbidden, text)
 
     def test_without_a_key_the_raw_text_is_written_back(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self._run(tmp, {"RAW_STORY_TOPIC": "a stdent finds a wallett",
                                      "RAW_WORLD_THEME": ""})
             self.assertEqual(result.returncode, 0, msg=result.stderr[-800:])
-            self.assertIn("using the prompt exactly as typed", result.stdout)
+            self.assertEqual(result.stdout, "")
             outputs = (Path(tmp) / "gh_output").read_text()
             self.assertIn("story_topic=a stdent finds a wallett", outputs)
             self.assertIn("world_theme=\n", outputs)
@@ -407,10 +405,12 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertIn("continue-on-error: true", block)
         self.assertIn("|| true", block)
 
-    def test_topic_and_every_subagent_response_are_shown_in_the_ai_log(self):
+    def test_topic_and_subagent_workflow_steps_use_clean_streaming_output(self):
         topic_start = self.workflow.index("python tools/gemini_topic.py")
         topic_block = self.workflow[topic_start:self.workflow.index("- name: Set short timing", topic_start)]
         self.assertIn("--stdout || true", topic_block)
+        self.assertNotIn("say.py tool \"Cleaning the typed story prompt", topic_block)
+        self.assertNotIn("No cleaned prompt was produced", topic_block)
         self.assertIn("--output story_subagent_results.json --stdout || true", self.workflow)
         self.assertIn("--output narration_edit_results.json --stdout || true", self.workflow)
         self.assertIn("--request subagent_tasks.json --output subagent_results.json --stdout",

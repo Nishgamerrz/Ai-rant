@@ -62,6 +62,55 @@ def redact_secrets(value: Any) -> str:
     return text
 
 
+class SecretStreamRedactor:
+    """Redact credentials across arbitrary live-text chunk boundaries.
+
+    A short tail stays buffered so a token split across two provider chunks is
+    never printed before it can be recognized. Potentially unbounded credential
+    patterns (for example a bearer token) are retained from their prefix until
+    their complete match is available.
+    """
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._secrets = _secret_values()
+        self._guard = max(32, max((len(secret) for secret in self._secrets), default=0))
+
+    def feed(self, chunk: Any) -> str:
+        """Add one provider chunk and return only the safe-to-display prefix."""
+        self._pending += str(chunk if chunk is not None else "")
+        cutoff = max(0, len(self._pending) - self._guard)
+        while cutoff > 0:
+            previous = cutoff
+            for secret in self._secrets:
+                start = self._pending.find(secret)
+                while start >= 0:
+                    end = start + len(secret)
+                    if start < cutoff < end:
+                        cutoff = start
+                    start = self._pending.find(secret, start + 1)
+            for pattern in _TOKEN_PATTERNS:
+                for match in pattern.finditer(self._pending):
+                    if match.start() < cutoff < match.end():
+                        cutoff = match.start()
+            if cutoff == previous:
+                break
+
+        if cutoff <= 0:
+            return ""
+        safe, self._pending = self._pending[:cutoff], self._pending[cutoff:]
+        return redact_secrets(safe)
+
+    def flush(self) -> str:
+        """Redact and return the remaining tail after a completed response."""
+        pending, self._pending = self._pending, ""
+        return redact_secrets(pending)
+
+    def discard(self) -> None:
+        """Drop an incomplete failed response without revealing its buffered tail."""
+        self._pending = ""
+
+
 def _sanitize(value: Any) -> Any:
     if isinstance(value, str):
         return redact_secrets(value)

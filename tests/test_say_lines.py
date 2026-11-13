@@ -81,12 +81,17 @@ class WorkflowNarrationTests(unittest.TestCase):
                 self.assertNotIn(">", line.replace("->", ""), line)
                 self.assertNotIn(">>", line, line)
 
-    def test_the_rest_of_the_console_tools_are_coloured(self):
+    def test_live_subagent_answers_are_coloured_but_topic_prompts_are_plain(self):
         helper = (ROOT / "tools" / "console_style.py").read_text(encoding="utf-8")
         self.assertIn('"plan"', helper)
-        for tool in ("ai_web_search.py", "gemini_subagent.py", "gemini_topic.py"):
-            text = (ROOT / "tools" / tool).read_text(encoding="utf-8")
-            self.assertIn("paint(", text, tool)
+        search = (ROOT / "tools" / "ai_web_search.py").read_text(encoding="utf-8")
+        self.assertIn("paint(", search)
+
+        subagent = (ROOT / "tools" / "gemini_subagent.py").read_text(encoding="utf-8")
+        self.assertIn('paint(text, "answer", stream=sys.stdout)', subagent)
+        topic = (ROOT / "tools" / "gemini_topic.py").read_text(encoding="utf-8")
+        self.assertNotIn("paint(", topic)
+        self.assertIn('print(redact_secrets(entry.get("text", "")), flush=True)', topic)
 
 
 if __name__ == "__main__":

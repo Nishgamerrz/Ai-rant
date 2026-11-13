@@ -33,7 +33,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from console_style import paint  # noqa: E402
 from ai_activity import append_activity, redact_secrets, sanitize_data  # noqa: E402
 
 from gemini_subagent import (  # noqa: E402
@@ -284,7 +283,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, help="write the cleaned prompts here as JSON")
     parser.add_argument("--github-output", help="path of $GITHUB_OUTPUT")
     parser.add_argument("--stdout", action="store_true",
-                        help="print the actual provider outcome and complete topic response")
+                        help="print only accepted cleaned prompt text")
     parser.add_argument("--url", help="override the Gemini endpoint (tests)")
     parser.add_argument("--timeout", type=float, default=60.0)
     args = parser.parse_args()
@@ -305,39 +304,12 @@ def main() -> int:
             provider, provider)
         return f"[{label} topic]"
 
-    def provider_label(provider: str, model: str = "") -> str:
-        name = {"bazaarlink": "BazaarLink", "gemini": "Gemini", "groq": "Groq"}.get(
-            str(provider or "").strip().lower(), str(provider or "Provider unknown"))
-        return f"{name} {model}".strip()
-
     def attempt_logger(label: str):
         def log_attempt(attempt: dict) -> None:
             provider = str(attempt.get("provider") or "").strip().lower()
-            tag = topic_tag(provider)
             append_activity({"type": "provider_attempt", "stage": "topic",
-                             "label": label, "tag": tag, **attempt},
-                            path=activity_path)
-            status = str(attempt.get("status") or "unknown").lower()
-            model_name = provider_label(provider, str(attempt.get("model") or ""))
-            reason = str(attempt.get("reason") or "").strip()
-            fallback = str(attempt.get("fallback_to") or "").strip()
-            fallback_name = (f"Groq model {fallback}"
-                             if provider == "groq" and fallback.lower() not in {
-                                 "", "bazaarlink", "gemini", "groq"}
-                             else provider_label(fallback))
-            if status == "answered":
-                print(paint(f"{tag} provider answered {label} with {model_name} "
-                            f"in {attempt.get('seconds', 0)}s.", "tool"), flush=True)
-            elif status in {"fallback", "failed"}:
-                detail = f" ({reason})" if reason else ""
-                next_step = (f"; falling back to {fallback_name}"
-                             if fallback else "; no provider fallback remains")
-                print(paint(f"{tag} could not answer {label}{detail}{next_step}.",
-                            "warning" if fallback else "error"), flush=True)
-            elif status == "skipped":
-                next_step = (f"; next: {provider_label(fallback)}" if fallback else "")
-                print(paint(f"{tag} skipped for {label} ({reason or 'not configured'}){next_step}.",
-                            "notice"), flush=True)
+                             "label": label, "tag": topic_tag(provider), **attempt},
+                            path=activity_path, emit=False)
         return log_attempt
 
     story = refine(story_raw, api_key=api_key, bazaar_key=bazaar_key,
@@ -351,9 +323,6 @@ def main() -> int:
              if theme_raw.strip() else {"ok": False, "skipped": True, "text": "",
                                         "reason": "no theme typed"})
 
-    if not bazaar_key and not api_key and not groq_key:
-        print(paint("[topic] no text-provider credentials are configured; "
-                    "using the prompt exactly as typed.", "warning"), flush=True)
     for label, kind, entry, raw in (("story prompt", "story", story, story_raw),
                                     ("world theme", "theme", theme, theme_raw)):
         if not raw.strip():
@@ -361,8 +330,7 @@ def main() -> int:
         attempts = entry.get("provider_attempts", [])
         answered = next((attempt for attempt in reversed(attempts)
                          if str(attempt.get("status") or "").lower() == "answered"), {})
-        # Use the last provider whose request actually answered, not a planned
-        # provider or the model name, to select the visible topic label.
+        # Use the last provider whose request actually answered for artifact metadata.
         provider = str(answered.get("provider") or entry.get("provider") or "").strip().lower()
         provider_model = str(answered.get("model") or entry.get("provider_model") or "").strip()
         tag = topic_tag(provider)
@@ -380,22 +348,9 @@ def main() -> int:
             "output": candidate if candidate is not None else entry.get("text", raw),
             "cleaned_text": entry.get("text", raw),
             "reason": entry.get("reason", ""),
-        }, path=activity_path)
-        if entry.get("ok"):
-            print(paint(f"{tag} cleaned the {label} with "
-                        f"{provider_label(provider, provider_model)} "
-                        f"in {entry.get('seconds', 0)}s.", "tool"), flush=True)
-            if args.stdout:
-                authored_text = redact_secrets(entry.get("text", ""))
-                print(paint(f"{tag} complete AI-written {label}:\n{authored_text}",
-                            "answer"), flush=True)
-        else:
-            print(paint(f"{tag} kept the {label} as typed "
-                        f"({entry.get('reason', 'no provider result')}).",
-                        "notice" if entry.get("skipped") else "warning"), flush=True)
-            if args.stdout and candidate:
-                print(paint(f"{tag} returned text that was rejected by the local check:\n"
-                            f"{redact_secrets(candidate)}", "warning"), flush=True)
+        }, path=activity_path, emit=False)
+        if args.stdout and entry.get("ok"):
+            print(redact_secrets(entry.get("text", "")), flush=True)
 
     values = {"story_topic": story["text"], "world_theme": theme["text"]}
     _write_outputs(args.github_output, values)

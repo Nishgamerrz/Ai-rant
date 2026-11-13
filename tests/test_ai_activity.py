@@ -12,7 +12,8 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from ai_activity import append_activity, parse_live_records, redact_secrets, sanitize_data  # noqa: E402
+from ai_activity import (SecretStreamRedactor, append_activity, parse_live_records,
+                         redact_secrets, sanitize_data)  # noqa: E402
 
 
 class ActivityLogTests(unittest.TestCase):
@@ -84,6 +85,18 @@ class ActivityLogTests(unittest.TestCase):
         self.assertNotIn("groq-secret-value", safe)
         self.assertNotIn("abcdefghijklmnopqrstuvwxyz1234", safe)
         self.assertEqual(safe.count("[REDACTED]"), 5)
+
+    def test_streaming_redaction_handles_credentials_split_across_chunks(self):
+        with patch.dict(os.environ, {"BAZAAR_LINK_API": "bazaar-secret-value"}):
+            redactor = SecretStreamRedactor()
+            visible = redactor.feed("This is an answer long enough to stream before the key: ")
+            visible += redactor.feed("bazaar-secret-")
+            visible += redactor.feed("value, and this sentence continues after the key.")
+            visible += redactor.flush()
+
+        self.assertIn("This is an answer", visible)
+        self.assertIn("[REDACTED]", visible)
+        self.assertNotIn("bazaar-secret-value", visible)
 
     def test_secret_field_names_and_json_style_credentials_are_redacted(self):
         raw = '{"BAZAAR_LINK_API":"bazaar-json-secret","api_key":"generic-api-secret"}'

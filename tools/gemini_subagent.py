@@ -61,13 +61,14 @@ from typing import Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from console_style import paint  # noqa: E402
-from ai_activity import append_activity, redact_secrets, sanitize_data  # noqa: E402
+from ai_activity import (SecretStreamRedactor, append_activity, redact_secrets,
+                         sanitize_data)  # noqa: E402
 
 from gemini_workspace import guide as file_guide  # noqa: E402
 from gemini_workspace import topics_for  # noqa: E402
 from agent_tools import TOOL_GUIDE, execute_tool, safe_path  # noqa: E402
 
-BAZAAR_LINK_ENDPOINT = "https://api.bazaarlink.ai/v1/chat/completions"
+BAZAAR_LINK_ENDPOINT = "https://bazaarlink.ai/api/v1/chat/completions"
 BAZAAR_LINK_KEY_ENV = "BAZAAR_LINK_API"
 # The OpenAI-compatible request contract uses BAZAARLINK_API_KEY. Workflows map
 # that runtime name to the existing BAZAAR_LINK_API repository secret; the latter
@@ -176,8 +177,6 @@ def quota_is_exhausted(root: Path | None = None) -> bool:
             path.unlink(missing_ok=True)
             return False
         if age_minutes > QUOTA_RETRY_MINUTES:
-            print(f"[gemini provider] the quota hit was {age_minutes:.0f} minutes ago; "
-                  f"trying Gemini again before using the fallback.", flush=True)
             return False
         return True
     except OSError:
@@ -193,10 +192,7 @@ def mark_quota_exhausted(detail: str = "", root: Path | None = None) -> None:
         path.write_text("Gemini HTTP 429 quota exhausted.\n", encoding="utf-8")
     except OSError:
         pass
-    # Keep the warning useful without echoing the provider's raw error response.
-    print(f"::notice title=Gemini quota exhausted::Gemini returned HTTP 429. "
-          f"The configured fallback provider may answer this task; Gemini is tried "
-          f"again in {QUOTA_RETRY_MINUTES} minutes.", flush=True)
+    # The activity artifact records quota/fallback status; avoid non-AI console chatter.
 
 
 def _clean_task(task, index: int) -> dict | None:
@@ -298,6 +294,221 @@ def parse_agent_turn(text: str) -> dict:
     return {"answer": str(text or "").strip(), "tool_calls": []}
 
 
+def _decode_json_string_prefix(raw: str, *, final: bool = False) -> str:
+    """Decode only complete JSON escapes from an incrementally received string."""
+    decoded: list[str] = []
+    index = 0
+    slash = chr(92)
+    escapes = {slash + '"': '"', slash + slash: slash, slash + "/": "/",
+               slash + "b": "\b", slash + "f": "\f", slash + "n": "\n",
+               slash + "r": "\r", slash + "t": "\t"}
+    while index < len(raw):
+        if raw[index] != slash:
+            decoded.append(raw[index])
+            index += 1
+            continue
+        if index + 1 >= len(raw):
+            if final:
+                decoded.append(slash)
+            break
+        escape = raw[index:index + 2]
+        if escape == slash + "u":
+            if index + 6 > len(raw):
+                if final:
+                    decoded.append(chr(0xFFFD))
+                break
+            try:
+                code = int(raw[index + 2:index + 6], 16)
+            except ValueError:
+                decoded.append("u")
+                index += 2
+                continue
+            if 0xD800 <= code <= 0xDBFF:
+                if (index + 12 > len(raw) or raw[index + 6:index + 8] != slash + "u"):
+                    if final:
+                        decoded.append(chr(0xFFFD))
+                    break
+                try:
+                    low = int(raw[index + 8:index + 12], 16)
+                except ValueError:
+                    decoded.append(chr(0xFFFD))
+                    index += 6
+                    continue
+                if 0xDC00 <= low <= 0xDFFF:
+                    decoded.append(chr(0x10000 + ((code - 0xD800) << 10) + low - 0xDC00))
+                    index += 12
+                else:
+                    decoded.append(chr(0xFFFD))
+                    index += 6
+            elif 0xDC00 <= code <= 0xDFFF:
+                decoded.append(chr(0xFFFD))
+                index += 6
+            else:
+                decoded.append(chr(code))
+                index += 6
+            continue
+        decoded.append(escapes.get(escape, escape[1]))
+        index += 2
+    return "".join(decoded)
+
+
+class _AgentAnswerStreamer:
+    """Extract a model-authored JSON ``answer`` string without showing its wrapper."""
+
+    def __init__(self, callback: Callable[[str, str], None] | None):
+        self.callback = callback
+        self.buffer = ""
+        self.cursor = 0
+        self.state = "seek_object"
+        self.string_role = ""
+        self.string_raw = ""
+        self.string_escape = False
+        self.field_key = ""
+        self.answer_started = False
+        self.answer_complete = False
+        self.answer_emitted = ""
+        self.nested_stack: list[str] = []
+        self.nested_string = False
+        self.nested_escape = False
+
+    def reset(self) -> None:
+        """Discard an incomplete provider attempt before the fallback starts."""
+        self.buffer = ""
+        self.cursor = 0
+        self.state = "seek_object"
+        self.string_role = ""
+        self.string_raw = ""
+        self.string_escape = False
+        self.field_key = ""
+        self.answer_started = False
+        self.answer_complete = False
+        self.answer_emitted = ""
+        self.nested_stack = []
+        self.nested_string = False
+        self.nested_escape = False
+
+    def _emit_answer(self) -> None:
+        if not self.answer_started:
+            return
+        decoded = _decode_json_string_prefix(self.string_raw, final=self.answer_complete)
+        if len(decoded) > len(self.answer_emitted):
+            addition = decoded[len(self.answer_emitted):]
+            self.answer_emitted = decoded
+            _notify_text_chunk(self.callback, "answer", addition)
+
+    def __call__(self, channel: str, chunk: str) -> None:
+        if channel == "provider_reset":
+            self.reset()
+            _notify_text_chunk(self.callback, "provider_reset", "")
+            return
+        if channel != "answer" or not chunk:
+            return
+        self.buffer += chunk
+        while self.cursor < len(self.buffer):
+            char = self.buffer[self.cursor]
+            self.cursor += 1
+            if self.state == "seek_object":
+                if char == "{":
+                    self.state = "key_or_end"
+                continue
+            if self.state == "key_or_end":
+                if char.isspace():
+                    continue
+                if char == "}":
+                    self.state = "done"
+                elif char == '"':
+                    self.string_role = "key"
+                    self.string_raw = ""
+                    self.string_escape = False
+                    self.state = "string"
+                continue
+            if self.state == "colon":
+                if char.isspace():
+                    continue
+                self.state = "value" if char == ":" else "done"
+                continue
+            if self.state == "value":
+                if char.isspace():
+                    continue
+                if char == '"':
+                    self.string_role = ("answer" if not self.answer_started
+                                        and self.field_key in {"answer", "final"} else "other")
+                    self.string_raw = ""
+                    self.string_escape = False
+                    if self.string_role == "answer":
+                        self.answer_started = True
+                    self.state = "string"
+                elif char in "{[":
+                    self.nested_stack = [char]
+                    self.nested_string = False
+                    self.nested_escape = False
+                    self.state = "nested"
+                else:
+                    self.state = "scalar"
+                continue
+            if self.state == "string":
+                if self.string_escape:
+                    if self.string_role in {"key", "answer"}:
+                        self.string_raw += char
+                    self.string_escape = False
+                    continue
+                if char == chr(92):
+                    if self.string_role in {"key", "answer"}:
+                        self.string_raw += char
+                    self.string_escape = True
+                    continue
+                if char == '"':
+                    if self.string_role == "key":
+                        try:
+                            self.field_key = json.loads('"' + self.string_raw + '"')
+                        except json.JSONDecodeError:
+                            self.field_key = ""
+                        self.state = "colon"
+                    else:
+                        if self.string_role == "answer":
+                            self.answer_complete = True
+                            self._emit_answer()
+                        self.state = "comma_or_end"
+                    self.string_role = ""
+                    self.string_raw = ""
+                    continue
+                if self.string_role in {"key", "answer"}:
+                    self.string_raw += char
+                continue
+            if self.state == "nested":
+                if self.nested_string:
+                    if self.nested_escape:
+                        self.nested_escape = False
+                    elif char == chr(92):
+                        self.nested_escape = True
+                    elif char == '"':
+                        self.nested_string = False
+                    continue
+                if char == '"':
+                    self.nested_string = True
+                elif char in "{[":
+                    self.nested_stack.append(char)
+                elif char in "}]" and self.nested_stack:
+                    self.nested_stack.pop()
+                    if not self.nested_stack:
+                        self.state = "comma_or_end"
+                continue
+            if self.state == "scalar":
+                if char == ",":
+                    self.state = "key_or_end"
+                elif char == "}":
+                    self.state = "done"
+                continue
+            if self.state == "comma_or_end":
+                if char.isspace():
+                    continue
+                if char == ",":
+                    self.state = "key_or_end"
+                elif char == "}":
+                    self.state = "done"
+        self._emit_answer()
+
+
 def _tool_call_parts(call: dict) -> tuple[str, dict]:
     name = str(call.get("tool") or call.get("name") or "").strip().lower()
     arguments = call.get("arguments")
@@ -335,7 +546,8 @@ def run_tool_agent(task: dict, context: str, *, model: str, api_key: str,
                    bazaar_key: str = "", bazaar_url: str | None = None,
                    url: str | None = None, groq_url: str | None = None,
                    timeout: float = 120.0,
-                   on_attempt: Callable[[dict], None] | None = None) -> dict:
+                   on_attempt: Callable[[dict], None] | None = None,
+                   on_text_chunk: Callable[[str, str], None] | None = None) -> dict:
     """Run a bounded tool loop, executing only calls the model authored."""
     required_images = _required_image_paths(task, root)
     agent_system_prompt = "\n\n".join((SYSTEM_RULES, TOOL_GUIDE, AGENT_TOOL_USAGE_GUIDANCE))
@@ -369,17 +581,22 @@ def run_tool_agent(task: dict, context: str, *, model: str, api_key: str,
             if on_attempt:
                 on_attempt({**event, "round": round_index})
 
+        answer_stream = _AgentAnswerStreamer(on_text_chunk) if on_text_chunk else None
         text, provider = call_any(
             prompt, bazaar_key=bazaar_key, bazaar_url=bazaar_url,
             system_prompt=agent_system_prompt,
             gemini_key=api_key, gemini_model=model,
             groq_key=groq_key, groq_model_name=groq_model_name,
             timeout=timeout, url=url, groq_url=groq_url,
-            on_attempt=report_attempt if on_attempt else None)
+            on_attempt=report_attempt if on_attempt else None,
+            on_text_chunk=answer_stream)
         if provider not in providers:
             providers.append(provider)
         parsed = parse_agent_turn(text)
         final_answer = str(parsed.get("answer") or parsed.get("final") or text).strip()
+        if (answer_stream and not answer_stream.answer_started
+                and not text.lstrip().startswith(("{", "```")) and final_answer):
+            _notify_text_chunk(on_text_chunk, "answer", final_answer)
         calls = parsed.get("tool_calls")
         if not isinstance(calls, list):
             calls = []
@@ -452,12 +669,14 @@ def run_tool_agent(task: dict, context: str, *, model: str, api_key: str,
 
 
 def _extract_text(payload) -> str:
+    """Extract candidate answer text while excluding Gemini thought parts."""
     try:
         candidates = payload["candidates"]
         texts = []
         for candidate in candidates:
             for part in candidate.get("content", {}).get("parts", []):
-                if isinstance(part.get("text"), str):
+                if (isinstance(part, dict) and part.get("thought") is not True
+                        and isinstance(part.get("text"), str)):
                     texts.append(part["text"])
         return "".join(texts).strip()
     except (KeyError, TypeError, AttributeError):
@@ -488,90 +707,203 @@ def _generation_config(model: str, max_tokens: int, thinking_off: bool) -> dict:
     return config
 
 
+def _openai_text_content(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part["text"] for part in content
+            if isinstance(part, dict) and part.get("type") in (None, "text", "output_text")
+            and isinstance(part.get("text"), str))
+    return ""
+
+
 def _openai_completion_parts(payload) -> tuple[str, str]:
-    """Extract the first OpenAI-compatible choice without logging its contents."""
+    """Extract the first OpenAI-compatible answer without reasoning content."""
     try:
         choice = payload["choices"][0]
         message = choice.get("message") or {}
-        content = message.get("content")
-        if isinstance(content, str):
-            text = content.strip()
-        elif isinstance(content, list):
-            fragments = [part["text"] for part in content
-                         if isinstance(part, dict) and isinstance(part.get("text"), str)]
-            text = "".join(fragments).strip()
-        else:
-            text = ""
+        text = _openai_text_content(message.get("content")).strip()
         finish = str(choice.get("finish_reason") or "").strip().lower()
         return text, finish
     except (KeyError, IndexError, TypeError, AttributeError):
         return "", ""
 
 
-def call_bazaarlink(prompt: str, *, api_key: str, timeout: float = 120.0,
-                    url: str | None = None, system_prompt: str | None = None) -> str:
-    """Make a quiet OpenAI-compatible BazaarLink call using its auto:free route.
+def _notify_text_chunk(callback: Callable[[str, str], None] | None,
+                       channel: str, text: str) -> None:
+    if callback and (text or channel == "provider_reset"):
+        try:
+            callback(channel, text)
+        except Exception:
+            # A disconnected console must not cancel a provider response or its fallback.
+            pass
 
-    No request, response, credential, or provider error body is written to the
-    console. The completion is returned to the caller; empty or truncated
-    responses raise so call_any can continue directly to Gemini.
+
+def _openai_stream_parts(response, on_chunk: Callable[[str, str], None]) -> tuple[str, str]:
+    """Read only user-facing assistant content from an OpenAI-style SSE stream."""
+    fragments: list[str] = []
+    finish = ""
+    for raw_line in response:
+        line = raw_line.decode("utf-8", "replace").strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        choices = payload.get("choices") if isinstance(payload, dict) else None
+        if not isinstance(choices, list):
+            continue
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            finish = str(choice.get("finish_reason") or finish).strip().lower()
+            delta = choice.get("delta") or choice.get("message") or {}
+            if not isinstance(delta, dict):
+                continue
+            content = _openai_text_content(delta.get("content"))
+            if content:
+                fragments.append(content)
+                _notify_text_chunk(on_chunk, "answer", content)
+    return "".join(fragments).strip(), finish
+
+
+def _openai_response_parts(response, on_chunk: Callable[[str, str], None] | None = None) -> tuple[str, str]:
+    content_type = str(response.headers.get("Content-Type", "")).lower()
+    if on_chunk and "text/event-stream" in content_type:
+        return _openai_stream_parts(response, on_chunk)
+    try:
+        payload = json.loads(response.read().decode("utf-8", "replace"))
+    except json.JSONDecodeError as exc:
+        raise BazaarLinkUnavailable("the response was not valid JSON") from exc
+    text, finish = _openai_completion_parts(payload)
+    _notify_text_chunk(on_chunk, "answer", text)
+    return text, finish
+
+
+def call_bazaarlink(prompt: str, *, api_key: str, timeout: float = 120.0,
+                    url: str | None = None, system_prompt: str | None = None,
+                    on_chunk: Callable[[str, str], None] | None = None) -> str:
+    """Call BazaarLink's OpenAI-compatible auto:free endpoint.
+
+    The normal request matches the known-working curl shape: model, user message,
+    JSON content type, and bearer authentication. Tool-enabled calls add their
+    guidance as a system message. Streaming is requested only when the caller
+    wants live text; a server that rejects streaming is retried with the plain
+    curl-compatible payload. Credentials and raw provider errors are never logged.
     """
     api_key = str(api_key or "").strip()
     if not api_key:
         raise BazaarLinkUnavailable("no API key configured")
     endpoint = url or BAZAAR_LINK_ENDPOINT
-    system_content = str(system_prompt or SYSTEM_RULES).strip() or SYSTEM_RULES
-    body = json.dumps({
-        "model": BAZAAR_LINK_MODEL,
-        "messages": [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 5,
-        "max_tokens": 8192,
-        "stream": False,
-    }).encode("utf-8")
-    request = urllib.request.Request(
-        endpoint, data=body,
-        headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {api_key}",
-                 "User-Agent": "Ai-rant-short-render/1.0"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8", "replace")
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise BazaarLinkUnavailable("the response was not valid JSON") from exc
-    except urllib.error.HTTPError as exc:
-        exc.close()
-        raise BazaarLinkUnavailable(f"HTTP {exc.code}") from exc
-    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
-        raise BazaarLinkUnavailable(f"network failure ({type(exc).__name__})") from exc
+    messages = []
+    if system_prompt and str(system_prompt).strip():
+        messages.append({"role": "system", "content": str(system_prompt).strip()})
+    messages.append({"role": "user", "content": prompt})
+    streaming = on_chunk is not None
 
-    text, finish = _openai_completion_parts(payload)
+    while True:
+        request_body = {"model": BAZAAR_LINK_MODEL, "messages": messages}
+        if streaming:
+            request_body["stream"] = True
+        request = urllib.request.Request(
+            endpoint, data=json.dumps(request_body).encode("utf-8"),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {api_key}",
+                     "User-Agent": "Ai-rant-short-render/1.0"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                text, finish = _openai_response_parts(response, on_chunk)
+            break
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            exc.close()
+            if streaming and status == 400:
+                # Keep compatibility with the plain curl endpoint if SSE is not enabled.
+                streaming = False
+                continue
+            raise BazaarLinkUnavailable(f"HTTP {status}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+            raise BazaarLinkUnavailable(f"network failure ({type(exc).__name__})") from exc
+
     if finish in ("length", "max_tokens", "max_output_tokens"):
-        raise BazaarLinkTruncated("response was truncated at max_tokens=8192")
+        raise BazaarLinkTruncated("response was truncated at the provider output limit")
     if not text:
         raise BazaarLinkUnavailable("the response contained no text")
     return text
 
 
-def call_gemini(prompt: str, *, api_key: str, model: str = DEFAULT_MODEL,
-                timeout: float = 120.0, url: str | None = None) -> str:
-    """One Gemini call. Raises GeminiUnavailable on quota/auth/network trouble.
+def _gemini_answer_parts(payload) -> str:
+    try:
+        parts = payload["candidates"][0]["content"]["parts"]
+    except (KeyError, IndexError, TypeError):
+        return ""
+    return "".join(part["text"] for part in parts
+                    if isinstance(part, dict) and part.get("thought") is not True
+                    and isinstance(part.get("text"), str))
 
-    A reply that stopped at the token ceiling is never returned as an answer: an
-    edit that is silently cut in half would be written over the narration file.
-    It is retried once with double the ceiling, and then reported as a failure so
-    the workflow keeps the draft it already had.
+
+def _gemini_stream_parts(response, on_chunk: Callable[[str, str], None]) -> tuple[str, str]:
+    fragments: list[str] = []
+    finish = ""
+    for raw_line in response:
+        line = raw_line.decode("utf-8", "replace").strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        text = _gemini_answer_parts(payload)
+        finish = _finish_reason(payload) or finish
+        if text:
+            fragments.append(text)
+            _notify_text_chunk(on_chunk, "answer", text)
+    return "".join(fragments).strip(), finish
+
+
+def _gemini_response_parts(response, on_chunk: Callable[[str, str], None] | None = None) -> tuple[str, str]:
+    content_type = str(response.headers.get("Content-Type", "")).lower()
+    if on_chunk and "text/event-stream" in content_type:
+        return _gemini_stream_parts(response, on_chunk)
+    try:
+        payload = json.loads(response.read().decode("utf-8", "replace"))
+    except json.JSONDecodeError as exc:
+        raise GeminiUnavailable("the response was not valid JSON") from exc
+    text = _extract_text(payload)
+    _notify_text_chunk(on_chunk, "answer", text)
+    return text, _finish_reason(payload)
+
+
+def call_gemini(prompt: str, *, api_key: str, model: str = DEFAULT_MODEL,
+                timeout: float = 120.0, url: str | None = None,
+                on_chunk: Callable[[str, str], None] | None = None) -> str:
+    """Call Gemini, streaming text when requested and falling back safely.
+
+    In streaming mode, use Google's SSE endpoint. If an endpoint does not support
+    streaming, retry with its standard JSON endpoint. Non-streaming callers keep
+    the existing complete-response and larger-budget retry behavior.
     """
     if not api_key:
         raise GeminiUnavailable("no API key configured")
     if quota_is_exhausted():
         raise QuotaExhausted("Gemini quota was already exhausted in this run")
     request_url = url or ENDPOINT.format(model=model)
+    streaming_url = request_url
+    if on_chunk:
+        if url is None:
+            streaming_url = request_url.replace(":generateContent", ":streamGenerateContent")
+        separator = "&" if "?" in streaming_url else "?"
+        streaming_url += separator + "alt=sse"
+    streaming = on_chunk is not None
     max_tokens = 8192
     thinking_off = True
     attempt = 0
@@ -583,18 +915,16 @@ def call_gemini(prompt: str, *, api_key: str, model: str = DEFAULT_MODEL,
             "generationConfig": config,
         }).encode("utf-8")
         request = urllib.request.Request(
-            request_url, data=body,
+            streaming_url if streaming else request_url, data=body,
             headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
         )
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                payload = json.loads(response.read().decode("utf-8", "replace"))
-            text = _extract_text(payload)
-            reason = _finish_reason(payload)
+                text, reason = _gemini_response_parts(response, on_chunk)
             if not text:
                 raise GeminiUnavailable("the response contained no text")
             if reason == "MAX_TOKENS":
-                if max_tokens < 16384:
+                if max_tokens < 16384 and on_chunk is None:
                     max_tokens *= 2
                     continue
                 raise GeminiUnavailable("the reply was cut off at the token ceiling")
@@ -604,6 +934,9 @@ def call_gemini(prompt: str, *, api_key: str, model: str = DEFAULT_MODEL,
             # Older models reject thinkingConfig outright; drop it and try again.
             if exc.code == 400 and thinking_off and "think" in detail.lower():
                 thinking_off = False
+                continue
+            if streaming and exc.code in (400, 404, 405):
+                streaming = False
                 continue
             # 429 is a quota wall, not a hiccup: stop at once and remember it.
             if exc.code == 429:
@@ -651,57 +984,51 @@ def groq_model(requested: str = "") -> str:
 
 
 def call_groq(prompt: str, *, api_key: str, model: str = "", timeout: float = 120.0,
-              url: str | None = None, max_tokens: int = 8192) -> str:
-    """One Groq (OpenAI-compatible) chat call - the last provider in the chain.
-
-    A retired model answers 404/decommissioned; that is reported as such so the
-    caller can try the next configured model instead of failing the whole task.
-    If the reply was cut at the token ceiling (finish_reason=length), retry once
-    with double the ceiling; if still cut off, discard it and let call_any try
-    the next model rather than passing a partial answer to the workflow.
-    """
+              url: str | None = None, max_tokens: int = 8192,
+              on_chunk: Callable[[str, str], None] | None = None) -> str:
+    """One Groq (OpenAI-compatible) call with optional live text streaming."""
     if not api_key:
         raise GroqUnavailable("no Groq API key configured")
     endpoint = url or GROQ_ENDPOINT
     model = groq_model(model)
+    streaming = on_chunk is not None
     for attempt in range(2):
-        body = json.dumps({
+        request_body = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.4,
             "max_tokens": max_tokens,
-            "stream": False,
-        }).encode("utf-8")
+        }
+        if streaming:
+            request_body["stream"] = True
         request = urllib.request.Request(
-            endpoint, data=body,
+            endpoint, data=json.dumps(request_body).encode("utf-8"),
             headers={"Content-Type": "application/json",
                      "Authorization": f"Bearer {api_key}",
                      "User-Agent": "Ai-rant-short-render/1.0"},
         )
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                payload = json.loads(response.read().decode("utf-8", "replace"))
+                try:
+                    text, finish = _openai_response_parts(response, on_chunk)
+                except BazaarLinkUnavailable as exc:
+                    raise GroqUnavailable(str(exc)) from exc
         except urllib.error.HTTPError as exc:
+            status = exc.code
             exc.close()
-            raise GroqUnavailable(f"Groq HTTP {exc.code}") from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            if streaming and status == 400:
+                streaming = False
+                continue
+            raise GroqUnavailable(f"Groq HTTP {status}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
             raise GroqUnavailable(f"Groq network failure ({type(exc).__name__})") from exc
-        try:
-            text = str(payload["choices"][0]["message"]["content"] or "").strip()
-            finish = str(payload["choices"][0].get("finish_reason") or "").lower()
-        except (KeyError, IndexError, TypeError):
-            text, finish = "", ""
         if not text:
             raise GroqUnavailable("the Groq reply contained no text")
-        # truncated at ceiling -> retry once with larger window
-        if finish == "length" and max_tokens < 16384 and attempt == 0:
+        if finish == "length" and max_tokens < 16384 and attempt == 0 and on_chunk is None:
             max_tokens = min(16384, max_tokens * 2)
-            print(f"[groq provider] response reached the token limit; retrying {model} with a larger output budget.", flush=True)
             continue
         if finish == "length":
-            print(f"[groq provider] {model} still returned an incomplete answer after retry; "
-                  "discarding it and trying the next model.", flush=True)
-            raise GroqTruncated(f"{model} response was cut off at max_tokens={max_tokens} after retry")
+            raise GroqTruncated(f"{model} response was cut off at max_tokens={max_tokens}")
         return text
     raise GroqUnavailable("no answer after retries")
 
@@ -772,7 +1099,8 @@ def call_any(prompt: str, *, bazaar_key: str = "", bazaar_url: str | None = None
              groq_model_name: str = "", timeout: float = 120.0,
              url: str | None = None, groq_url: str | None = None,
              prefer: str = "gemini",
-             on_attempt: Callable[[dict], None] | None = None) -> tuple[str, str]:
+             on_attempt: Callable[[dict], None] | None = None,
+             on_text_chunk: Callable[[str, str], None] | None = None) -> tuple[str, str]:
     """Use BazaarLink, then Gemini, then Groq for complete text completions.
 
     ``prefer`` remains accepted for compatibility but cannot change the configured
@@ -787,6 +1115,19 @@ def call_any(prompt: str, *, bazaar_key: str = "", bazaar_url: str | None = None
     system_prompt = str(system_prompt or "").strip()
     fallback_prompt = (f"{system_prompt}\n\n{prompt}" if system_prompt else prompt)
     failures: list[str] = []
+    stream_state = {"emitted": False}
+
+    def relay_text(channel: str, chunk: str) -> None:
+        if chunk:
+            stream_state["emitted"] = True
+        _notify_text_chunk(on_text_chunk, channel, chunk)
+
+    def separate_fallback_text() -> None:
+        if stream_state["emitted"] and on_text_chunk:
+            _notify_text_chunk(on_text_chunk, "provider_reset", "")
+            stream_state["emitted"] = False
+
+    stream_callback = relay_text if on_text_chunk else None
 
     if not bazaar_key:
         reason = f"{BAZAAR_LINK_KEY_ENV} is not configured"
@@ -798,7 +1139,8 @@ def call_any(prompt: str, *, bazaar_key: str = "", bazaar_url: str | None = None
         started = time.monotonic()
         try:
             text = call_bazaarlink(prompt, api_key=bazaar_key, timeout=timeout,
-                                   url=bazaar_url, system_prompt=system_prompt or None)
+                                   url=bazaar_url, system_prompt=system_prompt or None,
+                                   on_chunk=stream_callback)
             _report_provider_attempt(on_attempt, provider="bazaarlink", model=BAZAAR_LINK_MODEL,
                                      status="answered", seconds=time.monotonic() - started)
             return text, "bazaarlink"
@@ -810,6 +1152,9 @@ def call_any(prompt: str, *, bazaar_key: str = "", bazaar_url: str | None = None
                                      reason=reason,
                                      fallback_to="gemini" if gemini_key else ("groq" if groq_key else ""),
                                      seconds=time.monotonic() - started)
+
+    if gemini_key or groq_key:
+        separate_fallback_text()
 
     if not gemini_key:
         reason = f"{API_KEY_ENV} is not configured"
@@ -827,7 +1172,7 @@ def call_any(prompt: str, *, bazaar_key: str = "", bazaar_url: str | None = None
         started = time.monotonic()
         try:
             text = call_gemini(fallback_prompt, api_key=gemini_key, model=gemini_model,
-                               timeout=timeout, url=url)
+                               timeout=timeout, url=url, on_chunk=stream_callback)
             _report_provider_attempt(on_attempt, provider="gemini", model=gemini_model or DEFAULT_MODEL,
                                      status="answered", seconds=time.monotonic() - started)
             return text, "gemini"
@@ -838,6 +1183,9 @@ def call_any(prompt: str, *, bazaar_key: str = "", bazaar_url: str | None = None
                                      status="fallback" if groq_key else "failed", reason=reason,
                                      fallback_to="groq" if groq_key else "",
                                      seconds=time.monotonic() - started)
+
+    if groq_key:
+        separate_fallback_text()
 
     if not groq_key:
         reason = f"{GROQ_KEY_ENV} is not configured"
@@ -855,7 +1203,7 @@ def call_any(prompt: str, *, bazaar_key: str = "", bazaar_url: str | None = None
             started = time.monotonic()
             try:
                 text = call_groq(fallback_prompt, api_key=groq_key, model=candidate,
-                                 timeout=timeout, url=groq_url)
+                                 timeout=timeout, url=groq_url, on_chunk=stream_callback)
                 _report_provider_attempt(on_attempt, provider="groq", model=candidate,
                                          status="answered", seconds=time.monotonic() - started)
                 return text, "groq"
@@ -869,8 +1217,10 @@ def call_any(prompt: str, *, bazaar_key: str = "", bazaar_url: str | None = None
                                          reason=reason, fallback_to=next_model,
                                          seconds=time.monotonic() - started)
                 # Only model-specific failures and rate limits advance to another
-                # Groq model; a partial completion is never returned.
-                if not next_model:
+                # Groq model; separate any partial stream from the next attempt.
+                if next_model:
+                    separate_fallback_text()
+                else:
                     break
 
     raise GeminiUnavailable("no provider could answer (" + "; ".join(failures) + ")")
@@ -992,7 +1342,9 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
               bazaar_key: str | None = None, bazaar_url: str | None = None,
               url: str | None = None, timeout: float = 120.0,
               groq_key: str = "", groq_model_name: str = "",
-              groq_url: str | None = None) -> dict:
+              groq_url: str | None = None,
+              quiet_console: bool = False,
+              on_text_chunk: Callable[[str, str], None] | None = None) -> dict:
     root = (root or Path.cwd()).resolve()
     request = normalize_request(request)
     if bazaar_key is None:
@@ -1003,7 +1355,7 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
     activity_path = _activity_path(root)
     results = []
     skipped = not bazaar_key and not api_key and not groq_key
-    if skipped:
+    if skipped and not quiet_console:
         print(paint(f"none of {BAZAAR_LINK_KEY_ENV}, {API_KEY_ENV} or {GROQ_KEY_ENV} is configured; "
                     f"{len(request.get('tasks', []))} delegated task(s) will be skipped.",
                     "warning"), flush=True)
@@ -1012,6 +1364,39 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
     providers: list[str] = []
     for task in request.get("tasks", []):
         activity_id = uuid.uuid4().hex
+        stream_redactor = SecretStreamRedactor() if on_text_chunk else None
+        stream_state = {"emitted": False}
+
+        def relay_safe_answer(channel: str, chunk: str) -> None:
+            if stream_redactor is None:
+                return
+            if channel == "provider_reset":
+                # Never let a failed provider's buffered tail join the fallback
+                # answer; only a completed provider result belongs in the artifact.
+                stream_redactor.discard()
+                if stream_state["emitted"]:
+                    _notify_text_chunk(on_text_chunk, "answer", "\n")
+                    stream_state["emitted"] = False
+                return
+            if channel != "answer" or not chunk:
+                return
+            safe_chunk = stream_redactor.feed(chunk)
+            if safe_chunk:
+                stream_state["emitted"] = True
+                _notify_text_chunk(on_text_chunk, "answer", safe_chunk)
+
+        def finish_stream(*, keep_tail: bool) -> None:
+            if stream_redactor is None:
+                return
+            tail = stream_redactor.flush() if keep_tail else ""
+            if tail:
+                stream_state["emitted"] = True
+                _notify_text_chunk(on_text_chunk, "answer", tail)
+            if not keep_tail:
+                stream_redactor.discard()
+
+        if quiet_console:
+            print(paint("Sub-agent: working.", "tool", stream=sys.stdout), flush=True)
         # Keep both the original AI-authored task and the bounded version actually
         # sent to a provider if a pathological request needs the size guard.
         original_instruction = task["instruction"]
@@ -1038,14 +1423,19 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
 
         append_activity({"type": "subagent_task", "stage": "subagent",
                          "tag": "[subagent task]", "status": "started", **fields},
-                        path=activity_path)
+                        path=activity_path, emit=False)
         if skipped:
             entry = {**fields, "id": task["id"], "ok": False, "status": "skipped",
                      "provider": "", "seconds": 0, "error": "no provider credentials configured",
                      "file_edits": [], "provider_attempts": []}
             results.append(entry)
             append_activity({"type": "subagent_result", "stage": "subagent",
-                             "tag": "[subagent]", **entry, "output": ""}, path=activity_path)
+                             "tag": "[subagent]", **entry, "output": ""},
+                            path=activity_path, emit=False)
+            finish_stream(keep_tail=False)
+            if quiet_console:
+                print(paint("Sub-agent step done.", "success", stream=sys.stdout, bold=True),
+                      flush=True)
             continue
 
         attempts: list[dict] = []
@@ -1059,18 +1449,20 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
             append_activity({"type": "provider_attempt", "stage": "subagent",
                              "activity_id": activity_id, "task_id": task["id"],
                              "label": task["kind"],
-                             "tag": _subagent_tag(provider), **info}, path=activity_path)
+                             "tag": _subagent_tag(provider), **info},
+                            path=activity_path, emit=False)
 
         topics = topics_for({**task, "context": request.get("context", "")})
         if topics:
-            print(paint(f"[subagent instructions] giving it the file rules for {', '.join(topics)}.",
-                        "tool"), flush=True)
+            if not quiet_console:
+                print(paint(f"[subagent instructions] giving it the file rules for {', '.join(topics)}.",
+                            "tool"), flush=True)
             append_activity({"type": "subagent_guidance", "stage": "subagent",
                              "activity_id": activity_id, "task_id": task["id"],
                              "label": task["kind"],
                              "tag": "[subagent instructions]", "status": "provided",
                              "files": topics, "apply_to": task.get("apply_to", "")},
-                            path=activity_path)
+                            path=activity_path, emit=False)
         started = time.monotonic()
         agent_run: dict = {}
         try:
@@ -1081,7 +1473,8 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
                     groq_model_name=groq_model_name, root=root,
                     bazaar_key=bazaar_key, bazaar_url=bazaar_url,
                     url=url, groq_url=groq_url, timeout=timeout,
-                    on_attempt=on_attempt)
+                    on_attempt=on_attempt,
+                    on_text_chunk=relay_safe_answer if on_text_chunk else None)
                 text = str(agent_run.get("text") or "")
                 provider = str(agent_run.get("provider") or "")
             else:
@@ -1091,7 +1484,8 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
                     gemini_key=api_key, gemini_model=model,
                     groq_key=groq_key, groq_model_name=groq_model_name,
                     timeout=timeout, url=url, groq_url=groq_url,
-                    on_attempt=on_attempt)
+                    on_attempt=on_attempt,
+                    on_text_chunk=relay_safe_answer if on_text_chunk else None)
         except GeminiUnavailable as exc:
             took = round(time.monotonic() - started, 1)
             entry = {**fields, "id": task["id"], "ok": False, "status": "failed",
@@ -1100,11 +1494,18 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
             results.append(entry)
             append_activity({"type": "subagent_result", "stage": "subagent",
                              "tag": "[subagent]", **entry, "output": ""},
-                            path=activity_path)
-            print(paint(f"[subagent] task {task['id']} failed; see the safe provider-attempt "
-                        "details in the AI activity log.", "error"), file=sys.stderr, flush=True)
+                            path=activity_path, emit=False)
+            finish_stream(keep_tail=False)
+            if quiet_console:
+                prefix = "\n" if stream_state["emitted"] else ""
+                print(paint(prefix + "Sub-agent step done.", "success",
+                            stream=sys.stdout, bold=True), flush=True)
+            else:
+                print(paint(f"[subagent] task {task['id']} failed; see the safe provider-attempt "
+                            "details in the AI activity log.", "error"), file=sys.stderr, flush=True)
             continue
 
+        finish_stream(keep_tail=True)
         took = round(time.monotonic() - started, 1)
         providers.append(provider)
         provider_model = (attempt_models[-1].get("model") if attempt_models
@@ -1151,10 +1552,15 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
         results.append(entry)
         append_activity({"type": "subagent_result", "stage": "subagent",
                          "tag": _subagent_tag(provider), **entry,
-                         "output": text}, path=activity_path)
+                         "output": text}, path=activity_path, emit=False)
         edited = ", ".join(entry["edited_files"]) or "no file written"
-        print(paint(f"{_subagent_tag(provider)} task {task['id']} returned in {took}s "
-                    f"({edited}).", "success" if entry["ok"] else "warning"), flush=True)
+        if quiet_console:
+            prefix = "\n" if stream_state["emitted"] else ""
+            print(paint(prefix + "Sub-agent step done.", "success",
+                        stream=sys.stdout, bold=True), flush=True)
+        else:
+            print(paint(f"{_subagent_tag(provider)} task {task['id']} returned in {took}s "
+                        f"({edited}).", "success" if entry["ok"] else "warning"), flush=True)
 
     return sanitize_data({"model": model, "skipped": skipped,
                           "quota_exhausted": quota_is_exhausted(root),
@@ -1180,18 +1586,24 @@ def main() -> None:
                              f"{DEFAULT_GROQ_MODEL})")
     parser.add_argument("--groq-url", default="", help="override the Groq endpoint (tests)")
     parser.add_argument("--stdout", action="store_true",
-                        help="print complete, secret-redacted answers in the live console")
+                        help="stream only secret-redacted, user-facing sub-agent answers")
     args = parser.parse_args()
 
     raw = json.loads(args.request.read_text(encoding="utf-8"))
     request = normalize_request(raw)
     if not request["tasks"]:
-        print(paint("[gemini sub-agent] no tasks requested; nothing to delegate.",
-                    "notice"), flush=True)
+        if not args.stdout:
+            print(paint("[gemini sub-agent] no tasks requested; nothing to delegate.",
+                        "notice"), flush=True)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps({"model": args.model, "skipped": True,
                                            "results": []}) + "\n", encoding="utf-8")
         return
+
+    def print_live_answer(channel: str, text: str) -> None:
+        if args.stdout and channel == "answer" and text:
+            sys.stdout.write(paint(text, "answer", stream=sys.stdout))
+            sys.stdout.flush()
 
     result = run_tasks(request, api_key=os.environ.get(API_KEY_ENV, "").strip(),
                        model=args.model, root=Path.cwd(),
@@ -1200,17 +1612,12 @@ def main() -> None:
                        url=args.url or None, timeout=args.timeout,
                        groq_key=os.environ.get(GROQ_KEY_ENV, "").strip(),
                        groq_model_name=args.groq_model,
-                       groq_url=args.groq_url or None)
+                       groq_url=args.groq_url or None,
+                       quiet_console=args.stdout,
+                       on_text_chunk=print_live_answer if args.stdout else None)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n",
                           encoding="utf-8")
-    if args.stdout:
-        for entry in result["results"]:
-            if entry.get("text"):
-                tag = _subagent_tag(entry.get("provider", ""))
-                print(paint(f"{tag} full response for {entry['id']} ({entry.get('kind', 'task')}):\n"
-                            f"{redact_secrets(entry['text'])}", "answer"), flush=True)
-
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary and result.get("results"):
         lines = ["## AI sub-agent work", "",
@@ -1265,9 +1672,10 @@ def main() -> None:
         except OSError:
             pass
 
-    ok = sum(1 for entry in result["results"] if entry.get("ok"))
-    print(f"[subagent] {ok}/{len(result['results'])} task(s) completed; "
-          f"providers: {', '.join(result.get('providers', [])) or 'none'}.", flush=True)
+    if not args.stdout:
+        ok = sum(1 for entry in result["results"] if entry.get("ok"))
+        print(f"[subagent] {ok}/{len(result['results'])} task(s) completed; "
+              f"providers: {', '.join(result.get('providers', [])) or 'none'}.", flush=True)
 
 
 if __name__ == "__main__":
