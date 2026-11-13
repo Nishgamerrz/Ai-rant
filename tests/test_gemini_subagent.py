@@ -1,7 +1,7 @@
-"""The local model can delegate work to Gemini, with Groq as its fallback.
+"""The local model delegates text tasks through BazaarLink, Gemini and Groq.
 
-The workflow supplies ``GEMINI_API_KEY`` and ``GROQ_API_KEY`` secrets. Gemini is
-tried first and Groq is the fallback; if neither key is set, tasks are skipped.
+The workflow supplies ``BAZAAR_LINK_API`` first, then ``GEMINI_API_KEY`` and
+``GROQ_API_KEY`` as fallbacks. If no provider key is set, tasks are skipped.
 """
 from __future__ import annotations
 
@@ -38,6 +38,9 @@ WORKFLOW = ROOT / ".github" / "workflows" / "main.yml"
 # Point the marker at a private temp path for the whole module.
 _MODULE_MARKER_DIR = tempfile.mkdtemp(prefix="quota-marker-")
 os.environ["GEMINI_QUOTA_MARKER"] = str(Path(_MODULE_MARKER_DIR) / "gemini_quota_exhausted")
+# Tests always use local stubs; never let a developer's shell secret trigger a real call.
+for _credential in ("BAZAAR_LINK_API", "GEMINI_API_KEY", "GROQ_API_KEY"):
+    os.environ.pop(_credential, None)
 
 
 class _StubGemini(BaseHTTPRequestHandler):
@@ -342,7 +345,8 @@ class CommandLineTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, msg=result.stderr[-1500:])
             data = json.loads((Path(tmp) / "results.json").read_text(encoding="utf-8"))
             self.assertTrue(data["skipped"])
-            self.assertIn("neither GEMINI_API_KEY nor GROQ_API_KEY is configured", result.stdout)
+            self.assertIn("none of BAZAAR_LINK_API, GEMINI_API_KEY or GROQ_API_KEY is configured",
+                          result.stdout)
 
     def test_empty_task_list_is_fine(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -357,8 +361,11 @@ class WorkflowWiringTests(unittest.TestCase):
         self.workflow = WORKFLOW.read_text(encoding="utf-8")
 
     def test_secret_and_variable_are_documented_names(self):
+        self.assertIn("BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}", self.workflow)
         self.assertIn("GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}", self.workflow)
         self.assertIn("GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}", self.workflow)
+        self.assertIn("Text provider order: BazaarLink auto:free, Gemini, then Groq.",
+                      self.workflow)
 
     def test_local_ai_can_delegate_in_the_story_and_the_plan(self):
         self.assertIn("YOU HAVE A GEMINI SUB-AGENT", self.workflow)
@@ -375,10 +382,12 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertIn("USE IT AT LEAST ONCE OR TWICE", self.workflow)
         self.assertIn("put the task(s) in your first response", self.workflow)
 
-    def test_the_reply_is_visible_in_the_console(self):
+    def test_bazaar_replies_are_quiet_while_fallbacks_remain_visible(self):
         helper = (ROOT / "tools" / "gemini_subagent.py").read_text(encoding="utf-8")
         self.assertIn("reply to {task['id']}", helper)
         self.assertIn("full answer for {entry['id']}", helper)
+        self.assertIn('entry.get("provider") != "bazaarlink"', helper)
+        self.assertIn('entry.get("provider") == "bazaarlink"', helper)
         self.assertIn("GITHUB_STEP_SUMMARY", helper)
 
     def test_gemini_can_edit_the_narration_to_length(self):
@@ -645,7 +654,7 @@ class QuotaWorkflowTests(unittest.TestCase):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("Path('dist/gemini_quota_exhausted').is_file()", text)
         self.assertIn("cannot execute the AI-authored mandatory map sub-agent calls", text)
-        self.assertIn("Neither Gemini nor the Groq fallback edited the narration", text)
+        self.assertIn("Neither BazaarLink, Gemini nor the Groq fallback edited the narration", text)
         self.assertNotIn("skipped and the plan you already wrote stands", text)
 
 
@@ -713,8 +722,215 @@ class _GroqStub(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class _BazaarStub(BaseHTTPRequestHandler):
+    """Quiet OpenAI-compatible endpoint with controllable errors and finish reasons."""
+
+    calls: list[dict] = []
+    status = 200
+    text = "BAZAAR ANSWER"
+    finish_reason = "stop"
+    error_message = "upstream unavailable"
+    status_by_call: dict[int, int] = {}
+    text_by_call: dict[int, str | None] = {}
+    finish_by_call: dict[int, str] = {}
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        payload = json.loads(self.rfile.read(length))
+        index = len(type(self).calls)
+        type(self).calls.append({
+            "auth": self.headers.get("Authorization"),
+            "path": self.path,
+            "model": payload.get("model"),
+            "prompt": payload.get("messages", [{}])[0].get("content"),
+            "max_tokens": payload.get("max_tokens"),
+            "stream": payload.get("stream"),
+        })
+        status = type(self).status_by_call.get(index, type(self).status)
+        if status != 200:
+            body = json.dumps({"error": {"message": type(self).error_message}}).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        text = type(self).text_by_call.get(index, type(self).text)
+        finish = type(self).finish_by_call.get(index, type(self).finish_reason)
+        body = json.dumps({"choices": [{"message": {"content": text},
+                                        "finish_reason": finish}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class BazaarLinkFallbackTests(unittest.TestCase):
+    """BazaarLink is the quiet primary, with Gemini and Groq as ordered fallbacks."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.marker = Path(tmp.name) / "gemini_quota_exhausted"
+        previous = os.environ.get(_QUOTA_MARKER_ENV)
+        os.environ[_QUOTA_MARKER_ENV] = str(self.marker)
+        self.addCleanup(lambda: os.environ.pop(_QUOTA_MARKER_ENV, None) if previous is None
+                        else os.environ.__setitem__(_QUOTA_MARKER_ENV, previous))
+
+        self.bazaar = type("B", (_BazaarStub,), {"calls": []})
+        self.bazaar_server = HTTPServer(("127.0.0.1", 0), self.bazaar)
+        threading.Thread(target=self.bazaar_server.serve_forever, daemon=True).start()
+        self.addCleanup(self.bazaar_server.shutdown)
+        self.addCleanup(self.bazaar_server.server_close)
+        self.bazaar_url = f"http://127.0.0.1:{self.bazaar_server.server_port}/v1/chat/completions"
+
+        self.gemini = type("G", (_StubGemini,), {"calls": []})
+        self.gemini_server = HTTPServer(("127.0.0.1", 0), self.gemini)
+        threading.Thread(target=self.gemini_server.serve_forever, daemon=True).start()
+        self.addCleanup(self.gemini_server.shutdown)
+        self.addCleanup(self.gemini_server.server_close)
+        self.gemini_url = f"http://127.0.0.1:{self.gemini_server.server_port}/x"
+
+        self.quota_gemini = type("Q", (_QuotaGemini,), {"calls": []})
+        self.quota_server = HTTPServer(("127.0.0.1", 0), self.quota_gemini)
+        threading.Thread(target=self.quota_server.serve_forever, daemon=True).start()
+        self.addCleanup(self.quota_server.shutdown)
+        self.addCleanup(self.quota_server.server_close)
+        self.quota_url = f"http://127.0.0.1:{self.quota_server.server_port}/x"
+
+        self.groq = type("R", (_GroqStub,), {"calls": [], "status": 200,
+                                             "text": "GROQ ANSWER"})
+        self.groq_server = HTTPServer(("127.0.0.1", 0), self.groq)
+        threading.Thread(target=self.groq_server.serve_forever, daemon=True).start()
+        self.addCleanup(self.groq_server.shutdown)
+        self.addCleanup(self.groq_server.server_close)
+        self.groq_url = f"http://127.0.0.1:{self.groq_server.server_port}/chat"
+
+    def _run(self, *, bazaar_key="bazaar-secret", api_key="gemini-secret", groq_key="",
+             **overrides):
+        kwargs = {
+            "bazaar_key": bazaar_key,
+            "bazaar_url": self.bazaar_url,
+            "api_key": api_key,
+            "model": "m",
+            "root": Path("."),
+            "url": self.gemini_url,
+            "groq_key": groq_key,
+            "groq_url": self.groq_url,
+        }
+        kwargs.update(overrides)
+        return run_tasks({"tasks": [{"id": "t1", "kind": "answer",
+                                     "instruction": "Answer the question completely."}]},
+                         **kwargs)
+
+    def test_bazaarlink_is_first_and_uses_the_requested_openai_route(self):
+        result = self._run(api_key="gemini-secret", groq_key="groq-secret")
+        self.assertEqual(gemini_subagent.BAZAAR_LINK_ENDPOINT,
+                         "https://api.bazaarlink.ai/v1/chat/completions")
+        self.assertEqual(gemini_subagent.BAZAAR_LINK_MODEL, "auto:free")
+        self.assertEqual(result["providers"], ["bazaarlink"])
+        self.assertEqual(result["results"][0]["text"], "BAZAAR ANSWER")
+        self.assertEqual(self.bazaar.calls[0]["auth"], "Bearer bazaar-secret")
+        self.assertEqual(self.bazaar.calls[0]["model"], "auto:free")
+        self.assertEqual(self.bazaar.calls[0]["path"], "/v1/chat/completions")
+        self.assertEqual(self.bazaar.calls[0]["stream"], False)
+        self.assertEqual(self.gemini.calls, [])
+        self.assertEqual(self.groq.calls, [])
+
+    def test_legacy_groq_preference_cannot_change_the_provider_order(self):
+        text, provider = gemini_subagent.call_any(
+            "quiet test", bazaar_key="bazaar-secret", bazaar_url=self.bazaar_url,
+            gemini_key="gemini-secret", groq_key="groq-secret",
+            groq_url=self.groq_url, prefer="groq")
+        self.assertEqual((text, provider), ("BAZAAR ANSWER", "bazaarlink"))
+        self.assertEqual(self.gemini.calls, [])
+        self.assertEqual(self.groq.calls, [])
+
+    def test_missing_bazaar_credentials_fall_through_to_gemini(self):
+        result = self._run(bazaar_key="")
+        self.assertEqual(result["providers"], ["gemini"])
+        self.assertEqual(result["results"][0]["text"], "Paris")
+        self.assertEqual(self.bazaar.calls, [])
+        self.assertEqual(len(self.gemini.calls), 1)
+
+    def test_provider_error_falls_through_without_logging_the_error_body(self):
+        self.bazaar.status = 503
+        self.bazaar.error_message = "must-not-appear-in-logs"
+        result = self._run()
+        self.assertEqual(result["providers"], ["gemini"])
+        self.assertEqual(result["results"][0]["text"], "Paris")
+        self.assertEqual(len(self.bazaar.calls), 1)
+        self.assertEqual(len(self.gemini.calls), 1)
+
+    def test_empty_response_falls_through_to_gemini(self):
+        self.bazaar.text_by_call = {0: "   "}
+        result = self._run()
+        self.assertEqual(result["providers"], ["gemini"])
+        self.assertEqual(result["results"][0]["text"], "Paris")
+        self.assertEqual(len(self.bazaar.calls), 1)
+        self.assertEqual(len(self.gemini.calls), 1)
+
+    def test_truncated_response_falls_through_without_returning_partial_text(self):
+        self.bazaar.text = "PARTIAL BAZAAR ANSWER"
+        self.bazaar.finish_reason = "length"
+        result = self._run()
+        self.assertEqual(result["providers"], ["gemini"])
+        self.assertEqual(result["results"][0]["text"], "Paris")
+        self.assertEqual(len(self.bazaar.calls), 1)
+        self.assertEqual(self.bazaar.calls[0]["max_tokens"], 8192)
+
+    def test_gemini_error_after_bazaar_falls_through_to_groq(self):
+        self.bazaar.status = 503
+        result = self._run(url=self.quota_url, groq_key="groq-secret")
+        self.assertEqual(result["providers"], ["groq"])
+        self.assertEqual(result["results"][0]["text"], "GROQ ANSWER")
+        self.assertEqual(len(self.bazaar.calls), 1)
+        self.assertEqual(len(self.quota_gemini.calls), 1)
+        self.assertEqual(len(self.groq.calls), 1)
+
+    def test_bazaar_credentials_are_read_from_the_named_environment_secret(self):
+        with patch.dict(os.environ, {"BAZAAR_LINK_API": "environment-secret",
+                                     "GROQ_API_KEY": ""}):
+            result = run_tasks({"tasks": [{"kind": "answer", "instruction": "hi"}]},
+                               api_key="", model="m", root=Path("."),
+                               bazaar_url=self.bazaar_url)
+        self.assertEqual(result["providers"], ["bazaarlink"])
+        self.assertEqual(self.bazaar.calls[0]["auth"], "Bearer environment-secret")
+        self.assertNotIn("environment-secret", self.bazaar.calls[0]["path"])
+
+    def test_cli_returns_bazaar_text_to_the_caller_but_omits_it_from_logs_and_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request = root / "request.json"
+            output = root / "results.json"
+            summary = root / "step-summary.md"
+            request.write_text(json.dumps({"tasks": [{"kind": "answer",
+                                                        "instruction": "Answer quietly."}]}),
+                               encoding="utf-8")
+            env = {**os.environ, "BAZAAR_LINK_API": "bazaar-secret",
+                   "GITHUB_STEP_SUMMARY": str(summary), "PYTHONPATH": str(ROOT)}
+            env.pop("GEMINI_API_KEY", None)
+            env.pop("GROQ_API_KEY", None)
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "tools" / "gemini_subagent.py"),
+                 "--request", str(request), "--output", str(output), "--stdout",
+                 "--bazaar-url", self.bazaar_url],
+                cwd=root, capture_output=True, text=True, env=env)
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr[-1000:])
+            result = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(result["results"][0]["text"], "BAZAAR ANSWER")
+            self.assertEqual(result["results"][0]["provider"], "bazaarlink")
+            visible = proc.stdout + proc.stderr + summary.read_text(encoding="utf-8")
+            self.assertNotIn("BAZAAR ANSWER", visible)
+            self.assertNotIn("bazaar-secret", visible)
+
+
 class GroqFallbackTests(unittest.TestCase):
-    """When Gemini is out of quota or broken, Groq does the job - then Gemini returns."""
+    """When BazaarLink and Gemini fail, Groq does the job."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -828,6 +1044,16 @@ class GroqFallbackTests(unittest.TestCase):
         self.assertTrue(result["skipped"])
 
 
+class BazaarLinkWorkflowTests(unittest.TestCase):
+    def test_the_workflows_wire_bazaar_link_only_from_the_repository_secret(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(text.count("BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}"), 3)
+        self.assertIn("and not os.environ.get('BAZAAR_LINK_API', '').strip()", text)
+        self.assertIn('[ -n "${BAZAAR_LINK_API:-}" ]', text)
+        agent = (ROOT / ".github" / "workflows" / "agent.yml").read_text(encoding="utf-8")
+        self.assertIn("BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}", agent)
+
+
 class GroqWorkflowTests(unittest.TestCase):
     def test_the_workflow_passes_the_groq_secret_to_every_ai_step(self):
         text = WORKFLOW.read_text(encoding="utf-8")
@@ -844,4 +1070,4 @@ class GroqWorkflowTests(unittest.TestCase):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("and not os.environ.get('GROQ_API_KEY', '').strip()", text)
         self.assertIn("cannot execute the AI-authored mandatory map sub-agent calls", text)
-        self.assertIn('{ [ -n "${GEMINI_API_KEY:-}" ] || [ -n "${GROQ_API_KEY:-}" ]; }', text)
+        self.assertIn('{ [ -n "${BAZAAR_LINK_API:-}" ] || [ -n "${GEMINI_API_KEY:-}" ] || [ -n "${GROQ_API_KEY:-}" ]; }', text)

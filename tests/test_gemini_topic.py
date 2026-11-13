@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -37,6 +38,9 @@ WORKFLOW = ROOT / ".github" / "workflows" / "main.yml"
 # change what these stub-API tests see (see tests/test_gemini_subagent.py).
 os.environ.setdefault("GEMINI_QUOTA_MARKER",
                       str(Path(tempfile.mkdtemp(prefix="quota-marker-")) / "gemini_quota_exhausted"))
+# Keep API coverage hermetic; every provider call in these tests uses a local stub.
+for _credential in ("BAZAAR_LINK_API", "GEMINI_API_KEY", "GROQ_API_KEY"):
+    os.environ.pop(_credential, None)
 
 GOOD = ("A nervous student finds a lost wallet on the way to school and has to decide "
         "what to do before the first bell rings.")
@@ -170,6 +174,15 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(result["text"], "a stdent finds a lost wallett")
         self.assertEqual(self.handler.calls, [])
 
+    def test_bazaarlink_is_passed_to_the_shared_provider_and_its_completion_is_used(self):
+        with patch("gemini_topic.call_any", return_value=(GOOD, "bazaarlink")) as mocked:
+            result = refine("a stdent finds a lost wallett", api_key="", model="m",
+                            bazaar_key="bazaar-secret")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["provider"], "bazaarlink")
+        self.assertEqual(result["text"], GOOD)
+        self.assertEqual(mocked.call_args.kwargs["bazaar_key"], "bazaar-secret")
+
     def test_a_meta_reply_falls_back_to_the_typed_text(self):
         self.handler.reply = "Sure, I fixed the spelling: " + GOOD
         result = refine("a stdent finds a lost wallett", api_key="k", model="m",
@@ -242,11 +255,13 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertIn("RAW_WORLD_THEME: ${{ inputs.world_theme }}", block)
         self.assertNotIn("RAW_STORY_TOPIC: ${{ steps.refine", block)
 
-    def test_it_uses_the_same_free_key(self):
+    def test_it_uses_the_same_free_provider_secrets(self):
         start = self.workflow.index("id: refine")
-        block = self.workflow[start:start + 900]
+        block = self.workflow[start:start + 1000]
+        self.assertIn("BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}", block)
         self.assertIn("GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}", block)
         self.assertIn("GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}", block)
+        self.assertIn("GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}", block)
 
     def test_every_later_step_uses_the_cleaned_prompt(self):
         # RAW_STORY_TOPIC: ... is the one place the untouched input may appear.
