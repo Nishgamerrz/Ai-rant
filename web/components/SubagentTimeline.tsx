@@ -40,6 +40,14 @@ function providerName(provider?: string, model?: string) {
   return model ? `${name} · ${model}` : name;
 }
 
+function fallbackName(attempt: ProviderAttempt) {
+  const target = String(attempt.fallback_to || "");
+  if (!target) return "";
+  if (["bazaarlink", "gemini", "groq"].includes(target.toLowerCase())) return providerName(target);
+  return String(attempt.provider || "").toLowerCase() === "groq"
+    ? providerName("groq", target) : target;
+}
+
 function parseLiveLogForSubagent(tail: string): SubagentCall[] {
   const events: ActivityRecord[] = [];
   const marker = "[ai-log] ";
@@ -450,7 +458,7 @@ export function SubagentTimeline({ runId, kind, liveLog }: {
                   {attemptList.length > 0 && (
                     <DetailBlock title="Provider attempts">
                       {attemptList.map((attempt, index) => {
-                        const fallback = attempt.fallback_to ? ` → ${attempt.fallback_to}` : "";
+                        const fallback = attempt.fallback_to ? ` → ${fallbackName(attempt)}` : "";
                         const reason = attempt.reason ? ` — ${attempt.reason}` : "";
                         return `${index + 1}. ${providerName(attempt.provider, attempt.model)}: ${attempt.status || "unknown"}${fallback}${reason}${attempt.seconds !== undefined ? ` (${attempt.seconds}s)` : ""}`;
                       }).join("\n")}

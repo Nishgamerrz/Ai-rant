@@ -8,6 +8,7 @@ away in favour of the user's own wording.
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -15,6 +16,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -26,6 +28,7 @@ from gemini_topic import (  # noqa: E402
     META_PHRASES,
     TOPIC_NOTE,
     build_prompt,
+    main as topic_main,
     premises,
     refine,
     sanitize,
@@ -204,6 +207,23 @@ class ApiTests(unittest.TestCase):
                          ["fallback", "answered"])
         self.assertEqual(result["provider_attempts"][0]["fallback_to"], "gemini")
 
+    def test_attempt_telemetry_overrides_a_conflicting_compatibility_label(self):
+        def fake_call(prompt, **kwargs):
+            kwargs["on_attempt"]({"provider": "bazaarlink", "model": "auto:free",
+                                  "status": "answered", "seconds": 0.3})
+            # The tuple is retained for compatibility; attempt telemetry is the
+            # source of truth for labels if these values ever disagree.
+            return GOOD, "gemini"
+
+        with patch("gemini_topic.call_any", side_effect=fake_call):
+            result = refine("a stdent finds a lost wallett", api_key="gemini-key",
+                            model="gemini-2.5-flash", bazaar_key="bazaar-key",
+                            groq_key="groq-key")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["provider"], "bazaarlink")
+        self.assertEqual(result["provider_model"], "auto:free")
+        self.assertEqual(result["provider_attempts"][0]["provider"], "bazaarlink")
+
     def test_a_meta_reply_falls_back_to_the_typed_text(self):
         self.handler.reply = "Sure, I fixed the spelling: " + GOOD
         result = refine("a stdent finds a lost wallett", api_key="k", model="m",
@@ -233,6 +253,78 @@ class CommandLineTests(unittest.TestCase):
             cwd=tmp, capture_output=True, text=True,
             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **env},
         )
+
+    def test_stdout_shows_complete_topic_text_and_the_answering_provider(self):
+        attempt = {"provider": "bazaarlink", "model": "auto:free",
+                   "status": "answered", "seconds": 0.3}
+        entry = {"ok": True, "skipped": False, "text": GOOD, "candidate": GOOD,
+                 "provider": "gemini", "provider_model": "stale-gemini-model",
+                 "provider_attempts": [attempt], "seconds": 0.3}
+
+        def fake_refine(text, **kwargs):
+            kwargs["on_attempt"](attempt)
+            return dict(entry)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "refined.json"
+            env = {"RAW_STORY_TOPIC": "a stdent finds a lost wallett",
+                   "RAW_WORLD_THEME": "", "BAZAAR_LINK_API": "bazaar-test-secret"}
+            with patch.dict(os.environ, env), patch(
+                    "gemini_topic.refine", side_effect=fake_refine), patch(
+                    "sys.argv", ["gemini_topic.py", "--output", str(output_path), "--stdout"]):
+                captured = io.StringIO()
+                with redirect_stdout(captured):
+                    self.assertEqual(topic_main(), 0)
+
+            text = captured.getvalue()
+            self.assertIn("[bazaar topic] provider answered story prompt with BazaarLink auto:free", text)
+            self.assertIn("[bazaar topic] complete AI-written story prompt:", text)
+            self.assertIn(GOOD, text)
+            self.assertNotIn("stale-gemini-model", text)
+            self.assertNotIn("bazaar-test-secret", text)
+            activity = [json.loads(line) for line in
+                        (Path(tmp) / "ai_activity.jsonl").read_text(encoding="utf-8").splitlines()]
+            cleanup = next(event for event in activity
+                           if event.get("type") == "topic_cleanup")
+            self.assertEqual(cleanup["provider"], "bazaarlink")
+            self.assertEqual(cleanup["model"], "auto:free")
+            self.assertEqual(cleanup["output"], GOOD)
+
+    def test_stdout_identifies_failed_provider_and_fallback(self):
+        attempts = [
+            {"provider": "bazaarlink", "model": "auto:free", "status": "fallback",
+             "reason": "HTTP 429 quota/rate limit", "fallback_to": "gemini", "seconds": 0.2},
+            {"provider": "gemini", "model": "gemini-2.5-flash", "status": "answered",
+             "seconds": 0.4},
+        ]
+        entry = {"ok": True, "skipped": False, "text": GOOD, "candidate": GOOD,
+                 "provider": "gemini", "provider_model": "gemini-2.5-flash",
+                 "provider_attempts": attempts, "seconds": 0.6}
+
+        def fake_refine(text, **kwargs):
+            for attempt in attempts:
+                kwargs["on_attempt"](attempt)
+            return dict(entry)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "refined.json"
+            env = {"RAW_STORY_TOPIC": "a stdent finds a lost wallett",
+                   "RAW_WORLD_THEME": "", "BAZAAR_LINK_API": "bazaar-test-secret",
+                   "GEMINI_API_KEY": "gemini-test-secret"}
+            with patch.dict(os.environ, env), patch(
+                    "gemini_topic.refine", side_effect=fake_refine), patch(
+                    "sys.argv", ["gemini_topic.py", "--output", str(output_path), "--stdout"]):
+                captured = io.StringIO()
+                with redirect_stdout(captured):
+                    self.assertEqual(topic_main(), 0)
+
+            text = captured.getvalue()
+            self.assertIn("[bazaar topic] could not answer story prompt "
+                          "(HTTP 429 quota/rate limit); falling back to Gemini.", text)
+            self.assertIn("[gemini topic] provider answered story prompt with "
+                          "Gemini gemini-2.5-flash", text)
+            self.assertNotIn("bazaar-test-secret", text)
+            self.assertNotIn("gemini-test-secret", text)
 
     def test_without_a_key_the_raw_text_is_written_back(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -314,6 +406,19 @@ class WorkflowWiringTests(unittest.TestCase):
         block = self.workflow[start:start + 1200]
         self.assertIn("continue-on-error: true", block)
         self.assertIn("|| true", block)
+
+    def test_topic_and_every_subagent_response_are_shown_in_the_ai_log(self):
+        topic_start = self.workflow.index("python tools/gemini_topic.py")
+        topic_block = self.workflow[topic_start:self.workflow.index("- name: Set short timing", topic_start)]
+        self.assertIn("--stdout || true", topic_block)
+        self.assertIn("--output story_subagent_results.json --stdout || true", self.workflow)
+        self.assertIn("--output narration_edit_results.json --stdout || true", self.workflow)
+        self.assertIn("--request subagent_tasks.json --output subagent_results.json --stdout",
+                      self.workflow)
+        viewer = (ROOT / "web/components/LogViewer.tsx").read_text(encoding="utf-8")
+        self.assertIn("ROUTINE_STAGE", viewer)
+        self.assertIn("Shell commands, environment dumps, setup, install and curl output are hidden.",
+                      viewer)
 
 
 if __name__ == "__main__":
