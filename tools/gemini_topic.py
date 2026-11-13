@@ -28,11 +28,13 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from console_style import paint  # noqa: E402
+from ai_activity import append_activity, sanitize_data  # noqa: E402
 
 from gemini_subagent import (  # noqa: E402
     API_KEY_ENV,
@@ -202,38 +204,54 @@ def refine(text: str, *, api_key: str, model: str = DEFAULT_MODEL,
            kind: str = "story", bazaar_key: str | None = None,
            bazaar_url: str | None = None, url: str | None = None,
            timeout: float = 60.0, groq_key: str = "",
-           groq_url: str | None = None) -> dict:
+           groq_url: str | None = None, on_attempt=None) -> dict:
     """Clean one prompt. Never raises: falls back to the text as typed.
 
-    The shared provider helper tries BazaarLink, then Gemini, then Groq.
+    The shared provider helper tries BazaarLink, then Gemini, then Groq. The
+    optional callback gets safe provider-attempt metadata, never raw requests.
     """
+    started = time.monotonic()
     raw = str(text or "").strip()
     api_key = str(api_key or "").strip()
     if bazaar_key is None:
         bazaar_key = os.environ.get(BAZAAR_LINK_KEY_ENV, "")
     bazaar_key = str(bazaar_key or "").strip()
     groq_key = str(groq_key or os.environ.get(GROQ_KEY_ENV, "")).strip()
+    attempts = []
+
+    def report_attempt(event: dict) -> None:
+        attempts.append(dict(event))
+        if on_attempt:
+            on_attempt(event)
+
     if not raw:
-        return {"ok": False, "skipped": True, "text": "", "reason": "nothing to clean"}
+        return {"ok": False, "skipped": True, "text": "", "reason": "nothing to clean",
+                "provider_attempts": attempts, "seconds": 0}
     if not bazaar_key and not api_key and not groq_key:
-        return {"ok": False, "skipped": True, "text": raw, "reason": "no API key"}
+        return {"ok": False, "skipped": True, "text": raw, "reason": "no API key",
+                "provider_attempts": attempts, "seconds": round(time.monotonic() - started, 2)}
     try:
         reply, provider = call_any(build_prompt(raw, kind),
                                    bazaar_key=bazaar_key, bazaar_url=bazaar_url,
                                    gemini_key=api_key, gemini_model=model,
                                    groq_key=groq_key, timeout=timeout,
-                                   url=url, groq_url=groq_url)
+                                   url=url, groq_url=groq_url,
+                                   on_attempt=report_attempt)
     except GeminiUnavailable as exc:
-        return {"ok": False, "skipped": False, "text": raw, "reason": str(exc)[:300]}
-    if provider == "groq":
-        print("BazaarLink and the Gemini key could not clean the prompt; "
-              "using the Groq fallback.", flush=True)
+        return {"ok": False, "skipped": False, "text": raw, "reason": str(exc)[:300],
+                "provider_attempts": attempts,
+                "seconds": round(time.monotonic() - started, 2)}
+    provider_model = next((attempt.get("model") for attempt in reversed(attempts)
+                           if attempt.get("status") == "answered"), "")
     cleaned, reason = sanitize(reply, raw)
+    common = {"provider": provider, "provider_model": provider_model,
+              "provider_attempts": attempts,
+              "seconds": round(time.monotonic() - started, 2)}
     if cleaned is None:
-        return {"ok": False, "skipped": False, "text": raw, "reason": reason,
-                "provider": provider}
-    return {"ok": True, "skipped": False, "text": cleaned, "reason": "ok",
-            "original": raw, "provider": provider}
+        return {"ok": False, "skipped": False, "text": raw, "candidate": reply,
+                "reason": reason, **common}
+    return {"ok": True, "skipped": False, "text": cleaned, "candidate": reply,
+            "reason": "ok", "original": raw, **common}
 
 
 def _write_outputs(path: str | None, values: dict) -> None:
@@ -271,45 +289,71 @@ def main() -> int:
     story_raw = os.environ.get(args.story_env, "")
     theme_raw = os.environ.get(args.theme_env, "")
 
+    activity_path = (args.output.parent if args.output else Path("dist")) / "ai_activity.jsonl"
+
+    def topic_tag(provider: str = "") -> str:
+        if not provider:
+            return "[topic cleanup]"
+        label = {"bazaarlink": "bazaar", "gemini": "gemini", "groq": "groq"}.get(
+            str(provider).lower(), str(provider).lower())
+        return f"[{label} topic]"
+
+    def attempt_logger(label: str):
+        def log_attempt(attempt: dict) -> None:
+            provider = str(attempt.get("provider") or "")
+            append_activity({"type": "provider_attempt", "stage": "topic",
+                             "label": label, "tag": topic_tag(provider), **attempt},
+                            path=activity_path)
+        return log_attempt
+
     story = refine(story_raw, api_key=api_key, bazaar_key=bazaar_key,
                    model=args.model, kind="story", url=args.url,
-                   timeout=args.timeout, groq_key=groq_key)
+                   timeout=args.timeout, groq_key=groq_key,
+                   on_attempt=attempt_logger("story prompt"))
     theme = (refine(theme_raw, api_key=api_key, bazaar_key=bazaar_key,
                     model=args.model, kind="theme", url=args.url,
-                    timeout=args.timeout, groq_key=groq_key)
+                    timeout=args.timeout, groq_key=groq_key,
+                    on_attempt=attempt_logger("world theme"))
              if theme_raw.strip() else {"ok": False, "skipped": True, "text": "",
                                         "reason": "no theme typed"})
 
     if not bazaar_key and not api_key and not groq_key:
-        print(paint(f"[gemini topic] none of {BAZAAR_LINK_KEY_ENV}, {API_KEY_ENV} or "
-                    f"{GROQ_KEY_ENV} is configured; using the prompt exactly as typed. "
-                    "Add a provider secret to fix spelling automatically.", "warning"),
-              flush=True)
-    for label, entry, raw in (("story prompt", story, story_raw),
-                              ("world theme", theme, theme_raw)):
-        if entry["skipped"]:
+        print(paint("[topic] no text-provider credentials are configured; "
+                    "using the prompt exactly as typed.", "warning"), flush=True)
+    for label, kind, entry, raw in (("story prompt", "story", story, story_raw),
+                                    ("world theme", "theme", theme, theme_raw)):
+        if not raw.strip():
             continue
-        if entry["ok"]:
-            if entry.get("provider") == "bazaarlink":
-                print(paint(f"[gemini topic] cleaned the {label} with BazaarLink auto:free; "
-                            "the completion was passed to workflow inputs and omitted from logs.",
-                            "tool"), flush=True)
-            else:
-                print(paint(f"[gemini topic] cleaned the {label} with {args.model}:", "tool"),
-                      flush=True)
-                print(paint(f"[gemini topic]   as typed : {' '.join(raw.split())}", "thought"),
-                      flush=True)
-                print(paint(f"[gemini topic]   cleaned  : {entry['text']}", "answer"), flush=True)
+        provider = entry.get("provider", "")
+        status = "cleaned" if entry.get("ok") else (
+            "skipped" if entry.get("skipped") else "kept_input")
+        candidate = entry.get("candidate")
+        append_activity({
+            "type": "topic_cleanup", "stage": "topic", "tag": topic_tag(provider),
+            "label": label, "kind": kind, "status": status,
+            "provider": provider, "model": entry.get("provider_model") or "",
+            "seconds": entry.get("seconds"),
+            "provider_attempts": entry.get("provider_attempts", []),
+            "input": raw,
+            "prompt": build_prompt(raw, kind) if provider else "",
+            "output": candidate if candidate is not None else entry.get("text", raw),
+            "cleaned_text": entry.get("text", raw),
+            "reason": entry.get("reason", ""),
+        }, path=activity_path)
+        if entry.get("ok"):
+            print(paint(f"{topic_tag(provider)} cleaned the {label} with "
+                        f"{entry.get('provider_model') or provider}.", "tool"), flush=True)
         else:
-            print(paint(f"[gemini topic] kept the {label} as typed ({entry['reason']}).",
-                        "notice"), flush=True)
+            print(paint(f"{topic_tag(provider)} kept the {label} as typed "
+                        f"({entry.get('reason', 'no provider result')}).",
+                        "notice" if entry.get("skipped") else "warning"), flush=True)
 
     values = {"story_topic": story["text"], "world_theme": theme["text"]}
     _write_outputs(args.github_output, values)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps({"model": args.model, "story": story,
-                                           "theme": theme}, ensure_ascii=False, indent=2),
+        record = sanitize_data({"model": args.model, "story": story, "theme": theme})
+        args.output.write_text(json.dumps(record, ensure_ascii=False, indent=2),
                                encoding="utf-8")
     if args.stdout:
         print(story["text"])

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { ModelSelector } from "@/components/ModelSelector";
 import { LogViewer } from "@/components/LogViewer";
+import { AiActivityTimeline } from "@/components/AiActivityTimeline";
 import { FileExplorer } from "@/components/FileExplorer";
 import { SubagentTimeline } from "@/components/SubagentTimeline";
 
@@ -25,7 +26,7 @@ function StatusBadge({ status, conclusion }: { status: string; conclusion: strin
 export default function RbxShortPage() {
   const [storyTopic, setStoryTopic] = useState("In a world where the last person to fall asleep each night gets one wish, two brothers keep each other awake on purpose in a cramped bedroom");
   const [usernames, setUsernames] = useState("normal,noob");
-  const [duration, setDuration] = useState("150");
+  const [duration, setDuration] = useState("120");
   const [mapDetail, setMapDetail] = useState("dense");
   const [model, setModel] = useState("hard");
   const [voice, setVoice] = useState("thin_male");
@@ -222,7 +223,7 @@ export default function RbxShortPage() {
                   <select value={duration} onChange={(e) => setDuration(e.target.value)} className="mt-2 w-full rounded-xl bg-zinc-950 border border-zinc-800 focus:border-zinc-700 outline-none px-3 py-2.5 text-sm">
                     <option value="30">30s</option><option value="45">45s</option><option value="60">60s</option><option value="90">90s</option><option value="120">120s</option><option value="150">150s</option><option value="180">180s</option>
                   </select>
-                  <div className="text-[11px] leading-relaxed text-zinc-600 mt-1">AI chooses the exact ending within the selected minute band. For example, 60s can end at 1:45, never 2:01.</div>
+                  <div className="text-[11px] leading-relaxed text-zinc-600 mt-1">Default: 2:00–2:59. AI chooses the exact ending within your selected minute band, down to the second; 60s can end at 1:45, never 2:01.</div>
                 </div>
                 <div>
                   <label className="text-[11px] font-semibold tracking-widest text-zinc-500 uppercase">Detail</label>
@@ -256,7 +257,7 @@ export default function RbxShortPage() {
 
           <div className="rounded-2xl bg-zinc-900/50 border border-zinc-800 p-4">
             <div className="text-xs font-semibold tracking-wide text-zinc-300">How it works — direct API</div>
-            <div className="text-xs text-zinc-500 leading-relaxed mt-1.5">No tunnel. Every thought, plan, and tool streams via direct GitHub API polling. The last plan is one persistent box that stays alive until the workflow dies.</div>
+            <div className="text-xs text-zinc-500 leading-relaxed mt-1.5">Live provider outcomes stream from the GitHub API. AI prompts, complete answers and authored edits appear below; runner setup and command noise stay hidden.</div>
           </div>
         </div>
 
@@ -315,8 +316,8 @@ export default function RbxShortPage() {
                 <div className="mt-3 flex gap-1 p-1 rounded-xl bg-zinc-950 border border-zinc-800 w-fit">
                   {[
                     { id: "overview", label: "Overview" },
-                    { id: "execution", label: "Execution" },
-                    { id: "intelligence", label: "Plan & Thinking" },
+                    { id: "execution", label: "AI Logs" },
+                    { id: "intelligence", label: "Plan & Content" },
                     { id: "files", label: "Files" },
                   ].map((t) => (
                     <button key={t.id} onClick={() => setTab(t.id as any)} className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${tab === t.id ? "bg-white text-zinc-900 shadow-soft" : "text-zinc-500 hover:text-zinc-300"}`}>{t.label}</button>
@@ -348,20 +349,14 @@ export default function RbxShortPage() {
                     )}
                   </div>
                 )}
-                {tab === "execution" && <LogViewer steps={steps} runStatus={status} logTail={liveLog} />}
+                {tab === "execution" && (
+                  <div className="space-y-3">
+                    <LogViewer steps={steps} runStatus={status} logTail={liveLog} />
+                    <AiActivityTimeline runId={selected} runStatus={status} liveLog={liveLog} />
+                  </div>
+                )}
                 {tab === "intelligence" && (
                   <div className="space-y-3">
-                    {liveLog && (
-                      <div className="rounded-xl bg-zinc-900 border border-zinc-800 overflow-hidden">
-                        <div className="h-8 px-3 flex items-center gap-2 border-b border-zinc-800 bg-zinc-900">
-                          <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
-                          <span className="text-xs font-semibold tracking-wide text-zinc-300">Live — persistent plan · thinking & tools (direct API)</span>
-                          <span className="ml-auto text-[11px] text-zinc-600">{(liveLog.length/1024).toFixed(1)} KB — no tunnel</span>
-                        </div>
-                        <pre className="p-3 text-xs font-mono leading-relaxed whitespace-pre-wrap break-words max-h-[320px] overflow-auto text-zinc-400">{liveLog.slice(-6000)}</pre>
-                        <div className="px-3 py-2 border-t border-zinc-800 bg-zinc-950 text-[11px] text-zinc-500">This persistent plan stays alive until workflow dies, streaming every thought via direct GitHub API polling.</div>
-                      </div>
-                    )}
                     {intelligence.loading ? (
                       <div className="flex items-center gap-2 text-xs text-zinc-500 py-6 justify-center"><span className="h-3 w-3 border border-zinc-700 border-t-zinc-400 rounded-full animate-spin" /> Loading plan…</div>
                     ) : (
@@ -369,13 +364,13 @@ export default function RbxShortPage() {
                         {intelligence.narration && (
                           <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-4">
                             <div className="text-xs font-semibold tracking-wide text-zinc-500 uppercase flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-cyan-500" /> Narration</div>
-                            <pre className="mt-2 text-sm leading-relaxed whitespace-pre-wrap break-words text-zinc-300 font-sans">{intelligence.narration.slice(0, 4000)}</pre>
+                            <pre className="mt-2 text-sm leading-relaxed whitespace-pre-wrap break-words text-zinc-300 font-sans max-h-[600px] overflow-auto">{intelligence.narration}</pre>
                           </div>
                         )}
                         {intelligence.plan ? (
                           <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-4">
                             <div className="text-xs font-semibold tracking-wide text-zinc-500 uppercase flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-violet-500" /> World Plan</div>
-                            <pre className="mt-2 text-xs font-mono leading-relaxed whitespace-pre-wrap break-words text-zinc-400 max-h-[420px] overflow-auto">{intelligence.plan.slice(0, 8000)}</pre>
+                            <pre className="mt-2 text-xs font-mono leading-relaxed whitespace-pre-wrap break-words text-zinc-400 max-h-[600px] overflow-auto">{intelligence.plan}</pre>
                           </div>
                         ) : (
                           <div className="rounded-xl border border-dashed border-zinc-800 bg-zinc-900/30 p-6 text-center">
@@ -402,7 +397,7 @@ export default function RbxShortPage() {
                 <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M9 4V14M4 9H14" stroke="#71717a" strokeWidth="1.4" strokeLinecap="round"/></svg>
               </div>
               <div className="text-sm font-medium text-zinc-300 mt-3">Select a run to inspect</div>
-              <div className="text-xs text-zinc-600 mt-1">Execution logs, AI thinking, world plan, and downloadable files appear here — no need to open GitHub.</div>
+              <div className="text-xs text-zinc-600 mt-1">AI prompts, generated story text, world plans, subagent edits and downloadable files appear here — no need to open raw runner logs.</div>
             </div>
           )}
         </div>

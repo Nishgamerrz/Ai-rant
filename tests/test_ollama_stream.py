@@ -194,6 +194,19 @@ class LiveStreamingTests(unittest.TestCase):
         self.assertNotIn("writing\u2026", stdout)
         self.assertNotIn("reasoning preview", stdout)
         self.assertNotIn("\u2026", stdout)
+        live_records = []
+        for line in stdout.splitlines():
+            marker = "[ai-log] "
+            if marker in line:
+                live_records.append(json.loads(line.split(marker, 1)[1]))
+        progress = [event for event in live_records if event.get("type") == "model_progress"]
+        self.assertEqual({event.get("channel") for event in progress}, {"thinking", "answer"})
+        thinking_previews = [event["preview"] for event in progress
+                             if event["channel"] == "thinking"]
+        answer_previews = [event["preview"] for event in progress
+                           if event["channel"] == "answer"]
+        self.assertIn("Thinking about the beats.", thinking_previews[-1])
+        self.assertIn("Maya found it.", answer_previews[-1])
 
 
 class RuntimeSpeedTests(unittest.TestCase):
@@ -820,7 +833,8 @@ class ColourTests(unittest.TestCase):
     def test_gemini_replies_are_coloured_too(self):
         helper = (ROOT / "tools" / "gemini_subagent.py").read_text(encoding="utf-8")
         self.assertIn("from console_style import paint", helper)
-        self.assertIn('paint(f"[gemini sub-agent] reply', helper)
+        self.assertIn('_subagent_tag(provider)', helper)
+        self.assertIn('paint(f"{tag} full response for', helper)
 
 
 class _AlwaysAnswers(BaseHTTPRequestHandler):

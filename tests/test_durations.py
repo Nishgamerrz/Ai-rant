@@ -298,6 +298,17 @@ class SharedRulesTests(unittest.TestCase):
         self.assertIn("Set short timing — AI picks the exact ending", workflow)
         self.assertIn("AI picks seconds within your selected minute band", workflow)
         self.assertIn("Short length in seconds; AI keeps the ending within the selected minute band", workflow)
+        self.assertEqual(len(re.findall(r"default: '120'", workflow)), 2)
+        self.assertNotIn("default: '150'", workflow)
+        for source in (
+            (ROOT / "web/app/rbxshort/page.tsx").read_text(encoding="utf-8"),
+            (ROOT / "web/components/NewChatModal.tsx").read_text(encoding="utf-8"),
+        ):
+            self.assertIn('useState("120")', source)
+            self.assertNotIn('useState("150")', source)
+        dispatch = (ROOT / "web/app/api/github/dispatch/route.ts").read_text(encoding="utf-8")
+        self.assertIn('body.duration_seconds || "120"', dispatch)
+        self.assertNotIn('body.duration_seconds || "150"', dispatch)
         self.assertNotIn("2½-minute band includes", workflow)
         self.assertIn("selected minute stays fixed", workflow)
         self.assertIn("never at 2:01", workflow)
@@ -305,7 +316,8 @@ class SharedRulesTests(unittest.TestCase):
                           ROOT / "web/components/NewChatModal.tsx"):
             form = form_path.read_text(encoding="utf-8")
             self.assertIn("Short timing", form)
-            self.assertIn("AI chooses the exact ending within the selected minute band", form)
+            self.assertIn("AI chooses the exact ending within", form)
+            self.assertIn("selected minute band", form)
             self.assertIn("60s can end at 1:45, never 2:01", form)
         self.assertIn("DURATION_LABEL=", workflow)
         self.assertIn("DURATION_WINDOW=", workflow)

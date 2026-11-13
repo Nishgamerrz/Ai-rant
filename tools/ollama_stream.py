@@ -23,6 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from console_style import RESET, ansi, paint  # noqa: E402
+from ai_activity import append_activity  # noqa: E402
 
 DEFAULT_URL = "http://127.0.0.1:11434/api/chat"
 
@@ -377,6 +378,30 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
     seen = 0
     last_progress = started_at
     first_output = 0.0
+    activity_id = f"{os.getpid()}-{time.time_ns()}"
+    progress_chars = {"thinking": 0, "answer": 0}
+    last_activity_channel = ""
+    last_activity_emit = 0.0
+
+    def emit_activity_progress(channel: str, *, force: bool = False) -> None:
+        nonlocal last_activity_channel, last_activity_emit
+        accumulated = "".join(thinking if channel == "thinking" else content)
+        now = time.monotonic()
+        if not accumulated:
+            return
+        if (not force and len(accumulated) - progress_chars[channel] < 240
+                and channel == last_activity_channel and now - last_activity_emit < 5):
+            return
+        progress_chars[channel] = len(accumulated)
+        last_activity_channel = channel
+        last_activity_emit = now
+        preview = " ".join(accumulated.split())[-200:]
+        append_activity({
+            "type": "model_progress", "stage": "ollama",
+            "activity_id": activity_id, "tag": f"[{label} AI]", "label": label,
+            "provider": "ollama", "model": model_name, "status": "streaming",
+            "channel": channel, "preview": preview, "characters": len(accumulated),
+        }, persist=False)
 
     def hand_off_if_silent_timeout(exc: BaseException) -> None:
         """Turn an idle socket timeout into a hand-off only after the stall window."""
@@ -456,6 +481,7 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                 beat.touch("streaming the answer" if piece_content else "streaming its reasoning")
             if piece_thinking:
                 thinking.append(piece_thinking)
+                emit_activity_progress("thinking")
                 if not quiet:
                     if not thinking_open:
                         if beat:
@@ -466,6 +492,7 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                     console.write(piece_thinking)
             if piece_content:
                 content.append(piece_content)
+                emit_activity_progress("answer")
                 if not quiet:
                     if not answer_open:
                         console.use("answer")   # leaving the reasoning colour closes the box
@@ -497,6 +524,10 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                 prompt_ns = int(event.get("prompt_eval_duration") or 0)
     if beat:
         beat.stop()
+    if thinking:
+        emit_activity_progress("thinking", force=True)
+    if content:
+        emit_activity_progress("answer", force=True)
     answer = "".join(content)
     reasoning = "".join(thinking)
     if not repeated and done_reason == "length" and looks_stuck(answer):
@@ -534,6 +565,7 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                      f"{', CUT OFF at the token ceiling' if done_reason == 'length' else ''}.",
                      kind="error" if done_reason == "length" else "success")
     return {
+        "activity_id": activity_id,
         "message": {"role": "assistant", "content": answer, "thinking": reasoning},
         "response": answer,
         "thinking": reasoning,
@@ -779,17 +811,43 @@ def main() -> None:
                         "warning"), flush=True)
             result = attempt(request)
         if result is None:
+            append_activity({"type": "model_error", "stage": "ollama",
+                             "tag": f"[{args.label} AI]", "label": args.label,
+                             "provider": "ollama", "model": model,
+                             "status": "failed",
+                             "reason": "selected and configured fallback models produced no answer"},
+                            path=Path("dist/ai_activity.jsonl"))
             raise SystemExit(1)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        print(paint(f"[{args.label}] streaming request failed: {type(exc).__name__}: {exc}",
+        print(paint(f"[{args.label}] streaming request failed: {type(exc).__name__}.",
                     "error"), file=sys.stderr, flush=True)
+        append_activity({"type": "model_error", "stage": "ollama",
+                         "tag": f"[{args.label} AI]", "label": args.label,
+                         "provider": "ollama", "model": model,
+                         "status": "failed", "reason": f"network failure ({type(exc).__name__})"},
+                        path=Path("dist/ai_activity.jsonl"))
         raise SystemExit(1) from exc
     if not result["response"].strip():
         print(paint(f"[{args.label}] the model returned an empty answer.", "error"),
               file=sys.stderr, flush=True)
+        append_activity({"type": "model_error", "stage": "ollama",
+                         "tag": f"[{args.label} AI]", "label": args.label,
+                         "provider": "ollama", "model": model,
+                         "status": "failed", "reason": "empty answer"},
+                        path=Path("dist/ai_activity.jsonl"))
         raise SystemExit(1)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     result["model"] = request.get("model") if "fallback_model" not in result else result["fallback_model"]
+    append_activity({
+        "type": "model_response", "stage": "ollama",
+        "activity_id": result.get("activity_id"), "tag": f"[{args.label} AI]",
+        "label": args.label, "provider": "ollama", "model": result.get("model"),
+        "status": "complete", "seconds": result.get("elapsed_seconds"),
+        "fallback": bool(result.get("fallback_model")),
+        "prompt_messages": request.get("messages", []),
+        "thinking": result.get("thinking", ""),
+        "output": result.get("response", ""),
+    }, path=Path("dist/ai_activity.jsonl"))
     args.output.write_text(json.dumps(result, ensure_ascii=False) + "\n", encoding="utf-8")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     first_word = result.get("first_char_seconds")
