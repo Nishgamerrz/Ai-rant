@@ -11,6 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from durations import check_duration, duration_arg, format_duration  # noqa: E402
+from time_of_day import CLOCK_TIMES, resolve_time_of_day  # noqa: E402
 
 
 def read_json(path: Path, default):
@@ -459,6 +460,7 @@ local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local Lighting = game:GetService("Lighting")
 local CONFIG = HttpService:JSONDecode(__CONFIG_JSON__)
 local player = Players.LocalPlayer
 
@@ -489,6 +491,21 @@ end
 -- Account avatars are authentic Roblox rigs. No AI-generated body animation is applied.
 local camera = workspace.CurrentCamera
 local shots = CONFIG.plan.camera_shots or {{}}
+local CLOCK_TIMES = {{dawn = 6.5, day = 13.5, sunset = 18.2, night = 20.5}}
+local defaultClockTime = CLOCK_TIMES[CONFIG.plan.time_of_day] or 13.5
+local function clockTimeAtShot(index)
+    local selected = defaultClockTime
+    for i = 1, index do
+        local name = shots[i] and shots[i].time_of_day
+        if name and CLOCK_TIMES[name] then selected = CLOCK_TIMES[name] end
+    end
+    return selected
+end
+local function blendClockTime(fromTime, toTime, alpha)
+    local delta = (toTime - fromTime) % 24
+    if delta > 12 then delta = delta - 24 end
+    return (fromTime + delta * alpha) % 24
+end
 local startTime = os.clock()
 if narrationSound then narrationSound:Play() end
 local duration = CONFIG.duration or 60
@@ -515,6 +532,10 @@ connection = RunService.RenderStepped:Connect(function()
             alpha = math.clamp((elapsed - a.time) / math.max(0.01, b.time - a.time), 0, 1)
             alpha = alpha * alpha * (3 - 2 * alpha)
         end
+        local fromClock = clockTimeAtShot(index)
+        local toClock = clockTimeAtShot(math.min(index + 1, #shots))
+        local lightingAlpha = b and b ~= a and b.transition ~= "snap" and alpha or 0
+        Lighting.ClockTime = blendClockTime(fromClock, toClock, lightingAlpha)
         local posA = Vector3.new(a.position[1], a.position[2], a.position[3])
         local targetA = Vector3.new(a.target[1], a.target[2], a.target[3])
         local pos = posA
@@ -624,10 +645,17 @@ def make_place(server_script: str, local_script: str, plan, cast) -> str:
     atmosphere = None
     ambient = plan.get("ambient_color", [175, 185, 205])
     outdoor_ambient = [max(ambient[0], 150), max(ambient[1], 160), max(ambient[2], 175)]
+    time_of_day = resolve_time_of_day(plan.get("time_of_day", "auto"), plan.get("theme", ""))
+    clock_time = CLOCK_TIMES[time_of_day]
+    clock_hour = int(clock_time)
+    clock_minute = int(round((clock_time - clock_hour) * 60))
+    if clock_minute == 60:
+        clock_hour = (clock_hour + 1) % 24
+        clock_minute = 0
     lighting = item("Lighting", ref(), [
         color3_element("Ambient", ambient),
         '<float name="Brightness">3.2</float>',
-        '<float name="ClockTime">14</float>',
+        f'<float name="ClockTime">{clock_time:.4g}</float>',
         '<float name="EnvironmentDiffuseScale">0.55</float>',
         '<float name="EnvironmentSpecularScale">0.35</float>',
         '<float name="ExposureCompensation">0.15</float>',
@@ -638,7 +666,7 @@ def make_place(server_script: str, local_script: str, plan, cast) -> str:
         xml_string("Name", "Lighting"),
         color3_element("OutdoorAmbient", outdoor_ambient),
         '<float name="ShadowSoftness">0.25</float>',
-        '<string name="TimeOfDay">14:00:00</string>',
+        f'<string name="TimeOfDay">{clock_hour:02d}:{clock_minute:02d}:00</string>',
     ], sky)
 
     server_script_item = item("Script", ref(), [
@@ -715,11 +743,20 @@ def build(args):
     if args.readme:
         args.readme.parent.mkdir(parents=True, exist_ok=True)
         cast_label = ", ".join(member["username"] for member in cast) if cast else "your Roblox player avatar"
+        global_hour = resolve_time_of_day(plan.get("time_of_day", "auto"), plan.get("theme", ""))
+        scene_hour_cues = [
+            f"{float(shot.get('time', 0)):g}s {str(shot['time_of_day']).casefold()}"
+            for shot in plan.get("camera_shots", [])
+            if isinstance(shot, dict) and isinstance(shot.get("time_of_day"), str)
+            and shot["time_of_day"].casefold() in CLOCK_TIMES
+        ]
+        scene_hour_summary = ", ".join(scene_hour_cues) if scene_hour_cues else "one global hour"
         guide = (
             "# Roblox Studio Story Experience\n\n"
             f"**World:** {plan.get('name', 'AI Story World')}  \n"
             f"**Theme:** {plan.get('theme', '')}  \n"
             f"**Duration:** {format_duration(duration)} ({duration:g} seconds)  \n"
+            f"**Lighting:** {global_hour} base; {scene_hour_summary}  \n"
             f"**Furnished world Parts:** {len(plan.get('props', []))}  \n"
             f"**Cast:** {cast_label}\n\n"
             "## Watch the short\n\n"

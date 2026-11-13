@@ -21,10 +21,11 @@ class WorldRealignTests(unittest.TestCase):
         plan["props"].append({"name": "Cast Lane Wall", "shape": "Block", "material": "Concrete",
                               "position": [0.0, 10.0, 24.0], "size": [30.0, 20.0, 4.0],
                               "color": [200, 200, 205], "physics": "static"})
+        plan["time_of_day"] = "night"
         plan["camera_shots"] = [{"time": 1.0, "position": [0.0, 0.2, 26.0], "target": [0, 5, 24],
-                                 "transition": "smooth", "focus_username": "Nobody"},
+                                 "transition": "smooth", "focus_username": "Nobody", "time_of_day": "night"},
                                 {"time": 200.0, "position": [40.0, 12.0, 60.0], "target": [0, 5, 24],
-                                 "transition": "weird", "focus_username": "Lead"}]
+                                 "transition": "weird", "focus_username": "Lead", "time_of_day": "sunset"}]
         return plan
 
     def test_review_reports_and_repairs_alignment_brightness_and_cameras(self):
@@ -64,6 +65,9 @@ class WorldRealignTests(unittest.TestCase):
         shots = plan["camera_shots"]
         self.assertEqual(shots[0]["time"], 0.0)
         self.assertEqual(shots[-1]["time"], 120.0)
+        self.assertEqual(shots[0]["time_of_day"], "night")
+        self.assertEqual(shots[-1]["time_of_day"], "sunset")
+        self.assertEqual(plan["time_of_day"], "night")
         self.assertEqual([s["time"] for s in shots], sorted(s["time"] for s in shots))
         for shot in shots:
             self.assertEqual(shot["transition"], "smooth")

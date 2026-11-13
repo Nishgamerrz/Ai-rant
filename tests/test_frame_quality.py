@@ -168,7 +168,7 @@ class FrameAuditTests(unittest.TestCase):
     def test_the_ai_colours_are_read_as_srgb(self):
         # new THREE.Color(r,g,b) treats its arguments as linear working values,
         # which brightened and desaturated every Part.
-        body = RENDERER.split("const rgb=(value)=>{", 1)[1].split("const skyColor", 1)[0]
+        body = RENDERER.split("const rgb=(value)=>{", 1)[1].split("};\n  const timeOfDay", 1)[0]
         self.assertIn("THREE.SRGBColorSpace", body)
         self.assertNotIn("new THREE.Color(...", body)
 

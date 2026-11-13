@@ -13,6 +13,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from durations import check_duration, duration_arg  # noqa: E402
 
 from effects_catalog import resolve as resolve_effect  # noqa: E402
+from time_of_day import (  # noqa: E402
+    CLOCK_TIMES, SCENE_TIME_CHOICES, TIME_OF_DAY_CHOICES, apply_scene_time_sequence,
+    resolve_time_of_day,
+)
 
 MATERIALS = {"Plastic", "SmoothPlastic", "Concrete", "Grass", "Slate", "Wood", "Metal", "Neon", "Glass", "Brick", "Asphalt"}
 
@@ -236,12 +240,50 @@ def default_plan():
     }
 
 
-def default_camera_shots(duration, usernames=()):
-    """A mix of smooth camera sweeps and story-beat snap cuts for the rendered short.
+def target_camera_count(duration):
+    """Camera beat budget for the reference's brisk, roughly four-second rhythm."""
+    return max(10, min(44, int(round(float(duration) / 4)) + 2))
 
-    Long shorts (up to 180s) need more beats than a 30s clip, so the storyboard
-    length scales with the requested duration instead of holding on one angle.
+
+def configure_plan_time_of_day(plan, requested="auto", context="", scene_time_notes=""):
+    """Apply global/per-scene lighting after the storyboard has been normalized.
+
+    Per-shot AI choices are honored only when the user supplied scene-time notes.
+    Otherwise a selected global hour is authoritative and all shot overrides are
+    removed. When the user chose ``auto``, their scene notes are also a useful
+    source for the initial hour if the story itself did not name one.
     """
+    notes = str(scene_time_notes or "").strip()[:500]
+    resolved = resolve_time_of_day(requested, " ".join((str(context or ""), notes)))
+    plan["time_of_day"] = resolved
+    shots = plan.get("camera_shots")
+    if not isinstance(shots, list):
+        shots = []
+        plan["camera_shots"] = shots
+
+    fallback_applied = False
+    if notes:
+        has_ai_hours = any(
+            isinstance(shot, dict)
+            and isinstance(shot.get("time_of_day"), str)
+            and shot["time_of_day"].casefold() in SCENE_TIME_CHOICES
+            for shot in shots
+        )
+        if not has_ai_hours:
+            fallback_applied = apply_scene_time_sequence(shots, notes)
+        plan["time_of_day_mode"] = "per_scene" if has_ai_hours or fallback_applied else "global"
+        plan["scene_time_notes"] = notes
+    else:
+        for shot in shots:
+            if isinstance(shot, dict):
+                shot.pop("time_of_day", None)
+        plan["time_of_day_mode"] = "global"
+        plan.pop("scene_time_notes", None)
+    return resolved, fallback_applied
+
+
+def default_camera_shots(duration, usernames=()):
+    """A reference-short rhythm: fresh angle or cutaway about every four seconds."""
     views = [
         ([0, 26, 60], [0, 4, 24], "smooth"),
         ([-13, 11, 45], [0, 4, 24], "smooth"),
@@ -260,19 +302,34 @@ def default_camera_shots(duration, usernames=()):
         ([-7, 10, 32], [0, 4, 24], "snap"),
         ([17, 11, 40], [0, 4, 24], "smooth"),
     ]
-    count = max(5, min(len(views), int(round(duration / 8)) + 2))
-    chosen = views[:count]
-    if chosen[-1][2] != "smooth":
-        chosen[-1] = (chosen[-1][0], chosen[-1][1], "smooth")
+    count = target_camera_count(duration)
     last = count - 1
-    return [
-        {"time": round(duration * index / last, 2), "position": pos, "target": target,
-         "transition": "smooth" if index == 0 else mode,
-         "focus_username": usernames[index % len(usernames)] if usernames else "world",
-         "framing": "face" if usernames and index in {max(1, last // 3), max(2, (2 * last) // 3)} else "auto",
-         "face_distance": FACE_DISTANCE_DEFAULT}
-        for index, (pos, target, mode) in enumerate(chosen)
-    ]
+    face_indices = {max(1, count // 6), count // 2, min(count - 2, (5 * count) // 6)}
+    output = []
+    for index in range(count):
+        base_position, base_target, base_mode = views[index % len(views)]
+        position, target = list(base_position), list(base_target)
+        cycle = index // len(views)
+        if cycle:
+            # The fallback keeps changing its angle instead of repeating one
+            # sixteen-shot loop in a long, reference-length short.
+            angle = cycle * 0.37
+            dx, dz = position[0] - target[0], position[2] - target[2]
+            position[0] = target[0] + dx * math.cos(angle) - dz * math.sin(angle)
+            position[2] = target[2] + dx * math.sin(angle) + dz * math.cos(angle)
+            position[1] = max(5, min(40, position[1] + (cycle % 3 - 1) * 1.5))
+        is_face = bool(usernames and index in face_indices)
+        output.append({
+            "time": round(duration * index / last, 2),
+            "position": [round(value, 2) for value in position],
+            "target": target,
+            "transition": "smooth" if index == 0 or index == last else
+                          ("snap" if index % 4 == 2 else base_mode),
+            "focus_username": usernames[index % len(usernames)] if usernames else "world",
+            "framing": "face" if is_face else "auto",
+            "face_distance": FACE_DISTANCE_DEFAULT,
+        })
+    return output
 
 
 FACE_EXPRESSIONS = ("neutral", "happy", "sad", "surprised", "worried", "angry", "excited", "thinking")
@@ -334,8 +391,44 @@ def normalize_face_expressions(entries, duration, usernames=()):
     return timeline[:40]
 
 
+def densify_camera_shots(shots, duration):
+    """Fill a sparse AI storyboard to the reference's brisk shot rhythm.
+
+    Existing AI key shots (especially story-hour overrides and face frames) are
+    retained. New beats bisect the longest gaps, interpolate framing positions,
+    and introduce periodic snap cuts rather than letting a long video hold one
+    angle for tens of seconds.
+    """
+    target = target_camera_count(duration)
+    while len(shots) < target:
+        gap_index = max(range(len(shots) - 1),
+                        key=lambda index: shots[index + 1]["time"] - shots[index]["time"])
+        a, b = shots[gap_index], shots[gap_index + 1]
+        gap = float(b["time"]) - float(a["time"])
+        if gap <= 0.02:
+            break
+        time = round((float(a["time"]) + float(b["time"])) / 2, 2)
+        if time <= float(a["time"]) or time >= float(b["time"]):
+            break
+        blend = (time - float(a["time"])) / gap
+        near = a if blend < 0.5 else b
+        shot = {
+            "time": time,
+            "position": [round(float(a["position"][axis]) * (1 - blend)
+                                + float(b["position"][axis]) * blend, 2) for axis in range(3)],
+            "target": [round(float(a["target"][axis]) * (1 - blend)
+                             + float(b["target"][axis]) * blend, 2) for axis in range(3)],
+            "transition": "snap" if (len(shots) % 4 == 2) else "smooth",
+            "focus_username": near["focus_username"],
+            "framing": "auto",
+            "face_distance": near["face_distance"],
+        }
+        shots.insert(gap_index + 1, shot)
+    return shots
+
+
 def normalize_camera_shots(shots, duration, usernames=()):
-    if not isinstance(shots, list) or not 4 <= len(shots) <= 24:
+    if not isinstance(shots, list) or not 4 <= len(shots) <= 48:
         return default_camera_shots(duration, usernames)
     clean, previous = [], -1.0
     valid_names = {name.casefold(): name for name in usernames}
@@ -364,11 +457,13 @@ def normalize_camera_shots(shots, duration, usernames=()):
         framing = str(shot.get("framing", "auto") or "auto").strip().lower()
         if framing not in FACE_FRAMINGS:
             framing = "auto"
+        elif framing in {"close", "closeup", "close-up"}:
+            framing = "face"
         shot_face_distance = shot.get("face_distance", FACE_DISTANCE_DEFAULT)
         if isinstance(shot_face_distance, bool) or not isinstance(shot_face_distance, (int, float)):
             shot_face_distance = FACE_DISTANCE_DEFAULT
         shot_face_distance = min(FACE_DISTANCE_MAX, max(FACE_DISTANCE_MIN, float(shot_face_distance)))
-        clean.append({
+        normalized_shot = {
             "time": round(float(time), 2),
             "position": [round(float(v), 2) for v in pos],
             "target": [round(float(v), 2) for v in target],
@@ -376,7 +471,11 @@ def normalize_camera_shots(shots, duration, usernames=()):
             "focus_username": focus,
             "framing": framing,
             "face_distance": round(float(shot_face_distance), 2),
-        })
+        }
+        shot_hour = shot.get("time_of_day")
+        if isinstance(shot_hour, str) and shot_hour.casefold() in SCENE_TIME_CHOICES:
+            normalized_shot["time_of_day"] = shot_hour.casefold()
+        clean.append(normalized_shot)
         previous = time
     if clean[0]["time"] != 0:
         clean.insert(0, default_camera_shots(duration, usernames)[0])
@@ -386,13 +485,26 @@ def normalize_camera_shots(shots, duration, usernames=()):
         last["transition"] = "smooth"
         last["framing"] = "auto"
         clean.append(last)
-    # Roblox-style story shorts always land at least two face close-ups; if the
-    # AI forgot them, promote the two most emotional mid-shots instead.
+    clean = densify_camera_shots(clean, duration)
+    # Reference-style shorts revisit the cast at a few emotional beats; if the
+    # AI forgot the close-ups, promote three well-spaced shots without cropping
+    # closer than the renderer's safe 2.8-4 stud range.
     face_indices = [index for index, shot in enumerate(clean) if shot["framing"] == "face"]
-    if duration >= 30 and len(face_indices) < 2 and usernames:
-        for index in (len(clean) // 3, (2 * len(clean)) // 3):
-            if index < len(clean) and clean[index]["focus_username"] != "world":
+    if duration >= 30 and len(face_indices) < 3 and usernames:
+        targets = [max(1, len(clean) // 5), len(clean) // 2,
+                   min(len(clean) - 2, (4 * len(clean)) // 5)]
+        targets.extend(range(len(clean)))
+        for index in dict.fromkeys(targets):
+            if len(face_indices) >= 3:
+                break
+            if (index not in face_indices and clean[index]["focus_username"] != "world"):
                 clean[index]["framing"] = "face"
+                clean[index]["face_distance"] = FACE_DISTANCE_DEFAULT
+                face_indices.append(index)
+    # The sample's fast rhythm relies on deliberate cuts as well as smooth moves.
+    for index in range(2, len(clean), 4):
+        if clean[index]["transition"] != "snap":
+            clean[index]["transition"] = "snap"
     return clean
 
 
@@ -2010,8 +2122,12 @@ def interior_view_report(plan):
     return report
 
 
-def interior_camera_shots(cast, room, duration, usernames=()):
-    """Camera plan that stays inside the room and still reads as a film."""
+def interior_camera_shots(cast, room, duration, usernames=(), hour_overrides=()):
+    """Camera plan that stays inside the room and still reads as a film.
+
+    The AI's original camera positions may be replaced to keep shots inside the
+    room, but named scene-hour overrides survive at the nearest generated beat.
+    """
     width, depth, height = room
     hx, hz = width / 2 - 2.2, depth / 2 - 2.2
     z0 = ROOM_CENTRE_Z
@@ -2062,10 +2178,45 @@ def interior_camera_shots(cast, room, duration, usernames=()):
          [(lx + sx) / 2, 4.4, (lz + sz) / 2], first, "snap", "auto", FACE_DISTANCE_DEFAULT),
     ]
     shots[-1] = (1.0,) + tuple(shots[-1][1:])
+    scene_hours = []
+    for shot in hour_overrides or ():
+        if not isinstance(shot, dict) or not isinstance(shot.get("time_of_day"), str):
+            continue
+        hour = shot["time_of_day"].casefold()
+        try:
+            at = float(shot.get("time"))
+        except (TypeError, ValueError):
+            continue
+        if hour in SCENE_TIME_CHOICES and 0 <= at <= duration:
+            scene_hours.append((at, hour, shot.get("transition")))
+    scene_hours.sort(key=lambda item: item[0])
+    # Keep the final plan within the AI schema's cap while leaving enough
+    # generated camera beats to represent every named lighting change.
+    scene_hours = scene_hours[:48]
+    count = min(48, max(target_camera_count(duration), len(scene_hours)))
+    face_slots = {max(1, count // 5), count // 2, min(count - 2, (4 * count) // 5)}
     output = []
-    for fraction, position, target, focus, transition, framing, face_distance in shots:
+    for index in range(count):
+        progress = index / (count - 1) * (len(shots) - 1)
+        left_index = int(progress)
+        right_index = min(len(shots) - 1, left_index + 1)
+        blend = progress - left_index
+        left, right = shots[left_index], shots[right_index]
+        position = [left[1][axis] * (1 - blend) + right[1][axis] * blend for axis in range(3)]
+        target = [left[2][axis] * (1 - blend) + right[2][axis] * blend for axis in range(3)]
+        focus = left[3] if blend < 0.5 else right[3]
+        nearest = left if blend < 0.5 else right
+        framing = nearest[5] if nearest[5] != "face" else "auto"
+        if index in face_slots:
+            focus = first if index != count // 2 else second_name
+            person_x, person_z = (lx, lz) if focus == first else (sx, sz)
+            position = face(person_x, person_z, 1.7, -2.0)
+            target = [person_x, 4.9, person_z]
+            framing = "face"
+        transition = "smooth" if index in {0, count - 1} else (
+            "snap" if index % 4 == 2 or nearest[4] == "snap" else "smooth")
         output.append({
-            "time": round(duration * fraction, 2),
+            "time": round(duration * index / (count - 1), 2),
             # X stays within the side walls, Y between floor and ceiling, Z within
             # the front and back walls - every shot is taken from inside the room.
             "position": [round(max(-hx, min(hx, position[0])), 2),
@@ -2073,8 +2224,18 @@ def interior_camera_shots(cast, room, duration, usernames=()):
                          round(max(z0 - hz, min(z0 + hz, position[2])), 2)],
             "target": [round(v, 2) for v in target],
             "focus_username": focus, "transition": transition,
-            "framing": framing, "face_distance": face_distance,
+            "framing": framing, "face_distance": FACE_DISTANCE_DEFAULT,
         })
+    previous_slot = -1
+    for override_index, (at, hour, transition) in enumerate(scene_hours):
+        desired = int(round(min(duration, max(0.0, at)) / max(float(duration), 0.01) * (count - 1)))
+        low = previous_slot + 1
+        high = count - (len(scene_hours) - override_index)
+        slot = min(high, max(low, desired))
+        output[slot]["time_of_day"] = hour
+        if 0 < slot < count - 1 and transition in ("smooth", "snap"):
+            output[slot]["transition"] = transition
+        previous_slot = slot
     return output
 
 
@@ -2186,15 +2347,11 @@ def emit_lua(plan, output):
             f"{lua_string(prop.get('physics', 'static'))}, {light_lua}, {effect_lua})"
         )
     ambient = plan["ambient_color"]
-    theme_text = plan.get("theme", "").casefold()
-    if any(word in theme_text for word in ("night", "midnight", "nocturnal", "moonlit")):
-        clock_time = 20.5
-    elif any(word in theme_text for word in ("sunrise", "dawn", "morning")):
-        clock_time = 8.0
-    else:
-        clock_time = 13.5
+    time_of_day = resolve_time_of_day(plan.get("time_of_day", "auto"), plan.get("theme", ""))
+    clock_time = CLOCK_TIMES[time_of_day]
     lines.extend([
-        "-- Match Studio lighting to the user-selected world theme.",
+        "-- Match Studio lighting to the same user-selected hour as the rendered MP4.",
+        f"map:SetAttribute('TimeOfDay', {lua_string(time_of_day)})",
         f"Lighting.ClockTime = {clock_time}",
         "Lighting.Brightness = 2",
         f"Lighting.Ambient = Color3.fromRGB({ambient[0]}, {ambient[1]}, {ambient[2]})",
@@ -2220,6 +2377,10 @@ def main():
     parser.add_argument("--strict", action="store_true", help="require a valid AI-authored landmark blueprint")
     parser.add_argument("--fallback", action="store_true", help="build a theme/story-based map without the local AI service")
     parser.add_argument("--theme", default="", help="explicit visual-theme cue for procedural fallback")
+    parser.add_argument("--time-of-day", choices=TIME_OF_DAY_CHOICES, default="auto",
+                        help="coherent lighting hour: auto, dawn, day, sunset or night")
+    parser.add_argument("--scene-time-notes", default="",
+                        help="optional user direction for hour changes across scenes/shots")
     parser.add_argument("--story", default="", help="story context for procedural fallback")
     parser.add_argument("--min-props", type=int, default=8, help="minimum unique AI landmark/building anchors")
     parser.add_argument("--target-props", type=int, default=3000, help="minimum furnished world Parts after deterministic expansion (1260=standard, 3000=dense, 5000=ultra)")
@@ -2298,7 +2459,8 @@ def main():
             plan = arrange_cast(plan, room, usernames)
             cast = [[person["position"][0], 0, person["position"][2]]
                     for person in plan.get("character_placements") or []]
-            plan["camera_shots"] = interior_camera_shots(cast, room, duration, usernames)
+            plan["camera_shots"] = interior_camera_shots(
+                cast, room, duration, usernames, anchors.get("camera_shots") or [])
             plan["name"] = str(plan.get("name") or "Story Room")[:48]
         else:
             plan = expand_plan(anchors, args.target_props)
@@ -2327,6 +2489,13 @@ def main():
                       "the cast.", file=sys.stderr)
     except ValueError as exc:
         raise SystemExit(f"Could not construct a valid furnished world: {exc}") from exc
+    time_context = " ".join(str(value or "") for value in (
+        plan.get("theme", ""), args.theme, args.story, args.story_topic))
+    resolved_hour, sequence_applied = configure_plan_time_of_day(
+        plan, args.time_of_day, time_context, args.scene_time_notes)
+    if sequence_applied:
+        print("Applied the requested scene-hour sequence to the procedural camera fallback.")
+    print(f"Resolved scene lighting: {resolved_hour} ({CLOCK_TIMES[resolved_hour]:g}:00 Roblox ClockTime).")
     json_path = destination if args.json_only else destination.with_suffix(".json")
     if not args.json_only:
         emit_lua(plan, destination)

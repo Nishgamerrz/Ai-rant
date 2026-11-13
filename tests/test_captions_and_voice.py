@@ -1,12 +1,9 @@
-"""On-screen story captions and the short-form narrator voice.
+"""Reference-style on-screen captions and the short-form narrator voice.
 
-Two changes asked for together:
-
-* the spoken line is drawn on the video itself - centred, a little above the
-  middle of the vertical frame, in bold outlined story-short style - instead of
-  living only in the SRT file;
-* the male narrator sounds like a Roblox YouTube short: young, bright and quick,
-  not the slow audiobook read the old -8% rate produced.
+The spoken words are drawn on the video itself - centred in the lower-middle
+area, in bold white text with a black outline - instead of living only in the
+SRT file. The male narrator is young, bright and quick, not a slow audiobook
+read.
 """
 from __future__ import annotations
 
@@ -30,19 +27,19 @@ class CaptionOverlayTests(unittest.TestCase):
         self.assertIn("position:absolute", RENDER_SHORT)
         self.assertIn("#caption.on{opacity:1}", RENDER_SHORT)
 
-    def test_it_sits_a_little_above_the_middle_not_at_the_top(self):
+    def test_it_matches_the_reference_lower_middle_caption_position(self):
         import re
 
         style = RENDER_SHORT[RENDER_SHORT.index("#caption{"):RENDER_SHORT.index("#caption.on")]
         top = float(re.search(r"top:([\d.]+)%", style).group(1))
-        # "like the middle but a little up": near the centre, above it.
-        self.assertGreaterEqual(top, 30.0)
-        self.assertLessEqual(top, 45.0)
+        # The supplied Roblox short keeps its outlined captions around the lower middle.
+        self.assertGreaterEqual(top, 55.0)
+        self.assertLessEqual(top, 70.0)
 
     def test_it_is_centred_and_readable_like_story_shorts(self):
         self.assertIn("left:50%", RENDER_SHORT)
         self.assertIn("translate(-50%,-50%)", RENDER_SHORT)
-        self.assertIn("text-transform:uppercase", RENDER_SHORT)
+        self.assertIn("text-transform:lowercase", RENDER_SHORT)
         self.assertIn("-webkit-text-stroke", RENDER_SHORT)
         self.assertIn("font-weight:900", RENDER_SHORT)
         self.assertIn("text-align:center", RENDER_SHORT)
