@@ -124,6 +124,15 @@ class DropdownPlusAiSecondsTests(unittest.TestCase):
             self.assertLess(seconds, 180)
             self.assertGreaterEqual(seconds, 120)
 
+    def test_one_minute_can_end_at_145_without_crossing_into_two_minutes(self):
+        self.assertEqual(selection_window("1m"), (60, 119))
+        self.assertEqual(format_duration(choose_from_selection("1m", seed=19)), "1:45")
+        for seed in range(80):
+            seconds = choose_from_selection("1m", seed=seed)
+            self.assertGreaterEqual(seconds, 60)
+            self.assertLess(seconds, 120)
+            self.assertNotEqual(format_duration(seconds), "2:01")
+
     def test_pick_varies_between_runs(self):
         picks = {choose_from_selection(120, seed=seed) for seed in range(60)}
         self.assertGreater(len(picks), 5)
@@ -286,7 +295,18 @@ class SharedRulesTests(unittest.TestCase):
             [int(value) for value in re.findall(r"^\s+- '(\d+)'$", block, re.MULTILINE)],
             list(SUGGESTED_DURATIONS),
         )
-        self.assertIn("Let the AI pick the exact ending", workflow)
+        self.assertIn("Set short timing — AI picks the exact ending", workflow)
+        self.assertIn("AI picks seconds within your selected minute band", workflow)
+        self.assertIn("Short length in seconds; AI keeps the ending within the selected minute band", workflow)
+        self.assertNotIn("2½-minute band includes", workflow)
+        self.assertIn("selected minute stays fixed", workflow)
+        self.assertIn("never at 2:01", workflow)
+        for form_path in (ROOT / "web/app/rbxshort/page.tsx",
+                          ROOT / "web/components/NewChatModal.tsx"):
+            form = form_path.read_text(encoding="utf-8")
+            self.assertIn("Short timing", form)
+            self.assertIn("AI chooses the exact ending within the selected minute band", form)
+            self.assertIn("60s can end at 1:45, never 2:01", form)
         self.assertIn("DURATION_LABEL=", workflow)
         self.assertIn("DURATION_WINDOW=", workflow)
         self.assertNotIn("DURATION_SECONDS: ${{ inputs.duration_seconds }}", workflow)
