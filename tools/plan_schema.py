@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from build_story_map import MATERIALS, SHAPES  # noqa: E402
 from effects_catalog import FAMILIES as EFFECT_FAMILIES  # noqa: E402
+from time_of_day import SCENE_TIME_CHOICES  # noqa: E402
 
 EXPRESSIONS = ("neutral", "happy", "sad", "surprised", "worried", "angry", "excited", "thinking")
 MATERIAL_LIST = sorted(MATERIALS)
@@ -105,6 +106,8 @@ def build_schema(usernames=(), *, require_subagent_tasks: bool = True) -> dict:
             "transition": {"type": "string", "enum": ["smooth", "snap"]},
             "framing": {"type": "string", "enum": ["auto", "face"]},
             "face_distance": {"type": "number", "minimum": 2.8, "maximum": 4.0},
+            "time_of_day": {"type": "string", "enum": list(SCENE_TIME_CHOICES),
+                             "description": "Optional hour override; it holds until the next override."},
         },
         "required": ["time", "position", "target", "focus_username", "transition"],
     }
@@ -158,7 +161,7 @@ def build_schema(usernames=(), *, require_subagent_tasks: bool = True) -> dict:
             # model cannot answer with six props and get rejected after a long wait.
             "props": {"type": "array", "items": prop, "minItems": 8},
             "character_placements": {"type": "array", "items": placement},
-            "camera_shots": {"type": "array", "items": shot, "minItems": 6},
+            "camera_shots": {"type": "array", "items": shot, "minItems": 6, "maxItems": 48},
             "face_expressions": {"type": "array", "items": beat, "minItems": 6},
             "search_queries": {"type": "array", "items": {"type": "string"}},
             # The first map-plan response must author at least one task. The workflow

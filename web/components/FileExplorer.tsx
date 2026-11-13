@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type Entry = { name: string; path: string; size?: number; kind: "file" | "dir" };
 
@@ -9,34 +9,10 @@ export function FileExplorer({ runId, onOpenFile }: { runId: number | null; onOp
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [activeArtifact, setActiveArtifact] = useState<string | null>(null);
+  const activeArtifactRef = useRef<string | null>(null);
 
-  async function loadArtifacts() {
-    if (!runId) return;
-    setLoading(true);
-    setErr("");
-    try {
-      const j = await fetch(`/api/github/logs?run=${runId}`, { cache: "no-store" }).then((r) => r.json());
-      if (j.error) throw new Error(j.error);
-      const arts = j.artifacts || [];
-      setArtifacts(arts);
-      if (arts.length && !activeArtifact) {
-        const ws = arts.find((a: any) => String(a.name).includes("workspace")) || arts.find((a: any) => String(a.name).includes("nish-agent")) || arts[0];
-        if (ws) {
-          setActiveArtifact(String(ws.id));
-          loadFiles(String(ws.id));
-        }
-      } else if (arts.length && activeArtifact) {
-        // refresh current
-        loadFiles(activeArtifact);
-      }
-    } catch (e: any) {
-      setErr(String(e.message || e));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function loadFiles(artifactId: string) {
+  const loadFiles = useCallback(async (artifactId: string) => {
+    activeArtifactRef.current = artifactId;
     setActiveArtifact(artifactId);
     setLoading(true);
     setErr("");
@@ -71,21 +47,45 @@ export function FileExplorer({ runId, onOpenFile }: { runId: number | null; onOp
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
+
+  const loadArtifacts = useCallback(async () => {
+    if (!runId) return;
+    setLoading(true);
+    setErr("");
+    try {
+      const j = await fetch(`/api/github/logs?run=${runId}`, { cache: "no-store" }).then((r) => r.json());
+      if (j.error) throw new Error(j.error);
+      const arts = j.artifacts || [];
+      setArtifacts(arts);
+      const selectedArtifact = activeArtifactRef.current;
+      if (arts.length && !selectedArtifact) {
+        const ws = arts.find((a: any) => String(a.name).includes("workspace")) || arts.find((a: any) => String(a.name).includes("nish-agent")) || arts[0];
+        if (ws) await loadFiles(String(ws.id));
+      } else if (arts.length && selectedArtifact) {
+        await loadFiles(selectedArtifact);
+      }
+    } catch (e: any) {
+      setErr(String(e.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }, [loadFiles, runId]);
 
   useEffect(() => {
     setArtifacts([]);
     setFiles(null);
     setActiveArtifact(null);
+    activeArtifactRef.current = null;
     if (runId) loadArtifacts();
-  }, [runId]);
+  }, [runId, loadArtifacts]);
 
   // poll artifact every 8s while run is in_progress (direct API, no tunnel)
   useEffect(() => {
     if (!runId) return;
     const id = setInterval(loadArtifacts, 8000);
     return () => clearInterval(id);
-  }, [runId, activeArtifact]);
+  }, [runId, loadArtifacts]);
 
   if (!runId) {
     return (

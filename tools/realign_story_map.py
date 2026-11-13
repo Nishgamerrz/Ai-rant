@@ -19,6 +19,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from time_of_day import SCENE_TIME_CHOICES  # noqa: E402
+
 GRID = 0.5
 MIN_LUMINANCE = 104
 MAX_SPAN = 64.0
@@ -223,11 +226,15 @@ def clean_camera_shots(plan, report):
             face_distance = min(4.0, max(2.8, float(shot.get("face_distance", 3.0))))
         except (TypeError, ValueError):
             face_distance = 3.0
-        fixed.append({"time": round(min(duration, float(shot.get("time", 0))), 2),
+        clean_shot = {"time": round(min(duration, float(shot.get("time", 0))), 2),
                       "position": [round(value, 2) for value in position],
                       "target": [round(value, 2) for value in target],
                       "transition": shot["transition"], "focus_username": focus,
-                      "framing": framing, "face_distance": round(face_distance, 2)})
+                      "framing": framing, "face_distance": round(face_distance, 2)}
+        scene_hour = shot.get("time_of_day")
+        if isinstance(scene_hour, str) and scene_hour.casefold() in SCENE_TIME_CHOICES:
+            clean_shot["time_of_day"] = scene_hour.casefold()
+        fixed.append(clean_shot)
     if fixed:
         fixed[0]["time"] = 0.0
         fixed.sort(key=lambda item: item["time"])

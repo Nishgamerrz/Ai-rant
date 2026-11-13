@@ -35,6 +35,10 @@ def paragraphs_for_report(args, output_dir: Path, summary: str):
     research = load_json(args.research, [])
     props = plan.get("props", []) if isinstance(plan, dict) else []
     shots = plan.get("camera_shots", []) if isinstance(plan, dict) else []
+    global_hour = plan.get("time_of_day", "day") if isinstance(plan, dict) else "day"
+    scene_hours = [shot.get("time_of_day") for shot in shots
+                   if isinstance(shot, dict) and shot.get("time_of_day")]
+    scene_hour_summary = " → ".join(dict.fromkeys(scene_hours)) if scene_hours else "one global hour"
     names = [str(prop.get("name", "Unnamed Part")) for prop in props[:30] if isinstance(prop, dict)]
     research_items = research if isinstance(research, list) else []
     research_lines = []
@@ -52,6 +56,7 @@ def paragraphs_for_report(args, output_dir: Path, summary: str):
     story += [Paragraph(f"<b>World:</b> {safe(plan.get('name', 'Untitled world'))}", styles["BodyCustom"]),
               Paragraph(f"<b>Prompt theme:</b> {safe(plan.get('theme', 'Not specified'))}", styles["BodyCustom"]),
               Paragraph(f"<b>Duration:</b> {args.duration} seconds &nbsp;&nbsp; <b>Furnished map Parts:</b> {len(props)} &nbsp;&nbsp; <b>Camera shots:</b> {len(shots)}", styles["BodyCustom"]),
+              Paragraph(f"<b>Lighting:</b> {safe(global_hour)} default; {safe(scene_hour_summary)}", styles["BodyCustom"]),
               Paragraph(f"<b>AI model:</b> {safe(args.model)}", styles["BodyCustom"]),
               Paragraph(f"<b>Voice:</b> {safe(args.voice)}; speech rate {safe(args.rate)}", styles["BodyCustom"])]
     story += [Paragraph("AI-generated creation summary", styles["Section"]),
@@ -61,7 +66,7 @@ def paragraphs_for_report(args, output_dir: Path, summary: str):
               Paragraph(f"<b>Cast usernames:</b> {safe(', '.join(map(str, cast)) if cast else 'The current Roblox Player avatar')}", styles["BodyCustom"]),
               Paragraph("<b>Representative world Parts:</b> " + safe(", ".join(names) if names else "None listed"), styles["BodyCustom"])]
     story += [Paragraph("Tools used", styles["Section"]),
-              Paragraph(f"1. Ollama with {safe(args.model)}: story/world/camera planning and the final high-level creation summary.<br/>2. ddgs web search: optional story-background references when available.<br/>3. edge-tts ({safe(args.voice)}, {safe(args.rate)}): short-form narration audio and timed SRT subtitles.<br/>4. Roblox public avatar APIs: retrieve authentic usernames' 3D meshes and textures; thumbnail-only avatars are rejected for the moving-limb MP4.<br/>5. Three.js and headless Chromium: render the expanded furnished 3D scene, simulate loose props with Rapier, move avatars on deterministic collision-free paths, preserve supplied geometry, retarget native Roblox keyframes, and attach only explicitly requested avatar-body effects, and burn in the spoken line as on-screen captions a little above the middle (no username labels, titles or other text).<br/>6. FFmpeg: encode the 1440x2560 H.264/AAC MP4 and validate playback.<br/>7. Python map validator, Roblox XML serializer, ReportLab, and zipfile: validation, optional editable Studio place, PDF, and ZIP.", styles["BodyCustom"])]
+              Paragraph(f"1. Ollama with {safe(args.model)}: story/world/camera planning and the final high-level creation summary.<br/>2. ddgs web search: optional story-background references when available.<br/>3. edge-tts ({safe(args.voice)}, {safe(args.rate)}): short-form narration audio and timed SRT subtitles.<br/>4. Roblox public avatar APIs: retrieve authentic usernames' 3D meshes and textures; thumbnail-only avatars are rejected for the moving-limb MP4.<br/>5. Three.js and headless Chromium: render the expanded furnished 3D scene, simulate loose props with Rapier, move avatars on deterministic collision-free paths, preserve supplied geometry, retarget native Roblox keyframes, and attach only explicitly requested avatar-body effects, and burn in lower-case, bold white captions with a black outline in the lower third (no username labels, titles or other text).<br/>6. FFmpeg: encode the 1440x2560 H.264/AAC MP4 and validate playback.<br/>7. Python map validator, Roblox XML serializer, ReportLab, and zipfile: validation, optional editable Studio place, PDF, and ZIP.", styles["BodyCustom"])]
     if research_lines:
         story += [Paragraph("Optional research references", styles["Section"])]
         story.extend(Paragraph(line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"), styles["BodyCustom"]) for line in research_lines)

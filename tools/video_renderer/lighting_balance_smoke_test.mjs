@@ -10,13 +10,14 @@
 // It needs no GPU: the numbers are the point.
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
+import { LIGHTING_PRESETS } from './lighting_presets.mjs';
 
 console.log('Lighting balance check:');
 
-// --- the light budget, copied from render_short.mjs ---------------------------
-const SUN = 1.35;
-const HEMISPHERE = 0.85;
-const AMBIENT = 0.28;
+// --- the legacy daylight budget is now the named day preset -------------------
+const SUN = LIGHTING_PRESETS.day.sunIntensity;
+const HEMISPHERE = LIGHTING_PRESETS.day.hemisphereIntensity;
+const AMBIENT = LIGHTING_PRESETS.day.ambientIntensity;
 const EXPOSURE = 1.0;
 // A surface facing the sun, a surface in the shade, and one edge-on.
 const TOP_LIT = SUN + HEMISPHERE * 0.75 + AMBIENT;
@@ -86,6 +87,21 @@ for (const [name, rgb] of Object.entries(palette)) {
   // be pure black, which is what an unlit or uncoloured Part looks like.
   assert.ok(shade.luminance > 10, `${name} is black in the shade: rgb(${shade.pixels})`);
   console.log(`  ${name.padEnd(16)} rgb(${rgb.join(',')}) -> lit rgb(${lit.pixels.join(',')}) sat ${lit.saturation.toFixed(2)} / shade rgb(${shade.pixels.join(',')})`);
+}
+
+// Every user-selectable hour keeps a saturated surface visible without clipping.
+for (const [hour, preset] of Object.entries(LIGHTING_PRESETS)) {
+  const top = preset.sunIntensity + preset.hemisphereIntensity * 0.75 + preset.ambientIntensity;
+  const shade = preset.hemisphereIntensity * 0.35 + preset.ambientIntensity;
+  assert.ok(top > 1.2 && top < 2.6, `${hour} top-lit exposure ${top.toFixed(2)} is outside the balanced range`);
+  assert.ok(shade > 0.1 && shade < 0.6, `${hour} shade exposure ${shade.toFixed(2)} is outside the balanced range`);
+  for (const name of hued) {
+    const lit = rendered(palette[name], top);
+    assert.ok(lit.saturation > 0.12, `${hour} ${name} lost its colour: rgb(${lit.pixels})`);
+    assert.ok(lit.luminance > 45 && lit.luminance < 240,
+      `${hour} ${name} is too dark or blown out: ${lit.luminance.toFixed(0)}/255`);
+  }
+  console.log(`  ${hour.padEnd(6)} top-lit ${top.toFixed(2)}, shade ${shade.toFixed(2)}: readable and coloured`);
 }
 
 // A whole frame, mixed the way a map is: ground, walls, roof, props, sky. The

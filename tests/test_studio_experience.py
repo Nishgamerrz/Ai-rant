@@ -166,7 +166,9 @@ class StudioExperienceTests(unittest.TestCase):
                          "a model current Ollama cannot load must never be selected")
         self.assertIn("for attempt in 1 2; do", workflow)
         self.assertIn('--min-props 8 --target-props "$TARGET_PROPS"', workflow)
-        self.assertIn("every deliberate snap cut must move both the camera and focus", workflow)
+        self.assertIn("every deliberate snap cut must change both camera and focus", workflow)
+        self.assertIn("camera_shots[].time_of_day overrides", workflow)
+        self.assertIn("scene_time_notes", workflow)
         self.assertIn("only when the user's story/topic explicitly requests that effect", workflow)
         self.assertIn("num_predict:$tokens}}' > map_request.json", workflow)
         self.assertIn('--timeout "${AI_TIMEOUT:-900}"', workflow)
@@ -175,6 +177,26 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("individually named, grid-aligned editable Parts", workflow)
         self.assertIn("Show the public AI build plan and tools", workflow)
         self.assertIn("not private chain-of-thought", workflow)
+
+    def test_time_controls_reach_both_forms_dispatch_and_map_builder(self):
+        workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
+        route = (ROOT / "web/app/api/github/dispatch/route.ts").read_text(encoding="utf-8")
+        forms = [
+            (ROOT / "web/app/rbxshort/page.tsx").read_text(encoding="utf-8"),
+            (ROOT / "web/components/NewChatModal.tsx").read_text(encoding="utf-8"),
+        ]
+        for form in forms:
+            self.assertIn("time_of_day: timeOfDay", form)
+            self.assertIn("scene_time_notes: sceneTimeNotes", form)
+            for hour in ("auto", "dawn", "day", "sunset", "night"):
+                self.assertIn(f'value="{hour}"', form)
+        self.assertIn("time_of_day: timeOfDay", route)
+        self.assertIn('scene_time_notes: String(body.scene_time_notes || "").trim().slice(0, 500)', route)
+        self.assertIn('["auto", "dawn", "day", "sunset", "night"]', route)
+        self.assertIn('--time-of-day "${TIME_OF_DAY:-night}"', workflow)
+        self.assertIn('--scene-time-notes "${SCENE_TIME_NOTES:-}"', workflow)
+        self.assertIn("If these notes are empty, keep the selected hour for every shot", workflow)
+        self.assertIn("time_of_day_mode", workflow)
 
     def test_eleven_billion_preset_sits_under_hard_and_is_fully_wired(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
@@ -273,8 +295,9 @@ class StudioExperienceTests(unittest.TestCase):
     def test_workflow_form_is_compact_and_lists_comma_separated_usernames(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
         self.assertIn("Usernames, COMMA separated", workflow)
-        for short in ('description: \'Story topic — one line, "In a world where ..." works best', "description: 'Length — pick it; the AI picks the exact seconds", "description: 'World size'",
-                      "description: 'AI model'", "description: 'Voice'"):
+        for short in ('description: \'Story topic — one line, "In a world where ..." works best', "description: 'Length — 2½-minute band includes", "description: 'World size'",
+                      "description: 'AI model'", "description: 'Voice — reference-style thin, bright male narration by default'",
+                      "description: 'Lighting hour, matching the supplied reference by default'", "description: 'Optional per-scene time changes"):
             self.assertIn(short, workflow)
         self.assertNotIn("Real-life story topic for a fully furnished Roblox-themed short video", workflow)
 
@@ -383,6 +406,7 @@ class StudioExperienceTests(unittest.TestCase):
             map_plan = {
                 "name": "Sunny Plaza",
                 "theme": "A bright town with a market and a fountain.",
+                "time_of_day": "night",
                 "ground_color": [20, 20, 20],
                 "props": [
                     {"name": f"AI landmark {index}", "shape": "Block", "material": "Brick",
@@ -395,8 +419,10 @@ class StudioExperienceTests(unittest.TestCase):
                     {"username": "FriendUser", "role": "supporting", "position": [-4, 0, 24]},
                 ],
                 "camera_shots": [
-                    {"time": 0, "position": [0, 30, 75], "target": [0, 3, 24], "transition": "smooth"},
-                    {"time": 60, "position": [-12, 14, 35], "target": [0, 3, 24], "transition": "snap"},
+                    {"time": 0, "position": [0, 30, 75], "target": [0, 3, 24], "transition": "smooth",
+                     "time_of_day": "night"},
+                    {"time": 60, "position": [-12, 14, 35], "target": [0, 3, 24], "transition": "snap",
+                     "time_of_day": "sunset"},
                 ],
             }
             (work / "map.json").write_text(json.dumps(map_plan), encoding="utf-8")
@@ -422,6 +448,14 @@ class StudioExperienceTests(unittest.TestCase):
             client = root.find('.//Item[@class="LocalScript"]/Properties/ProtectedString')
             self.assertIsNotNone(server)
             self.assertIsNotNone(client)
+            clock = root.find('.//Item[@class="Lighting"]/Properties/float[@name="ClockTime"]')
+            time_of_day = root.find('.//Item[@class="Lighting"]/Properties/string[@name="TimeOfDay"]')
+            self.assertEqual(clock.text, "20.5", "the generated Studio place opens at the selected global hour")
+            self.assertEqual(time_of_day.text, "20:30:00")
+            readme = (work / "README.md").read_text(encoding="utf-8")
+            self.assertIn("night base; 0s night, 60s sunset", readme)
+            self.assertIn("local CLOCK_TIMES = {dawn = 6.5", client.text)
+            self.assertIn("Lighting.ClockTime = blendClockTime(fromClock, toClock, lightingAlpha)", client.text)
             self.assertIn('for _, castMember in ipairs(CONFIG.cast or {}) do', server.text)
             self.assertIn('CreateHumanoidModelFromUserIdAsync', server.text)
             self.assertGreaterEqual(len(root.findall('.//Item[@class="Part"]')), 9)

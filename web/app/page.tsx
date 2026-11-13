@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Sidebar } from "@/components/Sidebar";
 import { ChatWindow } from "@/components/ChatWindow";
 import { FileExplorer } from "@/components/FileExplorer";
@@ -18,7 +18,7 @@ export default function Home() {
   const [liveLog, setLiveLog] = useState<string>("");
   const [chatNotice, setChatNotice] = useState("");
 
-  async function pollLogs() {
+  const pollLogs = useCallback(async () => {
     if (!selectedRun) return;
     try {
       const j = await fetch(`/api/github/logs?run=${selectedRun}&logs=1`, { cache: "no-store" }).then((r) => r.json());
@@ -32,7 +32,7 @@ export default function Home() {
       }
       if (j.logTail) setLiveLog(j.logTail);
     } catch {}
-  }
+  }, [selectedRun]);
 
   useEffect(() => {
     if (!selectedRun) {
@@ -45,7 +45,7 @@ export default function Home() {
     pollLogs();
     const id = setInterval(pollLogs, 3500);
     return () => clearInterval(id);
-  }, [selectedRun]);
+  }, [selectedRun, pollLogs]);
 
   return (
     <div className="min-h-screen bg-[#09090b] flex">

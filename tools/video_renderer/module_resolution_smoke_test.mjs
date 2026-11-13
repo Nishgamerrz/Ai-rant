@@ -20,7 +20,11 @@ const html = `<!doctype html><meta charset="utf-8">
   import { STLLoader } from '/modules/three/examples/jsm/loaders/STLLoader.js';
   import { TDSLoader } from '/modules/three/examples/jsm/loaders/TDSLoader.js';
   import { chooseSafeCamera } from '/scene_camera.mjs';
-  window.moduleResolutionReady = THREE.REVISION === '170' && [OBJLoader,MTLLoader,GLTFLoader,FBXLoader,ColladaLoader,PLYLoader,STLLoader,TDSLoader,chooseSafeCamera].every(Boolean);
+  import { LIGHTING_PRESETS, resolveLightingAtTime, resolveTimeOfDay } from '/lighting_presets.mjs';
+  const lighting = resolveLightingAtTime({time_of_day:'night',camera_shots:[{time:0},{time:5,transition:'smooth',time_of_day:'sunset'}]}, 2);
+  window.moduleResolutionReady = THREE.REVISION === '170' && [OBJLoader,MTLLoader,GLTFLoader,FBXLoader,ColladaLoader,PLYLoader,STLLoader,TDSLoader,chooseSafeCamera].every(Boolean)
+    && resolveTimeOfDay('sunset') === 'sunset' && LIGHTING_PRESETS.night.sunIntensity > 0
+    && lighting.from === 'night' && lighting.to === 'sunset' && lighting.blend > 0;
 </script>`;
 
 const server = createServer((request, response) => {
@@ -33,6 +37,11 @@ const server = createServer((request, response) => {
   if (pathname === '/scene_camera.mjs') {
     response.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
     createReadStream(join(ROOT, 'scene_camera.mjs')).pipe(response);
+    return;
+  }
+  if (pathname === '/lighting_presets.mjs') {
+    response.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
+    createReadStream(join(ROOT, 'lighting_presets.mjs')).pipe(response);
     return;
   }
   if (pathname.startsWith('/modules/')) {
@@ -54,7 +63,9 @@ await new Promise((resolveReady, reject) => {
   server.once('error', reject);
   server.listen(0, '127.0.0.1', resolveReady);
 });
-const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+const launchOptions = { headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] };
+if (process.env.CHROMIUM_EXECUTABLE_PATH) launchOptions.executablePath = process.env.CHROMIUM_EXECUTABLE_PATH;
+const browser = await chromium.launch(launchOptions);
 try {
   const page = await browser.newPage();
   const pageErrors = [];

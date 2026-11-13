@@ -241,6 +241,27 @@ class InteriorBuildTests(unittest.TestCase):
         plan = build_plan(mode_flag=("--interior", "medium"))
         self.assertEqual(plan["interior"]["width"], 44.0)
 
+    def test_named_scene_hours_survive_the_interior_camera_rebuild(self):
+        raw_plan = json.loads(json.dumps(PLAN))
+        for at in (80, 100, 120):
+            next_shot = dict(raw_plan["camera_shots"][-1])
+            next_shot["time"] = at
+            next_shot["position"] = [at / 10, 10, 44]
+            raw_plan["camera_shots"].append(next_shot)
+        raw_plan["camera_shots"][0]["time_of_day"] = "night"
+        raw_plan["camera_shots"][1]["time_of_day"] = "sunset"
+        plan = build_plan(
+            mode_flag=("--scene-time-notes", "opening at night, ending at sunset",
+                       "--time-of-day", "day"),
+            plan=raw_plan,
+        )
+        self.assertEqual(plan["time_of_day"], "day")
+        self.assertEqual(plan["time_of_day_mode"], "per_scene")
+        overrides = [(shot["time"], shot["time_of_day"])
+                     for shot in plan["camera_shots"] if "time_of_day" in shot]
+        self.assertEqual([hour for _, hour in overrides], ["night", "sunset"])
+        self.assertEqual([time for time, _ in overrides], sorted(time for time, _ in overrides))
+
 
 class InteriorReviewTests(unittest.TestCase):
     @classmethod

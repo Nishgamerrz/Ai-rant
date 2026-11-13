@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { SubagentTimeline } from "./SubagentTimeline";
 import { encodeFaceReference } from "@/lib/faceReference";
 
@@ -72,7 +72,7 @@ export function ChatWindow({ runId, notice = "" }: { runId: number | null; notic
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
 
-  async function fetchChat() {
+  const fetchChat = useCallback(async () => {
     if (!runId) return;
     let artifactMessages: Msg[] = [];
     try {
@@ -122,9 +122,9 @@ export function ChatWindow({ runId, notice = "" }: { runId: number | null; notic
       }
       return merged;
     });
-  }
+  }, [runId, chatToken]);
 
-  async function fetchLive() {
+  const fetchLive = useCallback(async () => {
     if (!runId) return;
     try {
       const res = await fetch(`/api/github/logs?run=${runId}&logs=1`, { cache: "no-store" });
@@ -137,7 +137,7 @@ export function ChatWindow({ runId, notice = "" }: { runId: number | null; notic
         if (parsed.tools.length) setLiveTools(parsed.tools);
       }
     } catch {}
-  }
+  }, [runId]);
 
   async function sendMessage(event: any) {
     event.preventDefault();
@@ -235,7 +235,7 @@ export function ChatWindow({ runId, notice = "" }: { runId: number | null; notic
     fetchLive();
     const id = setInterval(() => { fetchChat(); fetchLive(); }, 3500);
     return () => clearInterval(id);
-  }, [runId, chatToken]);
+  }, [runId, chatToken, fetchChat, fetchLive]);
 
   useEffect(() => {
     scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight, behavior: "smooth" });

@@ -62,13 +62,12 @@ function buildHtml(data) {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><style>
   *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#87b9e8;font-family:Arial,Helvetica,sans-serif}
   #frame{position:relative;width:${WIDTH}px;height:${HEIGHT}px}canvas{display:block;width:${WIDTH}px;height:${HEIGHT}px}
-  /* On-screen captions, Roblox-shorts style: heavy white text with a black
-     outline, centred and sitting a little above the middle of the vertical
-     frame. It is drawn inside #frame, so it is captured with the WebGL canvas. */
-  #caption{position:absolute;left:50%;top:38%;transform:translate(-50%,-50%) scale(1);
-    width:84%;text-align:center;font-family:Arial Black,Arial,Helvetica,sans-serif;font-weight:900;
-    font-size:${Math.round(WIDTH * 0.062)}px;line-height:1.14;letter-spacing:.5px;
-    text-transform:uppercase;color:#fff;-webkit-text-stroke:${Math.round(WIDTH * 0.008)}px #000;
+  /* Reference-video captions: one lower-case spoken word at a time in the
+     lower third, bold white with a clean black outline, captured in the page. */
+  #caption{position:absolute;left:50%;top:63%;transform:translate(-50%,-50%) scale(1);
+    width:88%;text-align:center;font-family:Arial Black,Arial,Helvetica,sans-serif;font-weight:900;
+    font-size:${Math.round(WIDTH * 0.07)}px;line-height:1.1;letter-spacing:.2px;
+    text-transform:lowercase;color:#fff;-webkit-text-stroke:${Math.round(WIDTH * 0.007)}px #000;
     paint-order:stroke fill;text-shadow:0 ${Math.round(WIDTH * 0.004)}px ${Math.round(WIDTH * 0.014)}px rgba(0,0,0,.55);
     opacity:0;pointer-events:none;word-wrap:break-word;overflow-wrap:break-word}
   #caption.on{opacity:1}
@@ -88,6 +87,7 @@ function buildHtml(data) {
   import { animateAvatarRig, applyRobloxAnimationRig, buildAvatarRig, canonicalizeAvatarOrientation, idleAvatarRig, measureFaceAnchor, measureRigStretch } from '/avatar_rig.mjs';
   import { planMarks, poseAt, roomBoundsFrom, yawToward } from '/actor_motion.mjs';
   import { chooseFaceCamera, chooseSafeCamera } from '/scene_camera.mjs';
+  import { LIGHTING_PRESETS, resolveLightingAtTime, resolveTimeOfDay } from '/lighting_presets.mjs';
   import { buildShapeGeometry, SHAPE_ROTATIONS } from '/map_shapes.mjs';
   import { auditRenderProps, isCameraHazard } from '/render_map_audit.mjs';
   import { createParticleField, isAdditive, sampleParticles } from '/particles.mjs';
@@ -146,8 +146,11 @@ function buildHtml(data) {
     const boost=(channel)=>Math.max(0,Math.min(255,Math.round(grey+(channel-grey)*1.18)));
     const c=new THREE.Color();c.setRGB(boost(r)/255,boost(g)/255,boost(b)/255,THREE.SRGBColorSpace);return c;
   };
-  const skyColor=rgb(DATA.plan.ambient_color||[186,210,238]).lerp(new THREE.Color(0x9fd0f4),.5);
-  const scene=new THREE.Scene(); scene.background=skyColor;
+  const timeOfDay=resolveTimeOfDay(DATA.plan.time_of_day||'auto',DATA.plan.theme||'');
+  const lightingPreset=LIGHTING_PRESETS[timeOfDay];
+  const themeSky=rgb(DATA.plan.ambient_color||[186,210,238]).lerp(new THREE.Color(0x9fd0f4),.5);
+  const scene=new THREE.Scene();
+  scene.background=timeOfDay==='day'?themeSky:new THREE.Color(lightingPreset.sky).lerp(themeSky,.12);
   const renderer=new THREE.WebGLRenderer({antialias:true,alpha:false,powerPreference:'high-performance'});
   renderer.setPixelRatio(1); renderer.setSize(${WIDTH},${HEIGHT},false); renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFSoftShadowMap;
   // Filmic tone mapping, not raw linear output. With no tone curve every channel
@@ -163,14 +166,12 @@ function buildHtml(data) {
   renderer.toneMappingExposure=1.0;
   document.getElementById('frame').prepend(renderer.domElement);
   const camera=new THREE.PerspectiveCamera(42,${WIDTH}/${HEIGHT},0.4,1600);
-  // Bright daylight, but inside a range that tone mapping can hold: the sum of
-  // these used to sit near 6x, which put every lit surface over the clip point.
-  // A daylight budget that fits inside the tone curve. The old sum (hemisphere
-  // 2.9 + ambient 0.75 + sun 2.5 + fill 1.05 + rim 0.6, roughly 6x) pushed every
-  // lit surface past white, so the frame measured 219/255 with no colour in it.
-  scene.add(new THREE.HemisphereLight(0xf2f9ff,0x9aa88f,0.85));
-  scene.add(new THREE.AmbientLight(0xffffff,0.28));
-  const sun=new THREE.DirectionalLight(0xfff4dc,1.35);
+  // Each named hour has a measured, colour-safe light budget: night stays moody
+  // but keeps the cast and set readable, while sunset adds a warm key and cool fill.
+  const hemisphere=new THREE.HemisphereLight(lightingPreset.hemisphereSky,
+    lightingPreset.hemisphereGround,lightingPreset.hemisphereIntensity);scene.add(hemisphere);
+  const ambient=new THREE.AmbientLight(0xffffff,lightingPreset.ambientIntensity);scene.add(ambient);
+  const sun=new THREE.DirectionalLight(lightingPreset.sunColor,lightingPreset.sunIntensity);
   sun.castShadow=true; sun.shadow.mapSize.set(2048,2048);
   if(DATA.plan.interior){
     // An outdoor 640-stud shadow frustum spent only a few pixels on a bedroom,
@@ -186,7 +187,7 @@ function buildHtml(data) {
     sun.shadow.camera.near=.1; sun.shadow.camera.far=Math.max(60,span*4);
     sun.shadow.bias=-.00018; sun.shadow.normalBias=.06;
   }else{
-    sun.position.set(-150,260,150);
+    sun.position.set(-150,lightingPreset.sunHeight,150);
     sun.target.position.set(0,0,0);
     sun.shadow.camera.left=-320; sun.shadow.camera.right=320;
     sun.shadow.camera.top=320; sun.shadow.camera.bottom=-320;
@@ -194,8 +195,32 @@ function buildHtml(data) {
     sun.shadow.bias=-.0006; sun.shadow.normalBias=.45;
   }
   sun.shadow.camera.updateProjectionMatrix(); scene.add(sun.target); scene.add(sun);
-  const fill=new THREE.DirectionalLight(0xcfe4ff,0.3); fill.position.set(160,120,-160); scene.add(fill);
-  const rim=new THREE.DirectionalLight(0xffffff,0.2); rim.position.set(0,60,220); scene.add(rim);
+  const fill=new THREE.DirectionalLight(lightingPreset.fillColor,lightingPreset.fillIntensity);
+  fill.position.set(160,120,-160); scene.add(fill);
+  const rim=new THREE.DirectionalLight(lightingPreset.rimColor,lightingPreset.rimIntensity);
+  rim.position.set(0,60,220); scene.add(rim);
+  const lightColorA=new THREE.Color(),lightColorB=new THREE.Color(),skyColor=new THREE.Color();
+  const setBlendedColor=(target,key,a,b,blend)=>{
+    lightColorA.setHex(a[key]);lightColorB.setHex(b[key]);target.copy(lightColorA).lerp(lightColorB,blend);
+  };
+  function applyLightingAt(t){
+    const state=resolveLightingAtTime(DATA.plan,t);
+    const from=LIGHTING_PRESETS[state.from],to=LIGHTING_PRESETS[state.to],blend=state.blend;
+    const mix=(key)=>from[key]+(to[key]-from[key])*blend;
+    setBlendedColor(hemisphere.color,'hemisphereSky',from,to,blend);
+    setBlendedColor(hemisphere.groundColor,'hemisphereGround',from,to,blend);
+    setBlendedColor(sun.color,'sunColor',from,to,blend);
+    setBlendedColor(fill.color,'fillColor',from,to,blend);
+    setBlendedColor(rim.color,'rimColor',from,to,blend);
+    hemisphere.intensity=mix('hemisphereIntensity');ambient.intensity=mix('ambientIntensity');
+    sun.intensity=mix('sunIntensity');fill.intensity=mix('fillIntensity');rim.intensity=mix('rimIntensity');
+    if(!DATA.plan.interior)sun.position.y=mix('sunHeight');
+    setBlendedColor(skyColor,'sky',from,to,blend);
+    const themeMix=(state.from==='day'?1:.12)+((state.to==='day'?1:.12)-(state.from==='day'?1:.12))*blend;
+    scene.background.copy(skyColor.lerp(themeSky,themeMix));
+  }
+  applyLightingAt(0);
+  console.log('Lighting preset: '+timeOfDay+' ('+lightingPreset.sunIntensity+' key, '+lightingPreset.ambientIntensity+' ambient).');
   const groundRgb=sanitize(DATA.plan.ground_color||[126,182,120],118);
   const floor=new THREE.Mesh(new THREE.PlaneGeometry(760,760),new THREE.MeshStandardMaterial({color:new THREE.Color(...groundRgb.map(v=>v/255)),roughness:0.95}));
   floor.rotation.x=-Math.PI/2; floor.position.y=-0.06; floor.receiveShadow=true; scene.add(floor);
@@ -832,7 +857,7 @@ function buildHtml(data) {
     captionEl.style.transform='translate(-50%,-50%) scale('+pop.toFixed(3)+')';
   }
   window.renderAt=async(t)=>{
-    for(const actor of actors)animateActor(actor,t);cameraAt(t);captionAt(t);updateEffects(t);
+    for(const actor of actors)animateActor(actor,t);cameraAt(t);applyLightingAt(t);captionAt(t);updateEffects(t);
     physicsWorld.step();physicsWorld.step();
     for(const item of dynamicPropInstances){
       const p=item.body.translation(),r=item.body.rotation(),size=item.part.size;
@@ -880,6 +905,7 @@ function createStaticServer(html, avatarRoot) {
     if (pathname === '/avatar_rig.mjs') { serveFile(response, join(ROOT, 'avatar_rig.mjs')); return; }
     if (pathname === '/actor_motion.mjs') { serveFile(response, join(ROOT, 'actor_motion.mjs')); return; }
     if (pathname === '/scene_camera.mjs') { serveFile(response, join(ROOT, 'scene_camera.mjs')); return; }
+    if (pathname === '/lighting_presets.mjs') { serveFile(response, join(ROOT, 'lighting_presets.mjs')); return; }
     if (pathname === '/map_shapes.mjs') { serveFile(response, join(ROOT, 'map_shapes.mjs')); return; }
     if (pathname === '/render_map_audit.mjs') { serveFile(response, join(ROOT, 'render_map_audit.mjs')); return; }
     if (pathname === '/particles.mjs') { serveFile(response, join(ROOT, 'particles.mjs')); return; }

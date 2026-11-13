@@ -14,9 +14,9 @@ on:
         default: ''
         type: string
       duration_seconds:
-        description: 'Length — pick it; the AI picks the exact seconds inside that minute'
+        description: 'Length — 2½-minute band includes the supplied clip’s ~2:45 runtime'
         required: true
-        default: '120'
+        default: '150'
         type: choice
         options:
           - '30'
@@ -47,14 +47,30 @@ on:
           - smart_11b
           - animation_best
       voice_style:
-        description: 'Voice'
+        description: 'Voice — reference-style thin, bright male narration by default'
         required: true
-        default: 'male'
+        default: 'thin_male'
         type: choice
         options:
           - male
           - female
           - thin_male
+      time_of_day:
+        description: 'Lighting hour, matching the supplied reference by default'
+        required: true
+        default: night
+        type: choice
+        options:
+          - auto
+          - dawn
+          - day
+          - sunset
+          - night
+      scene_time_notes:
+        description: 'Optional per-scene time changes (e.g. opening night, ending sunset)'
+        required: false
+        default: ''
+        type: string
       world_theme:
         description: 'Theme (optional)'
         required: false
@@ -76,9 +92,9 @@ on:
         default: ''
         type: string
       duration_seconds:
-        description: 'Length in seconds (30-180)'
+        description: 'Length in seconds (150 starts at 2:30 and includes the reference clip’s ~2:45 runtime)'
         required: true
-        default: '120'
+        default: '150'
         type: string
       map_detail:
         description: 'World size: standard, dense or ultra'
@@ -93,7 +109,17 @@ on:
       voice_style:
         description: 'Voice: male, female or thin_male'
         required: true
-        default: 'male'
+        default: 'thin_male'
+        type: string
+      time_of_day:
+        description: 'Lighting hour: auto, dawn, day, sunset or night'
+        required: true
+        default: 'night'
+        type: string
+      scene_time_notes:
+        description: 'Optional per-scene time changes'
+        required: false
+        default: ''
         type: string
       world_theme:
         description: 'Theme (optional)'
@@ -216,7 +242,9 @@ jobs:
           WORLD_THEME: ${{ steps.refine.outputs.world_theme || inputs.world_theme }}
           MODEL_QUALITY: ${{ inputs.model_quality }}
           CAST_NAMES: ${{ env.CAST_NAMES }}
-          VOICE_STYLE: ${{ inputs.voice_style }}
+          VOICE_STYLE: ${{ inputs.voice_style || 'thin_male' }}
+          TIME_OF_DAY: ${{ inputs.time_of_day || 'night' }}
+          SCENE_TIME_NOTES: ${{ inputs.scene_time_notes || '' }}
         run: |
           python - <<'PY'
           import os
@@ -236,11 +264,13 @@ jobs:
                   f'- **Story prompt:** {topic}\n'
                   f'- **Theme:** {theme}\n'
                   f'- **Length / preset / voice:** {clean(os.environ.get("DURATION_LABEL", "?"))} ({clean(os.environ["DURATION_SECONDS"])} s, window {clean(os.environ.get("DURATION_WINDOW", ""))}) / {clean(os.environ["MODEL_QUALITY"])} / {clean(os.environ["VOICE_STYLE"])}\n'
+                  f'- **Time of day:** {clean(os.environ.get("TIME_OF_DAY", "night"))}\n'
+                  f'- **Scene time changes:** {clean(os.environ.get("SCENE_TIME_NOTES", "")) or "none (one global hour)"}\n'
                   f'- **Avatar cast:** {clean(os.environ.get("CAST_NAMES", ""))}\n'
                   '- **Tools:** selected Ollama model, Roblox public avatar APIs, optional web research, edge-tts, Three.js + Rapier, Chromium, FFmpeg, Python validation, ReportLab, ZIP.\n'
                   '- **Prompt cleanup:** the typed story prompt and theme are spell-checked and lightly enriched by the Gemini sub-agent before planning; the correction is never mentioned in the text.\n'
                   '- **Pipeline:** story and furnished world/camera plan → narration audio → MP4 with the narration captions burned in + Studio project → quality checks and package.\n'
-                  '- **Captions:** the spoken line is drawn on screen, centred and a little above the middle of the vertical frame, in bold outlined story-short style. No usernames, titles or other text.\n'
+                  '- **Captions:** Edge TTS word timings drive one lower-case word at a time in the lower third, with bold white text, a black outline, a small pop and natural hidden gaps.\n'
                   '- **Username lookup:** the public Roblox Users API resolves entered usernames to IDs keylessly; no manual ID is needed.\n'
                   '- **Local model:** username-matched OBJ, glTF/GLB, FBX, COLLADA, PLY, STL, and 3DS files are auto-rigged for the MP4; direct local geometry takes priority over RBXM asset references.\n'
                   '- **Animation:** matching RBXM walk/jump KeyframeSequences are retargeted onto the local mesh rig; inaccessible native clips block MP4 instead of being replaced by fake limb motion.\n'
@@ -331,6 +361,7 @@ jobs:
             npm run test:page-template && \
             npm run test:part-colour && \
             npm run test:lighting && \
+            npm run test:time-of-day && \
             npm run test:map-features && \
             npm run test:module-resolution ) 2>&1 | tee dist/tool-tests.log
           node tools/rbxm_importer/test_rbxm.mjs
@@ -663,6 +694,7 @@ jobs:
       - name: Write a believable real-life story
         env:
           STORY_TOPIC: ${{ steps.refine.outputs.story_topic || inputs.story_topic }}
+          VOICE_STYLE: ${{ inputs.voice_style || 'thin_male' }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           # Fallback: when Gemini is out of quota, unreachable or broken, the
@@ -700,6 +732,7 @@ jobs:
           THINK BRIEFLY: settle the hook, one everyday problem, the cast's choice, and the ending in a few SHORT lines (at most 6 sentences of planning), then write the final story once and stop. If you notice you are repeating the same idea or re-drafting the same paragraph, say so in a few words and move on; do not audit every word while thinking, and the answer itself must be complete and must not run out of room.
           OPENING LINE (required): open with ONE strong spoken sentence in the "In a world where ..." spirit that plants the whole world and the hook at once, in the first few words - a complete sentence of the story, never a title, a label, a greeting, a question to the viewer, or the words "what if". Shape it like: "In a world where gravity clocks off for ten minutes every morning, Max sleeps through it." That line is the first caption on screen, so it has to land on its own, and every line after it has to earn the next one.
           The video must feel like a real Roblox story short: a small cast of characters acting out one clear everyday problem.
+          REFERENCE DELIVERY (style only, never copy its story or character identities): voice choice is ${VOICE_STYLE}; for thin_male use a light, bright, slightly higher male tone, conversational and clear, not a deep announcer or audiobook. Write short, speakable sentences, usually 6–14 words, with firm full stops that create the same natural pauses/stops as the reference. Leave a small beat after the hook and before the final reveal; use commas sparingly, never run-on sentences, ellipses or stage directions. Word-synced captions follow Edge TTS timing, so each spoken beat should be easy to read one word at a time.
           Selected cast usernames (for internal casting only): ${CAST_NAMES:-none supplied}.
           NEVER put a username, handle, gamer tag, or account name in the narration, and never read one aloud, spell one, or say "username", "player", "avatar", "account", or "subscriber". Instead invent natural human first names for the characters and tell the story with those names. Match the number of speaking characters to the selected cast.
           YOU HAVE A GEMINI SUB-AGENT AND YOU CAN USE IT ONE OR TWO TIMES, OR AS MANY TIMES AS YOU LIKE, AT ANY POINT IN THIS STORY. There is no quota and no rule that you must ask: if you can write the story yourself, just write it and return "subagent_tasks":[].
@@ -886,6 +919,8 @@ jobs:
           AI_MODEL: ${{ env.AI_MODEL }}
           OLLAMA_THINKING: ${{ env.OLLAMA_THINKING }}
           WORLD_THEME: ${{ steps.refine.outputs.world_theme || inputs.world_theme }}
+          TIME_OF_DAY: ${{ inputs.time_of_day || 'night' }}
+          SCENE_TIME_NOTES: ${{ inputs.scene_time_notes || '' }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           # Fallback: when Gemini is out of quota, unreachable or broken, the
@@ -915,11 +950,11 @@ jobs:
           MAP_TOKENS=$(( MAP_TOKENS > 6000 ? 6000 : MAP_TOKENS ))
           export MAP_TOKENS
           python tools/say.py plan "Blueprint output budget: ${MAP_TOKENS} tokens (preset ${MODEL_QUALITY:-default}); 12-20 anchors."
-          # A 3-minute story needs more shots than a 30-second one, and every
-          # version keeps room for face close-ups.
-          SHOT_COUNT=$(( DURATION_SECONDS / 8 + 4 ))
-          SHOT_COUNT=$(( SHOT_COUNT < 6 ? 6 : (SHOT_COUNT > 12 ? 12 : SHOT_COUNT) ))
-          SHOT_MAX=$(( SHOT_COUNT + 4 < 24 ? SHOT_COUNT + 4 : 24 ))
+          # The reference changes angle/scale every few seconds; do not hold a
+          # three-minute short on only a dozen shots.
+          SHOT_COUNT=$(( DURATION_SECONDS / 4 + 4 ))
+          SHOT_COUNT=$(( SHOT_COUNT < 10 ? 10 : (SHOT_COUNT > 40 ? 40 : SHOT_COUNT) ))
+          SHOT_MAX=$(( SHOT_COUNT + 6 < 48 ? SHOT_COUNT + 6 : 48 ))
           WEB_RESEARCH=$(jq -c . dist/web_research.json 2>/dev/null || echo '[]')
           python tools/say.py plan "Camera storyboard: ${SHOT_COUNT}-${SHOT_MAX} shots, AI-timed face expression beats, at least 3 face close-ups."
           # Run #109 told a bedroom story and rendered an open-air world: nothing ever
@@ -942,6 +977,8 @@ jobs:
           ${SCENE_BLOCK}
           User's visual-theme cue: "${WORLD_THEME:-AUTO FROM STORY}"
           If the cue is AUTO FROM STORY, invent a distinctive, coherent theme from the story/topic. Otherwise, treat the user's cue as a required design constraint: preserve its meaning in the world theme, architecture, landmarks, palette, materials, props, lighting, and atmosphere. For example, a daylight cue means a clearly bright, naturally sunlit daytime world; do not turn it into a night/neon scene. Never replace a supplied theme with a different story-derived theme or generic city unless it genuinely fits the user's cue.
+          REFERENCE VIDEO LOOK (style only; invent a new story/world and never copy characters): portrait 9:16 Roblox-like cinematic storytelling; textured storybook buildings and streets, short angle changes, prop cutaways, expressive characters, and cozy practical lights. The supplied clip contrasts cool blue night outdoors with warm lantern/window pools, snowy ground, and warm interiors; echo that cool/warm contrast and use snow only when it fits the story/theme.
+          Selected default time of day: "${TIME_OF_DAY:-night}". If this is auto, infer one coherent hour from the story; otherwise this is the user's chosen base hour. Dawn uses soft rose/blue light; day uses clear bright sun; sunset uses amber low sun with cooler fill; night uses deep blue moonlight plus warm lamps/windows. Keep colours and avatar faces readable, never crush the world to black. Per-scene time-change notes (optional): "${SCENE_TIME_NOTES:-none; keep one global hour}". If these notes are empty, keep the selected hour for every shot. If present, obey their order and apply optional camera_shots[].time_of_day overrides using exactly dawn, day, sunset, or night; each override holds until the next one, and unmarked shots inherit the previous/global hour. Let lighting changes align to story beats; blend smooth transitions and keep snap-cut transitions crisp.
           Story usernames in order (first is lead): ${CAST_NAMES:-none supplied}. The Studio experience loads public R15 avatars at runtime without visible username labels or overlays. Add an avatar-body visual effect (such as a number, scar, tattoo, badge, or symbol) only when the user's story/topic explicitly requests that effect; otherwise add none.
           The ONLY usernames that exist are: ${CAST_NAMES:-none supplied}. Use those exact strings in character_placements, camera_shots[].focus_username and face_expressions[].username. "LeadName", "FriendName" and "NoobName" below are placeholders for the shape of the JSON only -- never output a placeholder, and never invent a username.
           Put the lead at the center of the action. Place every additional username in a distinct nearby, camera-visible position, and plan at least one shot that includes each named character.
@@ -972,7 +1009,7 @@ jobs:
           Use the user theme prompt as the source of truth for every design choice. Derive the theme from the story only when the user left the theme blank. Make the theme unmistakable and specific; do not fall back to the same generic city/neon plaza. The finished environment is expanded by code to ${TARGET_PROPS}+ Parts; this compact AI blueprint should prioritize coherence, varied locations, and meaningful design over repeating primitive objects.
           Include one character_placements entry for every supplied username using exact spelling (the example's LeadName/FriendName are placeholders: copy the real usernames above, never the placeholders), roles lead/supporting, positions X=-8..8, Y=0..3, Z=12..38.
           USE THE EXACT KEYS: shape (never type/dimensions), material spelled exactly as listed, ground_material, ground_color, ambient_color, props, character_placements, camera_shots, face_expressions, search_queries. A schema is enforced, so any other key name is rejected. Do not add username labels, screen text, floating numbers, scars, tattoos, badges, or other visual effects unless the user's story/topic explicitly asks for them. When requested, keep the effect attached to the specified avatar body part/location. Keep a clear 30-by-40-stud area around this cast so characters and camera remain unobstructed.
-          Use ${SHOT_COUNT:-8} to ${SHOT_MAX:-16} camera_shots with increasing times from 0 through exactly ${DURATION_SECONDS} (${DURATION_LABEL}); the final shot time is exactly ${DURATION_SECONDS}, and intermediate times must be precise moments (e.g. 37.4, 71.2, 118.6), never rounded to tens; show the complete environment, all supplied characters, landmarks, and the ending beat. Coordinates are Roblox X,Y,Z. Each shot must set focus_username to an exact supplied username (or world for a single establishing view); every deliberate snap cut must move both the camera and focus to its named character. Begin wide, use smooth moves and deliberate snap cuts, finish on the lead.
+          Use ${SHOT_COUNT:-10} to ${SHOT_MAX:-16} camera_shots, roughly one every 3–5 seconds, with increasing times from 0 through exactly ${DURATION_SECONDS} (${DURATION_LABEL}); the final shot time is exactly ${DURATION_SECONDS}, and intermediate times must be precise moments, never rounded to tens. Match the reference's brisk visual rhythm: alternate wide establishing views, medium action, readable face close-ups, and story-object/hand/lantern/environment cutaways; tie each change to a narrated beat, not random motion. Coordinates are Roblox X,Y,Z. Each shot must set focus_username to an exact supplied username (or world for establishing, prop cutaway, or environment-reveal shots); every deliberate snap cut must change both camera and focus. Begin wide, use smooth moves and deliberate snap cuts, keep face shots 2.8–4 studs away (no extreme crops), and finish on the lead.
           ANIMATED FACES (required): every character gets a Roblox story-short face rendered from your timeline — white eyes with dark pupils, thick expressive eyebrows and a clean line mouth — so choose the feeling that fits each beat. The whole video is exactly ${DURATION_SECONDS} seconds (${DURATION_LABEL}) and must end there, not on a round minute. Return a face_expressions timeline of 6–16 beats across the whole ${DURATION_SECONDS} seconds, with precise non-round timestamps tied to the narration beats. Each beat is {"time": seconds, "expression": one of neutral|happy|sad|surprised|worried|angry|excited|thinking, "intensity": 0..1, "username": exact supplied username}. Time every switch to the exact second the narration changes feeling, so the face changes on the beat, never at random.
           FACE CAMERAS (required): mark at least 3 shots with "framing":"face" (a readable close-up, not an extreme crop) and set "face_distance" between 2.8 and 4.0 studs. A face shot must focus a named character whose expression changes at that moment. All other shots use "framing":"auto" or "wide". Fill position/target normally; the renderer moves the face camera to the head while preserving that minimum distance.
           PROMPT
@@ -1305,6 +1342,7 @@ jobs:
             validation_status=0
             python tools/build_story_map.py map_response.json dist/Roblox_Story_Map.json "$DURATION_SECONDS" \
               --json-only --strict --min-props 8 --target-props "$TARGET_PROPS" --usernames dist/characters.json --story-topic "$STORY_TOPIC" --scene-mode "${WORLD_MODE:-auto}" \
+              --time-of-day "${TIME_OF_DAY:-night}" --scene-time-notes "${SCENE_TIME_NOTES:-}" \
               > map_validation.log 2>&1 || validation_status=$?
             if [ "$validation_status" -eq 0 ]; then
               cat map_validation.log
@@ -1343,7 +1381,8 @@ jobs:
             FALLBACK_STORY="${STORY_TOPIC}. $(cat dist/narration.txt)"
             python tools/build_story_map.py map_response.json dist/Roblox_Story_Map.json "$DURATION_SECONDS" \
               --json-only --fallback --theme "$WORLD_THEME" --story "$FALLBACK_STORY" \
-              --target-props "$TARGET_PROPS" --usernames dist/characters.json --story-topic "$STORY_TOPIC" --scene-mode "${WORLD_MODE:-auto}"
+              --target-props "$TARGET_PROPS" --usernames dist/characters.json --story-topic "$STORY_TOPIC" --scene-mode "${WORLD_MODE:-auto}" \
+              --time-of-day "${TIME_OF_DAY:-night}" --scene-time-notes "${SCENE_TIME_NOTES:-}"
             echo "Theme/story procedural fallback" > dist/map_source.txt
           fi
           python - <<'PY'
@@ -1580,6 +1619,10 @@ jobs:
               'world_plan_source': Path('dist/map_source.txt').read_text(encoding='utf-8').strip(),
               'representative_part_names': [p.get('name') for p in plan.get('props', [])[:60]],
               'camera_shot_count': len(plan.get('camera_shots', [])),
+              'time_of_day': plan.get('time_of_day', 'day'),
+              'time_of_day_mode': plan.get('time_of_day_mode', 'global'),
+              'scene_time_changes': [{'time': shot.get('time'), 'hour': shot.get('time_of_day')}
+                                     for shot in plan.get('camera_shots', []) if shot.get('time_of_day')],
               'face_expression_beats': len(plan.get('face_expressions', [])),
               'face_closeup_shots': sum(1 for shot in plan.get('camera_shots', []) if str(shot.get('framing', '')).lower() == 'face'),
               'cast_usernames': cast,
@@ -1590,7 +1633,7 @@ jobs:
           }
           prompt = (
               'Write a concise, friendly 100–160 word final creation summary for the user. '
-              'Summarize only the completed story, world theme, furnishing, real Roblox avatars, AI-timed animated faces and face close-up cameras, narration audio, the on-screen narration captions and the rendered MP4 deliverables in this data. '
+              'Summarize only the completed story, world theme, lighting hour and any scene-hour changes, furnishing, real Roblox avatars, AI-timed animated faces and face close-up cameras, narration audio, the lower-third narration captions and the rendered MP4 deliverables in this data. '
               'Do not reveal or imitate private chain-of-thought. Do not claim Roblox Studio runtime testing. '
               'Do not invent features not present in the data. Return only JSON with a summary string.\nDATA: '
               + json.dumps(context, ensure_ascii=False)
