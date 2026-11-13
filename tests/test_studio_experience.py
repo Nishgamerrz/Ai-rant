@@ -301,8 +301,10 @@ class StudioExperienceTests(unittest.TestCase):
     def test_workflow_form_is_compact_and_lists_comma_separated_usernames(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
         self.assertIn("Usernames, COMMA separated", workflow)
-        for short in ('description: \'Story topic — one line, "In a world where ..." works best', "description: 'Length — 2½-minute band includes", "description: 'World size'",
-                      "description: 'AI model'", "description: 'Voice — reference-style thin, bright male narration by default'"):
+        for short in ('description: \'Story topic — one line, "In a world where ..." works best',
+                      "description: 'Short length — AI picks seconds within your selected minute band'",
+                      "description: 'World size'", "description: 'AI model'",
+                      "description: 'Voice — reference-style thin, bright male narration by default'"):
             self.assertIn(short, workflow)
         self.assertNotIn("time_of_day:", workflow[:workflow.index("permissions:")])
         self.assertNotIn("scene_time_notes:", workflow[:workflow.index("permissions:")])

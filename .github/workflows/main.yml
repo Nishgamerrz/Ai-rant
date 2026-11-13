@@ -14,7 +14,7 @@ on:
         default: ''
         type: string
       duration_seconds:
-        description: 'Length — 2½-minute band includes the supplied clip’s ~2:45 runtime'
+        description: 'Short length — AI picks seconds within your selected minute band'
         required: true
         default: '150'
         type: choice
@@ -76,7 +76,7 @@ on:
         default: ''
         type: string
       duration_seconds:
-        description: 'Length in seconds (150 starts at 2:30 and includes the reference clip’s ~2:45 runtime)'
+        description: 'Short length in seconds; AI keeps the ending within the selected minute band'
         required: true
         default: '150'
         type: string
@@ -158,7 +158,7 @@ jobs:
             python tools/say.py plan "No cleaned prompt was produced; the run uses the text exactly as typed."
           fi
 
-      - name: Let the AI pick the exact ending
+      - name: Set short timing — AI picks the exact ending
         env:
           REQUESTED_LENGTH: ${{ inputs.duration_seconds }}
           STORY_TOPIC: ${{ steps.refine.outputs.story_topic || inputs.story_topic }}
@@ -191,10 +191,10 @@ jobs:
               handle.write(f"DURATION_SECONDS={seconds}\n")
               handle.write(f"DURATION_LABEL={label}\n")
               handle.write(f"DURATION_WINDOW={format_duration(low)}-{format_duration(high)}\n")
-          print(f"You picked the {format_duration(low)} length; the AI ends this one at "
-                f"{label} ({seconds} s), inside {format_duration(low)}-{format_duration(high)}.")
-          print("The seconds are always the AI's choice: no round endings, and the video never "
-                "runs into the next minute's range.")
+          print(f"You selected a {format_duration(low)} starting point; the AI picks an exact "
+                f"ending of {label} ({seconds} s), within {format_duration(low)}-{format_duration(high)}.")
+          print("The selected minute stays fixed while the seconds vary: a 1:00 selection can "
+                "end at 1:45, never at 2:01; no round-minute endings.")
           print(f"Every stage and every AI prompt now uses exactly {seconds} seconds.")
           PY
 

@@ -218,10 +218,11 @@ export default function RbxShortPage() {
                   <div className="text-[11px] text-zinc-600 mt-1">Comma separated</div>
                 </div>
                 <div>
-                  <label className="text-[11px] font-semibold tracking-widest text-zinc-500 uppercase">Duration</label>
+                  <label className="text-[11px] font-semibold tracking-widest text-zinc-500 uppercase">Short timing</label>
                   <select value={duration} onChange={(e) => setDuration(e.target.value)} className="mt-2 w-full rounded-xl bg-zinc-950 border border-zinc-800 focus:border-zinc-700 outline-none px-3 py-2.5 text-sm">
                     <option value="30">30s</option><option value="45">45s</option><option value="60">60s</option><option value="90">90s</option><option value="120">120s</option><option value="150">150s</option><option value="180">180s</option>
                   </select>
+                  <div className="text-[11px] leading-relaxed text-zinc-600 mt-1">AI chooses the exact ending within the selected minute band. For example, 60s can end at 1:45, never 2:01.</div>
                 </div>
                 <div>
                   <label className="text-[11px] font-semibold tracking-widest text-zinc-500 uppercase">Detail</label>
