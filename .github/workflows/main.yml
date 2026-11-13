@@ -16,7 +16,7 @@ on:
       duration_seconds:
         description: 'Short length — AI picks seconds within your selected minute band'
         required: true
-        default: '150'
+        default: '120'
         type: choice
         options:
           - '30'
@@ -78,7 +78,7 @@ on:
       duration_seconds:
         description: 'Short length in seconds; AI keeps the ending within the selected minute band'
         required: true
-        default: '150'
+        default: '120'
         type: string
       map_detail:
         description: 'World size: standard, dense or ultra'
@@ -1769,10 +1769,28 @@ jobs:
           retention-days: 14
 
       - name: Copy subagent traces for UI
+        if: always()
         run: |
-          cp -f story_subagent_tasks.json story_subagent_results.json subagent_tasks.json subagent_results.json dist/ 2>/dev/null || true
-          cp -f map_subagent_review.done dist/ 2>/dev/null || true
-          ls -lh dist/*.json 2>&1 | head -n 20
+          mkdir -p dist
+          for file in story_subagent_tasks.json story_subagent_results.json subagent_tasks.json subagent_results.json map_subagent_review.done; do
+            if [ -s "$file" ]; then cp -f "$file" dist/; fi
+          done
+          ls -lh dist/*.json 2>/dev/null | head -n 20 || true
+
+      - name: Upload structured AI activity for the dashboard
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: Roblox-Story-Short-AI-Activity
+          path: |
+            dist/ai_activity.jsonl
+            dist/story_subagent_tasks.json
+            dist/story_subagent_results.json
+            dist/subagent_tasks.json
+            dist/subagent_results.json
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Bundle the final deliverables
         env:

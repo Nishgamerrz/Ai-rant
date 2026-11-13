@@ -10,7 +10,7 @@ export function NewChatModal({ open, onClose, onStart }: { open: boolean; onClos
   const [referenceImage, setReferenceImage] = useState<File | null>(null);
   const [storyTopic, setStoryTopic] = useState("In a world where the last person to fall asleep each night gets one wish, two brothers keep each other awake on purpose");
   const [usernames, setUsernames] = useState("normal,noob");
-  const [duration, setDuration] = useState("150");
+  const [duration, setDuration] = useState("120");
   const [mapDetail, setMapDetail] = useState("dense");
   const [voice, setVoice] = useState("thin_male");
   const [worldTheme, setWorldTheme] = useState("");
@@ -214,7 +214,7 @@ export function NewChatModal({ open, onClose, onStart }: { open: boolean; onClos
                   <select value={duration} onChange={(e) => setDuration(e.target.value)} className="mt-2 w-full rounded-xl bg-zinc-950 border border-zinc-800 focus:border-zinc-700 outline-none px-3 py-2.5 text-sm">
                     <option value="30">30s</option><option value="45">45s</option><option value="60">60s</option><option value="90">90s</option><option value="120">120s</option><option value="150">150s</option><option value="180">180s</option>
                   </select>
-                  <div className="text-[11px] leading-relaxed text-zinc-600 mt-1">AI chooses the exact ending within the selected minute band. For example, 60s can end at 1:45, never 2:01.</div>
+                  <div className="text-[11px] leading-relaxed text-zinc-600 mt-1">Default: 2:00–2:59. AI chooses the exact ending within the selected minute band; 60s can end at 1:45, never 2:01.</div>
                 </div>
                 <div>
                   <label className="text-[11px] font-semibold tracking-widest text-zinc-500 uppercase">Detail</label>

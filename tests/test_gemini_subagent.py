@@ -311,6 +311,22 @@ class StubApiTests(unittest.TestCase):
             self.assertEqual((root / "dist" / "narration.txt").read_text(encoding="utf-8").strip(),
                              "EDITED TEXT")
             self.assertEqual(result["results"][1]["text"], "Paris")
+            self.assertEqual(result["results"][0]["provider"], "gemini")
+            self.assertEqual(result["results"][0]["provider_model"], "gemini-2.5-flash")
+            rows = [json.loads(line) for line in
+                    (root / "dist" / "ai_activity.jsonl").read_text(encoding="utf-8").splitlines()]
+            edit_task = next(row for row in rows
+                             if row["type"] == "subagent_task" and row["task_id"] == "e1")
+            edit_result = next(row for row in rows
+                               if row["type"] == "subagent_result" and row["task_id"] == "e1")
+            self.assertEqual(edit_task["instruction"], "Cut it down")
+            self.assertEqual(edit_task["activity_id"], edit_result["activity_id"])
+            self.assertEqual(edit_result["text"], "EDITED TEXT")
+            self.assertEqual(edit_result["provider_model"], "gemini-2.5-flash")
+            self.assertEqual(edit_result["file_edits"][0]["path"], "dist/narration.txt")
+            self.assertEqual(edit_result["file_edits"][0]["content"], "EDITED TEXT\n")
+            self.assertEqual(next(attempt for attempt in edit_result["provider_attempts"]
+                                  if attempt["status"] == "answered")["provider"], "gemini")
 
     def test_the_key_is_sent_as_a_header_not_in_the_url(self):
         run_tasks({"tasks": [{"kind": "answer", "instruction": "hi"}]},
@@ -382,13 +398,15 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertIn("USE IT AT LEAST ONCE OR TWICE", self.workflow)
         self.assertIn("put the task(s) in your first response", self.workflow)
 
-    def test_bazaar_replies_are_quiet_while_fallbacks_remain_visible(self):
+    def test_full_subagent_replies_and_provider_attempts_are_recorded(self):
         helper = (ROOT / "tools" / "gemini_subagent.py").read_text(encoding="utf-8")
-        self.assertIn("reply to {task['id']}", helper)
-        self.assertIn("full answer for {entry['id']}", helper)
-        self.assertIn('entry.get("provider") != "bazaarlink"', helper)
-        self.assertIn('entry.get("provider") == "bazaarlink"', helper)
+        self.assertIn("full response for {entry['id']}", helper)
+        self.assertIn("Full returned text", helper)
+        self.assertIn("provider_attempt", helper)
+        self.assertIn("provider_attempts", helper)
+        self.assertIn("file_edits", helper)
         self.assertIn("GITHUB_STEP_SUMMARY", helper)
+        self.assertIn("redact_secrets(entry['text'])", helper)
 
     def test_gemini_can_edit_the_narration_to_length(self):
         self.assertIn("narration_edit_tasks.json", self.workflow)
@@ -902,7 +920,7 @@ class BazaarLinkFallbackTests(unittest.TestCase):
         self.assertEqual(self.bazaar.calls[0]["auth"], "Bearer environment-secret")
         self.assertNotIn("environment-secret", self.bazaar.calls[0]["path"])
 
-    def test_cli_returns_bazaar_text_to_the_caller_but_omits_it_from_logs_and_summary(self):
+    def test_cli_shows_the_bazaar_answer_in_logs_and_summary_without_leaking_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             request = root / "request.json"
@@ -925,7 +943,9 @@ class BazaarLinkFallbackTests(unittest.TestCase):
             self.assertEqual(result["results"][0]["text"], "BAZAAR ANSWER")
             self.assertEqual(result["results"][0]["provider"], "bazaarlink")
             visible = proc.stdout + proc.stderr + summary.read_text(encoding="utf-8")
-            self.assertNotIn("BAZAAR ANSWER", visible)
+            self.assertIn("BAZAAR ANSWER", visible)
+            self.assertIn("Full returned text", visible)
+            self.assertIn("BazaarLink `auto:free`", visible)
             self.assertNotIn("bazaar-secret", visible)
 
 

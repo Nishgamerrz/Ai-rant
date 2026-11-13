@@ -183,6 +183,27 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(result["text"], GOOD)
         self.assertEqual(mocked.call_args.kwargs["bazaar_key"], "bazaar-secret")
 
+    def test_refine_tracks_fallback_and_the_provider_that_actually_answered(self):
+        def fake_call(prompt, **kwargs):
+            callback = kwargs["on_attempt"]
+            callback({"provider": "bazaarlink", "model": "auto:free",
+                      "status": "fallback", "reason": "HTTP 429 quota/rate limit",
+                      "fallback_to": "gemini", "seconds": 0.2})
+            callback({"provider": "gemini", "model": "gemini-2.5-flash",
+                      "status": "answered", "seconds": 0.4})
+            return GOOD, "gemini"
+
+        with patch("gemini_topic.call_any", side_effect=fake_call):
+            result = refine("a stdent finds a lost wallett", api_key="gemini-key",
+                            model="gemini-2.5-flash", bazaar_key="bazaar-key",
+                            groq_key="groq-key")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["provider"], "gemini")
+        self.assertEqual(result["provider_model"], "gemini-2.5-flash")
+        self.assertEqual([attempt["status"] for attempt in result["provider_attempts"]],
+                         ["fallback", "answered"])
+        self.assertEqual(result["provider_attempts"][0]["fallback_to"], "gemini")
+
     def test_a_meta_reply_falls_back_to_the_typed_text(self):
         self.handler.reply = "Sure, I fixed the spelling: " + GOOD
         result = refine("a stdent finds a lost wallett", api_key="k", model="m",
@@ -222,6 +243,14 @@ class CommandLineTests(unittest.TestCase):
             outputs = (Path(tmp) / "gh_output").read_text()
             self.assertIn("story_topic=a stdent finds a wallett", outputs)
             self.assertIn("world_theme=\n", outputs)
+            activity = [json.loads(line) for line in
+                        (Path(tmp) / "ai_activity.jsonl").read_text(encoding="utf-8").splitlines()]
+            story_event = next(event for event in activity
+                               if event.get("type") == "topic_cleanup"
+                               and event.get("kind") == "story")
+            self.assertEqual(story_event["status"], "skipped")
+            self.assertEqual(story_event["input"], "a stdent finds a wallett")
+            self.assertEqual(story_event["reason"], "no API key")
 
     def test_multiline_text_uses_the_heredoc_output_form(self):
         with tempfile.TemporaryDirectory() as tmp:

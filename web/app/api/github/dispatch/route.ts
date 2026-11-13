@@ -12,7 +12,7 @@ export async function POST(req: NextRequest) {
       const inputs: Record<string, string> = {
         story_topic: String(body.story_topic || body.prompt || "").slice(0, 600),
         character_usernames: String(body.character_usernames || ""),
-        duration_seconds: String(body.duration_seconds || "150"),
+        duration_seconds: String(body.duration_seconds || "120"),
         map_detail: String(body.map_detail || "dense"),
         model_quality: String(body.model_quality || body.model || "hard"),
         voice_style: String(body.voice_style || "thin_male"),
