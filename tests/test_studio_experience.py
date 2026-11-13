@@ -167,8 +167,10 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("for attempt in 1 2; do", workflow)
         self.assertIn('--min-props 8 --target-props "$TARGET_PROPS"', workflow)
         self.assertIn("every deliberate snap cut must change both camera and focus", workflow)
-        self.assertIn("camera_shots[].time_of_day overrides", workflow)
-        self.assertIn("scene_time_notes", workflow)
+        self.assertIn("camera_shots[].time_of_day` overrides", workflow)
+        self.assertIn("AUTOMATIC LIGHTING PLAN (required)", workflow)
+        self.assertNotIn("inputs.time_of_day", workflow)
+        self.assertNotIn("scene_time_notes", workflow)
         self.assertIn("only when the user's story/topic explicitly requests that effect", workflow)
         self.assertIn("num_predict:$tokens}}' > map_request.json", workflow)
         self.assertIn('--timeout "${AI_TIMEOUT:-900}"', workflow)
@@ -178,25 +180,29 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("Show the public AI build plan and tools", workflow)
         self.assertIn("not private chain-of-thought", workflow)
 
-    def test_time_controls_reach_both_forms_dispatch_and_map_builder(self):
+    def test_time_of_day_is_auto_planned_without_manual_workflow_or_web_controls(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
         route = (ROOT / "web/app/api/github/dispatch/route.ts").read_text(encoding="utf-8")
         forms = [
             (ROOT / "web/app/rbxshort/page.tsx").read_text(encoding="utf-8"),
             (ROOT / "web/components/NewChatModal.tsx").read_text(encoding="utf-8"),
         ]
+        self.assertNotIn("time_of_day:", workflow[:workflow.index("permissions:")])
+        self.assertNotIn("scene_time_notes", workflow)
+        self.assertIn("AUTOMATIC LIGHTING PLAN (required)", workflow)
+        self.assertIn('"--time-of-day", choices=TIME_OF_DAY_CHOICES, default="auto"',
+                      (ROOT / "tools/build_story_map.py").read_text(encoding="utf-8"))
+        self.assertIn("--time-of-day auto", workflow)
+        self.assertNotIn("time_of_day", route)
+        self.assertNotIn("scene_time_notes", route)
         for form in forms:
-            self.assertIn("time_of_day: timeOfDay", form)
-            self.assertIn("scene_time_notes: sceneTimeNotes", form)
-            for hour in ("auto", "dawn", "day", "sunset", "night"):
-                self.assertIn(f'value="{hour}"', form)
-        self.assertIn("time_of_day: timeOfDay", route)
-        self.assertIn('scene_time_notes: String(body.scene_time_notes || "").trim().slice(0, 500)', route)
-        self.assertIn('["auto", "dawn", "day", "sunset", "night"]', route)
-        self.assertIn('--time-of-day "${TIME_OF_DAY:-night}"', workflow)
-        self.assertIn('--scene-time-notes "${SCENE_TIME_NOTES:-}"', workflow)
-        self.assertIn("If these notes are empty, keep the selected hour for every shot", workflow)
-        self.assertIn("time_of_day_mode", workflow)
+            self.assertNotIn("timeOfDay", form)
+            self.assertNotIn("sceneTimeNotes", form)
+            self.assertNotIn("Time of day", form)
+            self.assertIn("Lighting is planned automatically", form)
+        schema = (ROOT / "tools/plan_schema.py").read_text(encoding="utf-8")
+        self.assertIn('"time_of_day"', schema)
+        self.assertIn('"time_of_day", "props"', schema)
 
     def test_eleven_billion_preset_sits_under_hard_and_is_fully_wired(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
@@ -296,9 +302,10 @@ class StudioExperienceTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
         self.assertIn("Usernames, COMMA separated", workflow)
         for short in ('description: \'Story topic — one line, "In a world where ..." works best', "description: 'Length — 2½-minute band includes", "description: 'World size'",
-                      "description: 'AI model'", "description: 'Voice — reference-style thin, bright male narration by default'",
-                      "description: 'Lighting hour, matching the supplied reference by default'", "description: 'Optional per-scene time changes"):
+                      "description: 'AI model'", "description: 'Voice — reference-style thin, bright male narration by default'"):
             self.assertIn(short, workflow)
+        self.assertNotIn("time_of_day:", workflow[:workflow.index("permissions:")])
+        self.assertNotIn("scene_time_notes:", workflow[:workflow.index("permissions:")])
         self.assertNotIn("Real-life story topic for a fully furnished Roblox-themed short video", workflow)
 
     def test_workflow_plans_face_animation_and_face_cameras(self):

@@ -15,13 +15,14 @@ do something; the runner executes it and feeds the result back for the next
 round. This avoids needing a separate tool-calling API — the small local models
 handle plain JSON well, and the loop is transparent in the log.
 
-Tools (the same twenty are available to the Gemini/Groq sub-agent when
+Tools (the same twenty-five are available to the Gemini/Groq sub-agent when
 `use_tools: true` is authored in its delegation call):
   - web and Roblox/model asset-reference search
   - safe workspace file creation, reading, listing, search, and exact edits
   - bounded shell commands with provider credentials stripped
   - HTTPS image download, visual image inspection, generation, and reference edits
   - image resize/crop/convert/compare/contact sheets, video inspection, ZIP packaging
+  - Roblox-short script pacing, story-selected lighting, map/caption/MP4 audits
   - Gemini/Groq code, writing, verification, and naming delegation
 
 The agent stays in its original workflow run and polls GitHub Actions variables
@@ -262,8 +263,8 @@ def _shared_tool(name: str):
     return lambda call: execute_tool(name, call, WORKSPACE)
 
 
-# The same twenty tools are available to the parent and, when requested, to the
-# Gemini/Groq sub-agent. The model must author a tool call in its response; this
+# The same twenty-five tools are available to the parent and, when requested, to
+# the Gemini/Groq sub-agent. The model must author a tool call in its response; this
 # map contains executors only and never injects a call on the model's behalf.
 TOOLS = {name: _shared_tool(name) for name in TOOL_NAMES}
 TOOLS["create_image"] = lambda call: execute_tool(

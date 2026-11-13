@@ -152,6 +152,8 @@ def build_schema(usernames=(), *, require_subagent_tasks: bool = True) -> dict:
         "properties": {
             "name": {"type": "string"},
             "theme": {"type": "string"},
+            "time_of_day": {"type": "string", "enum": list(SCENE_TIME_CHOICES),
+                             "description": "Required global lighting preset chosen by the AI to fit the story and theme."},
             "ground_material": {"type": "string", "enum": MATERIAL_LIST},
             "ground_color": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 255},
                              "minItems": 3, "maxItems": 3},
@@ -181,7 +183,7 @@ def build_schema(usernames=(), *, require_subagent_tasks: bool = True) -> dict:
                 "required": ["accepted"],
             },
         },
-        "required": ["name", "theme", "props", "character_placements",
+        "required": ["name", "theme", "time_of_day", "props", "character_placements",
                      "camera_shots", "face_expressions", "search_queries",
                      "subagent_tasks"],
     }

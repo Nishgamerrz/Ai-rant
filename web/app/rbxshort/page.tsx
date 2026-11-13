@@ -30,8 +30,6 @@ export default function RbxShortPage() {
   const [model, setModel] = useState("hard");
   const [voice, setVoice] = useState("thin_male");
   const [worldTheme, setWorldTheme] = useState("");
-  const [timeOfDay, setTimeOfDay] = useState("night");
-  const [sceneTimeNotes, setSceneTimeNotes] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -132,8 +130,6 @@ export default function RbxShortPage() {
           model_quality: model,
           voice_style: voice,
           world_theme: worldTheme,
-          time_of_day: timeOfDay,
-          scene_time_notes: sceneTimeNotes,
         }),
       });
       const j = await res.json();
@@ -245,21 +241,7 @@ export default function RbxShortPage() {
                 <label className="text-[11px] font-semibold tracking-widest text-zinc-500 uppercase">World theme <span className="normal-case tracking-normal font-normal text-zinc-600">· optional</span></label>
                 <input value={worldTheme} onChange={(e) => setWorldTheme(e.target.value)} placeholder="Auto from story" className="mt-2 w-full rounded-xl bg-zinc-950 border border-zinc-800 focus:border-zinc-700 outline-none px-3 py-2.5 text-sm" />
               </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-[11px] font-semibold tracking-widest text-zinc-500 uppercase">Time of day</label>
-                  <select value={timeOfDay} onChange={(e) => setTimeOfDay(e.target.value)} className="mt-2 w-full rounded-xl bg-zinc-950 border border-zinc-800 focus:border-zinc-700 outline-none px-3 py-2.5 text-sm">
-                    <option value="auto">Auto from story</option><option value="dawn">Dawn</option><option value="day">Day</option><option value="sunset">Sunset</option><option value="night">Night</option>
-                  </select>
-                  <div className="text-[11px] text-zinc-600 mt-1">Default hour for the full video</div>
-                </div>
-                <div>
-                  <label className="text-[11px] font-semibold tracking-widest text-zinc-500 uppercase">Scene time changes <span className="normal-case tracking-normal font-normal text-zinc-600">· optional</span></label>
-                  <textarea value={sceneTimeNotes} onChange={(e) => setSceneTimeNotes(e.target.value)} rows={2} maxLength={500} placeholder="e.g. opening at night, ending at sunset" className="mt-2 w-full rounded-xl bg-zinc-950 border border-zinc-800 focus:border-zinc-700 outline-none p-3 text-sm leading-relaxed resize-none" />
-                  <div className="text-[11px] text-zinc-600 mt-1">AI applies these hours to camera scenes; last choice holds.</div>
-                </div>
-              </div>
+              <p className="text-[11px] leading-relaxed text-zinc-600">Lighting is planned automatically from the story and reference look, with changes on meaningful scene beats.</p>
 
               <ModelSelector value={model} onChange={setModel} />
 

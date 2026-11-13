@@ -2,17 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { AGENT_WORKFLOW, SHORT_WORKFLOW, dispatchWorkflow } from "@/lib/github";
 import { makeChatToken, makeDispatchId } from "@/lib/agentChat";
 
-// POST { kind: "agent"|"rbx", model, prompt, story_topic, character_usernames, duration_seconds, map_detail, voice_style, world_theme, time_of_day, scene_time_notes }
+// POST { kind: "agent"|"rbx", model, prompt, story_topic, character_usernames, duration_seconds, map_detail, voice_style, world_theme }
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const kind = (body.kind || "agent") as string;
     if (kind === "rbx" || kind === "short" || body.story_topic) {
       // RBX short — mirrors main.yml inputs exactly
-      const timeOfDay = String(body.time_of_day || "night").trim().toLowerCase();
-      if (!["auto", "dawn", "day", "sunset", "night"].includes(timeOfDay)) {
-        return NextResponse.json({ error: "time_of_day must be auto, dawn, day, sunset, or night" }, { status: 400 });
-      }
       const inputs: Record<string, string> = {
         story_topic: String(body.story_topic || body.prompt || "").slice(0, 600),
         character_usernames: String(body.character_usernames || ""),
@@ -21,8 +17,6 @@ export async function POST(req: NextRequest) {
         model_quality: String(body.model_quality || body.model || "hard"),
         voice_style: String(body.voice_style || "thin_male"),
         world_theme: String(body.world_theme || ""),
-        time_of_day: timeOfDay,
-        scene_time_notes: String(body.scene_time_notes || "").trim().slice(0, 500),
       };
       if (!inputs.story_topic) return NextResponse.json({ error: "story_topic required" }, { status: 400 });
       await dispatchWorkflow(SHORT_WORKFLOW, inputs);

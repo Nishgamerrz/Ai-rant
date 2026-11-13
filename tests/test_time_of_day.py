@@ -33,8 +33,11 @@ class TimeOfDayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "choose from auto, dawn, day, sunset, night"):
             resolve_time_of_day("midnight-blue")
 
-    def test_map_schema_exposes_per_shot_hour_overrides(self):
-        shot = build_schema(["Lead"])['properties']['camera_shots']['items']
+    def test_map_schema_requires_an_ai_global_hour_and_exposes_optional_shot_overrides(self):
+        schema = build_schema(["Lead"])
+        shot = schema['properties']['camera_shots']['items']
+        self.assertEqual(schema['properties']['time_of_day']['enum'], list(SCENE_TIME_CHOICES))
+        self.assertIn('time_of_day', schema['required'])
         self.assertEqual(shot['properties']['time_of_day']['enum'], list(SCENE_TIME_CHOICES))
         self.assertNotIn('time_of_day', shot['required'], 'most shots inherit the previous/global hour')
 
@@ -61,6 +64,23 @@ class TimeOfDayTests(unittest.TestCase):
         self.assertEqual(plan["time_of_day_mode"], "global")
         self.assertNotIn("scene_time_notes", plan)
         self.assertTrue(all("time_of_day" not in shot for shot in plan["camera_shots"]))
+
+    def test_ai_global_and_scene_hours_survive_without_manual_time_inputs(self):
+        shots = [
+            {"time": 0, "time_of_day": "night"},
+            {"time": 15},
+            {"time": 30, "time_of_day": "sunset"},
+            {"time": 45},
+        ]
+        plan = {"time_of_day": "night", "camera_shots": shots}
+        resolved, fallback_applied = configure_plan_time_of_day(
+            plan, "auto", "A bright midday theme with an overnight mystery")
+        self.assertEqual(resolved, "night", "AI-authored global hour takes precedence over word heuristics")
+        self.assertFalse(fallback_applied)
+        self.assertEqual(plan["time_of_day_mode"], "per_scene")
+        self.assertEqual([shot.get("time_of_day") for shot in shots],
+                         ["night", None, "sunset", None])
+        self.assertNotIn("scene_time_notes", plan)
 
     def test_auto_can_infer_the_initial_hour_from_scene_notes(self):
         plan = {"camera_shots": [{"time": index * 5} for index in range(6)]}
