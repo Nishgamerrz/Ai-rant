@@ -15,7 +15,7 @@ from durations import check_duration, duration_arg  # noqa: E402
 from effects_catalog import resolve as resolve_effect  # noqa: E402
 from time_of_day import (  # noqa: E402
     CLOCK_TIMES, SCENE_TIME_CHOICES, TIME_OF_DAY_CHOICES, apply_scene_time_sequence,
-    resolve_time_of_day,
+    canonical_time_of_day, resolve_time_of_day, scene_time_sequence,
 )
 
 MATERIALS = {"Plastic", "SmoothPlastic", "Concrete", "Grass", "Slate", "Wood", "Metal", "Neon", "Glass", "Brick", "Asphalt"}
@@ -246,39 +246,51 @@ def target_camera_count(duration):
 
 
 def configure_plan_time_of_day(plan, requested="auto", context="", scene_time_notes=""):
-    """Apply global/per-scene lighting after the storyboard has been normalized.
+    """Keep AI-authored global and per-scene hours, with a safe story fallback.
 
-    Per-shot AI choices are honored only when the user supplied scene-time notes.
-    Otherwise a selected global hour is authoritative and all shot overrides are
-    removed. When the user chose ``auto``, their scene notes are also a useful
-    source for the initial hour if the story itself did not name one.
+    ``auto`` prefers the AI's required global choice, then infers from the story
+    and defaults to daylight. Valid shot overrides are always retained for the
+    automatic workflow. An explicit CLI-only hour still acts as a global lock
+    unless scene-time notes explicitly request changes.
     """
     notes = str(scene_time_notes or "").strip()[:500]
-    resolved = resolve_time_of_day(requested, " ".join((str(context or ""), notes)))
+    requested_name = str(requested or "auto").strip().casefold()
+    automatic = requested_name in {"", "auto"}
+    ai_hour = canonical_time_of_day(plan.get("time_of_day"))
+    resolved = (ai_hour if automatic and ai_hour else
+                resolve_time_of_day(requested, " ".join((str(context or ""), notes))))
     plan["time_of_day"] = resolved
     shots = plan.get("camera_shots")
     if not isinstance(shots, list):
         shots = []
         plan["camera_shots"] = shots
 
-    fallback_applied = False
-    if notes:
-        has_ai_hours = any(
+    def has_scene_hours():
+        return any(
             isinstance(shot, dict)
-            and isinstance(shot.get("time_of_day"), str)
-            and shot["time_of_day"].casefold() in SCENE_TIME_CHOICES
+            and canonical_time_of_day(shot.get("time_of_day")) is not None
             for shot in shots
         )
-        if not has_ai_hours:
-            fallback_applied = apply_scene_time_sequence(shots, notes)
-        plan["time_of_day_mode"] = "per_scene" if has_ai_hours or fallback_applied else "global"
-        plan["scene_time_notes"] = notes
-    else:
+
+    fallback_applied = False
+    if not automatic and not notes:
         for shot in shots:
             if isinstance(shot, dict):
                 shot.pop("time_of_day", None)
-        plan["time_of_day_mode"] = "global"
+    elif not has_scene_hours():
+        # If the AI omitted shot overrides, genuine time changes mentioned in
+        # the story still provide an ordered deterministic fallback. Notes remain
+        # supported for direct CLI callers, but are no longer a workflow input.
+        fallback_text = notes or str(context or "")
+        sequence = scene_time_sequence(fallback_text)
+        if notes or len(set(sequence)) > 1:
+            fallback_applied = apply_scene_time_sequence(shots, fallback_text)
+
+    if notes:
+        plan["scene_time_notes"] = notes
+    else:
         plan.pop("scene_time_notes", None)
+    plan["time_of_day_mode"] = "per_scene" if has_scene_hours() or fallback_applied else "global"
     return resolved, fallback_applied
 
 
@@ -1516,7 +1528,7 @@ def validate(plan, duration=90, usernames=(), min_props=16, visual_request=""):
             effects += 1
             if effects > MAX_EFFECTS:
                 prop.pop("effect")
-    return {
+    normalized_plan = {
         "name": name, "theme": theme,
         "ground_color": color(plan.get("ground_color"), [88, 166, 91]),
         "ground_material": normalize_ground_material(plan.get("ground_material", plan.get("groundMaterial")), "Grass"),
@@ -1526,6 +1538,10 @@ def validate(plan, duration=90, usernames=(), min_props=16, visual_request=""):
         "face_expressions": normalize_face_expressions(plan.get("face_expressions"), duration, usernames),
         "character_placements": normalize_character_placements(plan.get("character_placements"), usernames, visual_request),
     }
+    global_hour = canonical_time_of_day(plan.get("time_of_day"))
+    if global_hour:
+        normalized_plan["time_of_day"] = global_hour
+    return normalized_plan
 
 
 # ---------------------------------------------------------------------------

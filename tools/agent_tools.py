@@ -29,13 +29,15 @@ MAX_IMAGE_EDGE = 1536
 MAX_ZIP_BYTES = 100 * 1024 * 1024
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
-# Twenty callable tools, shared by the local agent and the sub-agent.
+# Twenty-five callable tools, shared by the local agent and the sub-agent.
 TOOL_NAMES = (
     "search_web", "search_assets", "find_model_reference",
     "create_file", "read_file", "list_files", "search_files", "edit_file",
     "run_cmd", "fetch_image", "inspect_image", "resize_image", "crop_image",
     "convert_image", "compare_images", "make_contact_sheet", "generate_image",
-    "edit_image", "inspect_video", "package_files",
+    "edit_image", "inspect_video", "package_files", "analyze_short_script",
+    "plan_short_lighting", "audit_roblox_map", "audit_short_captions",
+    "inspect_roblox_short",
 )
 
 TOOL_GUIDE = """\
@@ -58,6 +60,19 @@ AVAILABLE TOOLS (you must write every requested call yourself in a JSON
   Gemini image model; edit_image passes the original pixels as the visual reference.
 - inspect_video(path): report video/audio streams, dimensions, duration, and codecs.
 - package_files(path, output): create a ZIP from the selected workspace folder.
+Roblox-short production tools (use these for the story/map/captions/render):
+- analyze_short_script(text=... or path=..., duration=150): estimate read time and target
+  fill, identify hook/turn/payoff lines, and flag long sentences; path wins if both are given.
+- plan_short_lighting(text=... or path=..., duration=150): suggest a global hour plus
+  ordered dawn/day/sunset/night story cues and approximate overrides. Treat times as hints;
+  align actual camera-shot overrides to story beats.
+- audit_roblox_map(path=..., duration=150, cast=[]): run the production normalizer and
+  report world Parts, camera rhythm, face shots, invalid camera/hour fields, and overrides.
+- audit_short_captions(text=... or path=..., duration=0, max_words=1): check SRT order,
+  overlaps, video bounds, gaps, and one-word reference-style caption readability.
+- inspect_roblox_short(path=..., report='', frames_dir='', samples=8, timeout=180): run
+  the shipped MP4 visual/technical audit across decoded frames (lighting, colour, black
+  slabs, aspect, codecs, duration). All supplied and returned artifact paths are relative.
 Paths are relative to your workspace; absolute paths and `..` are refused. Images are
 bounded and decoded before use. A reference URL must be public HTTPS; no localhost,
 private-network, or credential-bearing URL is fetched. Prefer `inspect_image` before
@@ -587,6 +602,91 @@ def package_files(root: Path, path: str = ".", output: str = "deliverable.zip", 
             "files": files, "uncompressed_bytes": total, "bytes": target.stat().st_size}
 
 
+def _short_text(root: Path, path: str = "", text: str = "") -> tuple[str, dict | None]:
+    if path:
+        source = safe_path(root, path)
+        if not source.is_file():
+            return "", {"ok": False, "error": f"file not found: {path}"}
+        if source.stat().st_size > MAX_TEXT_BYTES * 8:
+            return "", {"ok": False, "error": "input file is too large for a short-production tool"}
+        return _bounded_text(source, MAX_TEXT_BYTES * 8), None
+    value = str(text or "")
+    if len(value.encode("utf-8")) > MAX_TEXT_BYTES * 4:
+        return "", {"ok": False, "error": "text input exceeds the 96 KB tool limit"}
+    return value, None
+
+
+def analyze_short_script(root: Path, path: str = "", text: str = "",
+                         duration: float = 150, **_: Any) -> dict:
+    source, error = _short_text(root, path, text)
+    if error:
+        return error
+    from rbx_short_tools import analyze_short_script as analyze
+    return analyze(source, duration)
+
+
+def plan_short_lighting(root: Path, path: str = "", text: str = "",
+                         duration: float = 150, **_: Any) -> dict:
+    source, error = _short_text(root, path, text)
+    if error:
+        return error
+    from rbx_short_tools import plan_short_lighting as plan
+    return plan(source, duration)
+
+
+def audit_roblox_map(root: Path, path: str, duration: float = 150,
+                     cast: list[str] | str = (), **_: Any) -> dict:
+    source = safe_path(root, path)
+    if not source.is_file():
+        return {"ok": False, "error": f"map file not found: {path}"}
+    if source.stat().st_size > 32 * 1024 * 1024:
+        return {"ok": False, "error": "map file exceeds the 32 MiB audit limit"}
+    plan = json.loads(source.read_text(encoding="utf-8"))
+    if isinstance(cast, str):
+        cast_names = [name.strip() for name in cast.replace(";", ",").split(",") if name.strip()]
+    else:
+        cast_names = [str(name).strip() for name in cast or [] if str(name).strip()]
+    from rbx_short_tools import audit_roblox_map as audit
+    return audit(plan, duration, cast_names)
+
+
+def audit_short_captions(root: Path, path: str = "", text: str = "",
+                         duration: float = 0, max_words: int = 1, **_: Any) -> dict:
+    source, error = _short_text(root, path, text)
+    if error:
+        return error
+    from rbx_short_tools import audit_short_captions as audit
+    return audit(source, duration, max_words)
+
+
+def inspect_roblox_short(root: Path, path: str, report: str = "",
+                         frames_dir: str = "", samples: int = 8,
+                         timeout: int = 180, **_: Any) -> dict:
+    video = safe_path(root, path)
+    if not video.is_file():
+        return {"ok": False, "error": f"video not found: {path}"}
+    root_path = Path(root).resolve()
+    report_path = safe_path(root_path, report) if report else None
+    if report_path and report_path.resolve() == video.resolve():
+        return {"ok": False, "error": "inspection report must not overwrite the source video"}
+    if report_path and report_path.exists() and report_path.is_dir():
+        return {"ok": False, "error": "inspection report path points to a directory"}
+    frames_path = safe_path(root_path, frames_dir, allow_root=True) if frames_dir else None
+    if frames_path and frames_path.resolve() == video.resolve():
+        return {"ok": False, "error": "frames directory must not be the source video"}
+    if frames_path and frames_path.exists() and not frames_path.is_dir():
+        return {"ok": False, "error": "frames directory path points to a file"}
+    if report_path and frames_path and report_path.resolve() == frames_path.resolve():
+        return {"ok": False, "error": "inspection report path must not be the frames directory"}
+    from rbx_short_tools import inspect_roblox_short as inspect
+    result = inspect(video, report_path, frames_path, samples, timeout)
+    if report_path:
+        result["report"] = report_path.relative_to(root_path).as_posix()
+    if frames_path:
+        result["frames_dir"] = frames_path.relative_to(root_path).as_posix()
+    return result
+
+
 _DISPATCH = {
     "search_web": search_web,
     "search_assets": search_assets,
@@ -608,6 +708,11 @@ _DISPATCH = {
     "edit_image": edit_image,
     "inspect_video": inspect_video,
     "package_files": package_files,
+    "analyze_short_script": analyze_short_script,
+    "plan_short_lighting": plan_short_lighting,
+    "audit_roblox_map": audit_roblox_map,
+    "audit_short_captions": audit_short_captions,
+    "inspect_roblox_short": inspect_roblox_short,
 }
 
 

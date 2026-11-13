@@ -55,22 +55,6 @@ on:
           - male
           - female
           - thin_male
-      time_of_day:
-        description: 'Lighting hour, matching the supplied reference by default'
-        required: true
-        default: night
-        type: choice
-        options:
-          - auto
-          - dawn
-          - day
-          - sunset
-          - night
-      scene_time_notes:
-        description: 'Optional per-scene time changes (e.g. opening night, ending sunset)'
-        required: false
-        default: ''
-        type: string
       world_theme:
         description: 'Theme (optional)'
         required: false
@@ -110,16 +94,6 @@ on:
         description: 'Voice: male, female or thin_male'
         required: true
         default: 'thin_male'
-        type: string
-      time_of_day:
-        description: 'Lighting hour: auto, dawn, day, sunset or night'
-        required: true
-        default: 'night'
-        type: string
-      scene_time_notes:
-        description: 'Optional per-scene time changes'
-        required: false
-        default: ''
         type: string
       world_theme:
         description: 'Theme (optional)'
@@ -243,8 +217,6 @@ jobs:
           MODEL_QUALITY: ${{ inputs.model_quality }}
           CAST_NAMES: ${{ env.CAST_NAMES }}
           VOICE_STYLE: ${{ inputs.voice_style || 'thin_male' }}
-          TIME_OF_DAY: ${{ inputs.time_of_day || 'night' }}
-          SCENE_TIME_NOTES: ${{ inputs.scene_time_notes || '' }}
         run: |
           python - <<'PY'
           import os
@@ -264,8 +236,7 @@ jobs:
                   f'- **Story prompt:** {topic}\n'
                   f'- **Theme:** {theme}\n'
                   f'- **Length / preset / voice:** {clean(os.environ.get("DURATION_LABEL", "?"))} ({clean(os.environ["DURATION_SECONDS"])} s, window {clean(os.environ.get("DURATION_WINDOW", ""))}) / {clean(os.environ["MODEL_QUALITY"])} / {clean(os.environ["VOICE_STYLE"])}\n'
-                  f'- **Time of day:** {clean(os.environ.get("TIME_OF_DAY", "night"))}\n'
-                  f'- **Scene time changes:** {clean(os.environ.get("SCENE_TIME_NOTES", "")) or "none (one global hour)"}\n'
+                  '- **Lighting:** the AI chooses a story-fitting global hour and any scene-hour changes from the narration and theme.\n'
                   f'- **Avatar cast:** {clean(os.environ.get("CAST_NAMES", ""))}\n'
                   '- **Tools:** selected Ollama model, Roblox public avatar APIs, optional web research, edge-tts, Three.js + Rapier, Chromium, FFmpeg, Python validation, ReportLab, ZIP.\n'
                   '- **Prompt cleanup:** the typed story prompt and theme are spell-checked and lightly enriched by the Gemini sub-agent before planning; the correction is never mentioned in the text.\n'
@@ -919,8 +890,6 @@ jobs:
           AI_MODEL: ${{ env.AI_MODEL }}
           OLLAMA_THINKING: ${{ env.OLLAMA_THINKING }}
           WORLD_THEME: ${{ steps.refine.outputs.world_theme || inputs.world_theme }}
-          TIME_OF_DAY: ${{ inputs.time_of_day || 'night' }}
-          SCENE_TIME_NOTES: ${{ inputs.scene_time_notes || '' }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           # Fallback: when Gemini is out of quota, unreachable or broken, the
@@ -978,7 +947,7 @@ jobs:
           User's visual-theme cue: "${WORLD_THEME:-AUTO FROM STORY}"
           If the cue is AUTO FROM STORY, invent a distinctive, coherent theme from the story/topic. Otherwise, treat the user's cue as a required design constraint: preserve its meaning in the world theme, architecture, landmarks, palette, materials, props, lighting, and atmosphere. For example, a daylight cue means a clearly bright, naturally sunlit daytime world; do not turn it into a night/neon scene. Never replace a supplied theme with a different story-derived theme or generic city unless it genuinely fits the user's cue.
           REFERENCE VIDEO LOOK (style only; invent a new story/world and never copy characters): portrait 9:16 Roblox-like cinematic storytelling; textured storybook buildings and streets, short angle changes, prop cutaways, expressive characters, and cozy practical lights. The supplied clip contrasts cool blue night outdoors with warm lantern/window pools, snowy ground, and warm interiors; echo that cool/warm contrast and use snow only when it fits the story/theme.
-          Selected default time of day: "${TIME_OF_DAY:-night}". If this is auto, infer one coherent hour from the story; otherwise this is the user's chosen base hour. Dawn uses soft rose/blue light; day uses clear bright sun; sunset uses amber low sun with cooler fill; night uses deep blue moonlight plus warm lamps/windows. Keep colours and avatar faces readable, never crush the world to black. Per-scene time-change notes (optional): "${SCENE_TIME_NOTES:-none; keep one global hour}". If these notes are empty, keep the selected hour for every shot. If present, obey their order and apply optional camera_shots[].time_of_day overrides using exactly dawn, day, sunset, or night; each override holds until the next one, and unmarked shots inherit the previous/global hour. Let lighting changes align to story beats; blend smooth transitions and keep snap-cut transitions crisp.
+          AUTOMATIC LIGHTING PLAN (required): no user lighting controls are supplied. YOU choose the global `time_of_day` from dawn, day, sunset, or night to fit the narration, theme, and emotional arc. Use story-time cues when present; otherwise pick one coherent, readable look suited to the setting and mood (night is appropriate for sleep, moonlight, snow-at-night, or after-dark stories; warm practical lamps must keep faces readable). You also author optional `camera_shots[].time_of_day` overrides at meaningful story transitions only; each override holds until the next, unmarked shots inherit the previous/global hour. Use 0–3 overrides unless the plot clearly needs more. Keep ordinary scenes at one consistent hour, avoid decorative time changes, and align smooth blends or crisp snap cuts to the camera transition. Return the required top-level global hour and any per-shot overrides in your JSON.
           Story usernames in order (first is lead): ${CAST_NAMES:-none supplied}. The Studio experience loads public R15 avatars at runtime without visible username labels or overlays. Add an avatar-body visual effect (such as a number, scar, tattoo, badge, or symbol) only when the user's story/topic explicitly requests that effect; otherwise add none.
           The ONLY usernames that exist are: ${CAST_NAMES:-none supplied}. Use those exact strings in character_placements, camera_shots[].focus_username and face_expressions[].username. "LeadName", "FriendName" and "NoobName" below are placeholders for the shape of the JSON only -- never output a placeholder, and never invent a username.
           Put the lead at the center of the action. Place every additional username in a distinct nearby, camera-visible position, and plan at least one shot that includes each named character.
@@ -1341,8 +1310,8 @@ jobs:
 
             validation_status=0
             python tools/build_story_map.py map_response.json dist/Roblox_Story_Map.json "$DURATION_SECONDS" \
-              --json-only --strict --min-props 8 --target-props "$TARGET_PROPS" --usernames dist/characters.json --story-topic "$STORY_TOPIC" --scene-mode "${WORLD_MODE:-auto}" \
-              --time-of-day "${TIME_OF_DAY:-night}" --scene-time-notes "${SCENE_TIME_NOTES:-}" \
+              --json-only --strict --min-props 8 --target-props "$TARGET_PROPS" --usernames dist/characters.json --story "$NARRATION" --story-topic "$STORY_TOPIC" --scene-mode "${WORLD_MODE:-auto}" \
+              --time-of-day auto \
               > map_validation.log 2>&1 || validation_status=$?
             if [ "$validation_status" -eq 0 ]; then
               cat map_validation.log
@@ -1367,7 +1336,7 @@ jobs:
             VALIDATION_ERROR=$(python -c 'from pathlib import Path; print(Path("map_validation.log").read_text().replace("\n", " ")[:500])')
             python tools/say.py warning "Blueprint rejected (${CURRENT_PROPS} anchors; ${VALIDATION_ERROR}); correcting and retrying."
             cat >> map_prompt.txt <<RETRY
-          CORRECTION: re-read the whole blueprint, then regenerate it and fix this validation error: ${VALIDATION_ERROR}. Return 16–28 unique, valid anchors including 3 building cores, 3 story landmarks, theme-specific scenic props, complete camera/cast data, a face_expressions timeline of at least 6 AI-timed beats, and at least 3 shots with "framing":"face". Do not enumerate hundreds of small parts; the build step expands anchors into ${TARGET_PROPS}+ furnished Parts. Preserve the user's exact theme and story. Return only JSON.
+          CORRECTION: re-read the whole blueprint, then regenerate it and fix this validation error: ${VALIDATION_ERROR}. Return 16–28 unique, valid anchors including 3 building cores, 3 story landmarks, theme-specific scenic props, complete camera/cast data, a required AI-chosen global time_of_day, meaningful optional camera_shots[].time_of_day overrides at story beats, a face_expressions timeline of at least 6 AI-timed beats, and at least 3 shots with "framing":"face". Do not enumerate hundreds of small parts; the build step expands anchors into ${TARGET_PROPS}+ furnished Parts. Preserve the user's exact theme and story. Return only JSON.
           RETRY
             jq -n --argjson ctx "$AI_NUM_CTX" --arg model "$AI_MODEL" --argjson think "$OLLAMA_THINKING" --rawfile prompt map_prompt.txt --rawfile system system_prompt.txt --argjson tokens "$MAP_TOKENS" --slurpfile schema map_followup_schema.json \
               '{model:$model, messages:[{role:"system",content:$system},{role:"user",content:$prompt}], format:$schema[0], think:$think, stream:false, keep_alive:"60m", options:{temperature:2.0, top_p:0.99, num_ctx:$ctx, num_predict:$tokens}}' > map_request.json
@@ -1382,7 +1351,7 @@ jobs:
             python tools/build_story_map.py map_response.json dist/Roblox_Story_Map.json "$DURATION_SECONDS" \
               --json-only --fallback --theme "$WORLD_THEME" --story "$FALLBACK_STORY" \
               --target-props "$TARGET_PROPS" --usernames dist/characters.json --story-topic "$STORY_TOPIC" --scene-mode "${WORLD_MODE:-auto}" \
-              --time-of-day "${TIME_OF_DAY:-night}" --scene-time-notes "${SCENE_TIME_NOTES:-}"
+              --time-of-day auto
             echo "Theme/story procedural fallback" > dist/map_source.txt
           fi
           python - <<'PY'
