@@ -176,7 +176,6 @@ class LiveStreamingTests(unittest.TestCase):
                 [sys.executable, str(ROOT / "tools" / "ollama_stream.py"),
                  "--request", str(request_path), "--output", str(output_path),
                  "--label", "world plan", "--timeout", "30",
-                 "--fallback-model", "qwen3:4b",
                  "--url", f"http://127.0.0.1:{server.server_port}/api/chat"],
                 cwd=tmp, capture_output=True, text=True,
                 env={**os.environ, "AI_COLOR": "1", "PYTHONUNBUFFERED": "1",
@@ -187,15 +186,17 @@ class LiveStreamingTests(unittest.TestCase):
             stderr = result.stderr
             activity = [json.loads(line) for line in activity_path.read_text(encoding="utf-8").splitlines()]
 
-        # The reasoning and the answer arrive verbatim, in order, joined together.
-        # The reasoning is printed inside its frame, so the body line carries the
-        # left rule and the label lives in the frame's title instead.
+        # The console shows a colored thinking status, never private reasoning
+        # text, then streams the answer verbatim as it arrives.
         self.assertIn("\u250c\u2500 [world plan] thinking", stdout)
-        self.assertIn("\u2502 Thinking about the beats.", stdout)
+        self.assertIn("Reasoning is in progress; private text is hidden.", stdout)
+        self.assertNotIn("Thinking about the beats.", stdout)
         self.assertIn("\u2514", stdout)
         self.assertIn('[world plan] answer \u25b8 {"narration":"Maya found it."}', stdout)
-        # The actual Actions non-TTY path gets basic ANSI colors, while all
-        # structured telemetry stays off the human-readable prose stream.
+        self.assertIn("[world plan] \u2713 done", stdout)
+        self.assertNotIn("reasoning chars", stdout)
+        # The actual Actions non-TTY path gets basic ANSI colors, while private
+        # reasoning and structured telemetry stay out of human-readable output.
         self.assertIn("\u001b[37m", stdout)
         self.assertIn("\u001b[36m", stdout)
         self.assertNotIn("[ai-log]", stdout + stderr)
@@ -244,38 +245,42 @@ class RuntimeSpeedTests(unittest.TestCase):
     def test_budgets_are_compact(self):
         self.assertIn("NARRATION_TOKENS=$((1200 + DURATION_SECONDS * 8))", self.workflow)
         self.assertIn("REPAIR_TOKENS=$((1400 + DURATION_SECONDS * 8))", self.workflow)
-        # The blueprint budget is set per preset (5000-9000) in the model step and
-        # reused by the plan step, so a modelled blueprint cannot be cut off.
-        self.assertIn("fast) MAP_TOKENS=5000", self.workflow)
-        self.assertIn("hard) MAP_TOKENS=8000", self.workflow)
-        self.assertIn("smart_11b) MAP_TOKENS=9000", self.workflow)
-        self.assertIn('MAP_TOKENS=${MAP_TOKENS:-6000}', self.workflow)
+        # The selected model emits only a compact orchestration envelope; the
+        # delegated sub-agent writes the map and camera JSON.
+        self.assertIn("MAP_ORCHESTRATION_TOKENS=1200", self.workflow)
+        self.assertNotIn("MAP_TOKENS", self.workflow)
+        self.assertIn("Orchestrate and review the delegated map", self.workflow)
         self.assertNotIn("num_predict:12000", self.workflow)
         # 120 s narration: 1200 + 960 = 2160 tokens: enough for a thinking model to
         # plan briefly AND write the story, so it never stalls on the ceiling.
         seconds, duration = 1200, 120
         self.assertEqual(seconds + duration * 8, 2160)
 
-    def test_no_wall_clock_cap_on_slow_models(self):
-        # Hard and smart presets may take as long as they need; only total silence
-        # (a frozen process) hands the call to the fallback.
-        self.assertNotIn("--max-seconds", self.workflow)
+    def test_map_calls_have_hard_wall_clock_budgets_while_other_calls_keep_their_idle_guard(self):
+        start = self.workflow.index("- name: Orchestrate and review the delegated map")
+        end = self.workflow.index("- name: Re-view the AI world", start)
+        map_step = self.workflow[start:end]
+        self.assertIn("--max-seconds 600", map_step)
+        self.assertIn("--max-seconds 300", map_step)
         self.assertIn("AI_STALL=900", self.workflow)
         self.assertIn('--stall-seconds "${AI_STALL:-900}"', self.workflow)
         self.assertIn("smart_11b) AI_TIMEOUT=9000", self.workflow)
+        self.assertNotIn("--max-seconds", self.workflow[:start])
 
-    def test_search_many_times_but_never_loop(self):
-        # The AI may research as often as it needs...
-        self.assertIn("for helper_round in 1 2 3 4; do", self.workflow)
-        # ...but asking for the identical help twice ends the loop.
-        self.assertIn('if [ "$HELP_SIG" = "$PREVIOUS_HELP" ]; then', self.workflow)
-        self.assertIn("PREVIOUS_HELP=", self.workflow)
-        # Narration may be corrected up to three times, then the guard finishes it.
+    def test_map_research_and_reviews_do_not_reenter_a_full_plan_loop(self):
+        start = self.workflow.index("- name: Orchestrate and review the delegated map")
+        end = self.workflow.index("- name: Re-view the AI world", start)
+        map_step = self.workflow[start:end]
+        self.assertIn("map_orchestration.py queries", map_step)
+        self.assertNotIn("for helper_round", map_step)
+        self.assertNotIn("for delegation_retry", map_step)
+        self.assertNotIn("map_repair_request.json", map_step)
+        # The narration still has its own bounded correction path.
         self.assertIn("for attempt in 1 2 3; do", self.workflow)
-        self.assertNotIn("for attempt in 1 2 3 4", self.workflow)
 
     def test_planning_asks_for_brief_reasoning(self):
-        self.assertIn("THINK BRIEFLY: this runs on a CPU-only machine", self.workflow)
+        self.assertIn("THINK BRIEFLY: settle the hook", self.workflow)
+        self.assertIn("Think briefly about the story and delegate", self.workflow)
         self.assertNotIn("re-read your own blueprint three times", self.workflow)
 
     def test_thinking_stays_on_in_every_retry(self):
@@ -574,26 +579,27 @@ class ThinkingBoxTests(unittest.TestCase):
         console.write("a" * 200)
         self.assertEqual("".join(recorder.writes).count("\n"), 0)
 
-    def test_the_stream_opens_the_frame_for_reasoning_only(self):
+    def test_the_stream_shows_a_thinking_status_but_withholds_reasoning_text(self):
         helper = (ROOT / "tools" / "ollama_stream.py").read_text(encoding="utf-8")
         self.assertIn('console.open_box(f"[{label}] thinking")', helper)
+        self.assertIn('console.note("Reasoning is in progress; private text is hidden."', helper)
+        self.assertNotIn("console.write(piece_thinking)", helper)
         self.assertIn('console.use("answer")', helper)
-        # Leaving the reasoning colour must close the box, not leave it dangling.
+        # Leaving the thinking frame must close it before the answer starts.
         self.assertIn('if self._box and kind != "thinking":', helper)
 
 
 class _ModelCatalogHandler(BaseHTTPRequestHandler):
+    """Supplies the resident-model probe and leaves request behavior to subclasses."""
+
     models: list[str] = []
+    calls = 0
 
     def log_message(self, *args):
         pass
 
     def do_GET(self):
-        if self.path.endswith("/api/ps"):
-            payload = {"models": []}
-        else:
-            payload = {"models": [{"name": "qwen3:14b"}, {"name": "qwen3:4b"}]}
-        body = json.dumps(payload).encode()
+        body = json.dumps({"models": []}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -601,38 +607,40 @@ class _ModelCatalogHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-class _SilentPrimaryThenFallback(_ModelCatalogHandler):
-    """The primary sends no thinking or answer content; the fallback answers."""
+class _SilentPrimaryThenRetry(_ModelCatalogHandler):
+    """The selected model stalls once, then answers when retried unchanged."""
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         payload = json.loads(self.rfile.read(length))
-        model = str(payload.get("model"))
-        type(self).models.append(model)
+        type(self).models.append(str(payload.get("model")))
+        type(self).calls += 1
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson")
         self.end_headers()
         self.wfile.flush()
-        if model == "qwen3:14b":
-            time.sleep(0.45)  # longer than the tiny test stall window
+        if type(self).calls == 1:
+            time.sleep(0.45)
             return
         events = [
-            {"message": {"content": '{"ok":"fallback"}'}, "done": False},
+            {"message": {"content": '{"ok":"same-model-retry"}'}, "done": False},
             {"done": True, "done_reason": "stop", "eval_count": 5},
         ]
         for event in events:
-            self.wfile.write((json.dumps(event) + "\n").encode())
-            self.wfile.flush()
+            try:
+                self.wfile.write((json.dumps(event) + "\n").encode())
+                self.wfile.flush()
+            except BrokenPipeError:
+                return
 
 
 class _SlowProgressingPrimary(_ModelCatalogHandler):
-    """Slow thought and answer chunks keep arriving, so the primary must finish."""
+    """Slow thought and answer chunks keep arriving, so the selected model finishes."""
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         payload = json.loads(self.rfile.read(length))
-        model = str(payload.get("model"))
-        type(self).models.append(model)
+        type(self).models.append(str(payload.get("model")))
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson")
         self.end_headers()
@@ -645,18 +653,21 @@ class _SlowProgressingPrimary(_ModelCatalogHandler):
             {"done": True, "done_reason": "stop", "eval_count": 24},
         ]
         for event in events:
-            self.wfile.write((json.dumps(event) + "\n").encode())
-            self.wfile.flush()
+            try:
+                self.wfile.write((json.dumps(event) + "\n").encode())
+                self.wfile.flush()
+            except BrokenPipeError:
+                return
             time.sleep(0.08)
 
 
 class StallWatchdogTests(unittest.TestCase):
-    """Only a full no-thinking/no-answer stall may trigger model hand-off."""
+    """Only content stalls or explicit map deadlines can stop a selected model."""
 
-    def _run_cli(self, base_handler, *, stall_seconds: float):
+    def _run_cli(self, base_handler, *, stall_seconds: float, max_seconds: float = 0.0):
         import tempfile
 
-        handler = type("Handler", (base_handler,), {"models": []})
+        handler = type("Handler", (base_handler,), {"models": [], "calls": 0})
         server = HTTPServer(("127.0.0.1", 0), handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.shutdown)
@@ -674,37 +685,49 @@ class StallWatchdogTests(unittest.TestCase):
             environment = {**os.environ, "AI_COLOR": "0", "AI_MIN_TPS": "100000",
                            "AI_TPS_WINDOW": "0", "AI_PROJECTED_SECONDS": "0.001"}
             environment.pop("GITHUB_ENV", None)
-            result = subprocess.run(
-                [sys.executable, "tools/ollama_stream.py",
-                 "--request", str(request_path), "--output", str(workdir / "out.json"),
-                 "--label", "world plan", "--timeout", "2",
-                 "--stall-seconds", str(stall_seconds),
-                 "--heartbeat-seconds", "0", "--type-delay", "0",
-                 "--fallback-model", "qwen3:4b",
-                 "--url", f"http://127.0.0.1:{server.server_port}/api/chat"],
-                cwd=ROOT, capture_output=True, text=True, env=environment,
-            )
+            command = [sys.executable, "tools/ollama_stream.py",
+                       "--request", str(request_path), "--output", str(workdir / "out.json"),
+                       "--label", "world plan", "--timeout", "2",
+                       "--stall-seconds", str(stall_seconds),
+                       "--heartbeat-seconds", "0", "--type-delay", "0"]
+            if max_seconds:
+                command.extend(("--max-seconds", str(max_seconds)))
+            command.extend(("--url", f"http://127.0.0.1:{server.server_port}/api/chat"))
+            result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
+                                    env=environment)
             output_path = workdir / "out.json"
             output = json.loads(output_path.read_text(encoding="utf-8")) if output_path.exists() else None
             return result, output, list(handler.models)
 
-    def test_a_silent_primary_hands_off_after_the_no_content_stall(self):
-        result, output, models = self._run_cli(_SilentPrimaryThenFallback, stall_seconds=0.16)
+    def test_a_silent_primary_retries_the_same_selected_model(self):
+        result, output, models = self._run_cli(_SilentPrimaryThenRetry, stall_seconds=0.16)
         self.assertEqual(result.returncode, 0, msg=result.stdout[-2000:] + result.stderr[-1000:])
         self.assertIn("no thinking or answer output", result.stdout)
-        self.assertEqual(models, ["qwen3:14b", "qwen3:4b"])
-        self.assertEqual(output["model"], "qwen3:4b")
-        self.assertIn("fallback", output["response"])
+        self.assertIn("retrying the selected model qwen3:14b once", result.stdout)
+        self.assertEqual(models, ["qwen3:14b", "qwen3:14b"])
+        self.assertEqual(output["model"], "qwen3:14b")
+        self.assertIn("same-model-retry", output["response"])
+        self.assertNotIn("fallback", result.stdout.lower())
 
-    def test_slow_thinking_and_answer_progress_never_hands_off(self):
+    def test_slow_thinking_and_answer_progress_never_interrupts_the_selected_model(self):
         result, output, models = self._run_cli(_SlowProgressingPrimary, stall_seconds=0.25)
         self.assertEqual(result.returncode, 0, msg=result.stdout[-2000:] + result.stderr[-1000:])
-        self.assertEqual(models, ["qwen3:14b"], "the primary keeps the call while it emits content")
+        self.assertEqual(models, ["qwen3:14b"], "the selected model keeps the call while it emits content")
         self.assertEqual(output["model"], "qwen3:14b")
         self.assertIn("slow-but-progressing", output["response"])
         self.assertIn("Reasoning continues", output["thinking"])
 
-    def test_every_streaming_workflow_call_uses_only_the_stall_watchdog(self):
+    def test_hard_deadline_stops_continuous_output_without_switching_models(self):
+        result, output, models = self._run_cli(_SlowProgressingPrimary,
+                                                stall_seconds=2, max_seconds=0.15)
+        self.assertEqual(result.returncode, 1, msg=result.stdout[-2000:] + result.stderr[-1000:])
+        self.assertIsNone(output)
+        self.assertEqual(models, ["qwen3:14b"])
+        self.assertIn("exceeded its wall-clock budget", result.stderr)
+        self.assertIn("the selected model was not changed", result.stderr)
+        self.assertIn("Selected Ollama model timed out", result.stderr)
+
+    def test_workflow_calls_keep_the_selected_model_and_bound_only_map_requests(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
         agent_workflow = (ROOT / ".github" / "workflows" / "agent.yml").read_text(encoding="utf-8")
         agent_helper = (ROOT / "tools" / "nish_agent.py").read_text(encoding="utf-8")
@@ -715,28 +738,28 @@ class StallWatchdogTests(unittest.TestCase):
         calls = workflow.count("python tools/ollama_stream.py")
         self.assertGreater(calls, 0)
         self.assertEqual(calls, workflow.count("--stall-seconds"))
-        for forbidden in ("AI_MIN_TPS", "AI_TPS_WINDOW", "AI_PROJECTED_SECONDS",
-                          "--min-tps", "--tps-window", "--projected-seconds", "--max-seconds"):
-            self.assertNotIn(forbidden, workflow)
-            self.assertNotIn(forbidden, agent_workflow)
-            self.assertNotIn(forbidden, agent_helper)
-            self.assertNotIn(forbidden, helper)
-
-    def test_the_fallback_is_always_a_different_smaller_model(self):
-        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
-        self.assertIn("FALLBACK_MODEL=qwen3:4b", workflow)
-        self.assertIn("qwen3:4b|qwen3:1.7b) FALLBACK_MODEL=qwen3:8b", workflow)
+        map_start = workflow.index("- name: Orchestrate and review the delegated map")
+        map_end = workflow.index("- name: Re-view the AI world", map_start)
+        map_step = workflow[map_start:map_end]
+        self.assertIn("--max-seconds 600", map_step)
+        self.assertIn("--max-seconds 300", map_step)
+        for path, text in (("main.yml", workflow), ("agent.yml", agent_workflow),
+                           ("nish_agent.py", agent_helper), ("ollama_stream.py", helper)):
+            self.assertNotIn("--fallback-model", text, path)
+            self.assertNotIn("AI_FALLBACK_MODEL", text, path)
 
 
 class BlueprintSizeTests(unittest.TestCase):
-    def test_the_blueprint_is_small_enough_to_finish_on_a_cpu_runner(self):
+    def test_the_local_model_has_a_small_orchestration_budget_and_the_helper_builds_map(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
-        self.assertIn("12–18 meaningful anchor props (never more than 20)", workflow)
-        self.assertIn("MAP_TOKENS > 6000 ? 6000 : MAP_TOKENS", workflow)
+        self.assertIn("MAP_ORCHESTRATION_TOKENS=1200", workflow)
+        self.assertIn("sub-agent creates the actual map, camera storyboard", workflow)
+        self.assertIn("at least 8 map-only prop anchors", workflow)
+        self.assertNotIn("MAP_TOKENS", workflow)
 
     def test_the_plan_step_reports_its_preset(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
-        start = workflow.index("Design the complete prompt-themed 3D Roblox world")
+        start = workflow.index("- name: Orchestrate and review the delegated map")
         block = workflow[start:start + 900]
         self.assertIn("MODEL_QUALITY: ${{ inputs.model_quality }}", block)
 
@@ -868,80 +891,13 @@ class _AlwaysAnswers(BaseHTTPRequestHandler):
         self.wfile.write((json.dumps({"done": True, "done_reason": "stop", "eval_count": 3}) + "\n").encode())
 
 
-class _SilentPrimaryNoFallback(BaseHTTPRequestHandler):
-    """The fallback is missing; only a true no-content stall triggers retry."""
-
-    models: list[str] = []
-    calls = 0
-
-    def log_message(self, *args):
-        pass
-
-    def do_GET(self):
-        body = json.dumps({"models": [{"name": "qwen3:8b"}]}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        payload = json.loads(self.rfile.read(length))
-        type(self).models.append(str(payload.get("model")))
-        type(self).calls += 1
-        first = type(self).calls == 1
-        self.send_response(200)
-        self.send_header("Content-Type", "application/x-ndjson")
-        self.end_headers()
-        self.wfile.flush()
-        if first:
-            # No thinking or answer events for longer than the test stall window.
-            time.sleep(0.25)
-            return
-        events = [
-            {"message": {"content": '{"ok":"retry"}'}, "done": False},
-            {"done": True, "done_reason": "stop", "eval_count": 5},
-        ]
-        for event in events:
-            self.wfile.write((json.dumps(event) + "\n").encode())
-            self.wfile.flush()
-
-
-class _TooSlowPrimary(_AlwaysAnswers):
-    """The primary model cannot run here; the known-good fallback can."""
-
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        payload = json.loads(self.rfile.read(length))
-        type(self).models.append(str(payload.get("model")))
-        if str(payload.get("model")) != "qwen3:4b":
-            body = b'{"error":"model requires more system memory than is available"}'
-            self.send_response(500)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "application/x-ndjson")
-        self.end_headers()
-        self.wfile.write((json.dumps({"message": {"content": '{"ok":"fallback"}'}, "done": False}) + "\n").encode())
-        self.wfile.write((json.dumps({"done": True, "done_reason": "stop", "eval_count": 5}) + "\n").encode())
-
-
 class ModelResidencyTests(unittest.TestCase):
-    """No reload between steps: one load, then every step thinks on warm weights.
+    """The selected model stays the request model for every step in the run."""
 
-    Run #90 (smart_11b, qwen3:14b) reloaded the model before several steps: the
-    fallback hand-over swapped in qwen3:4b, the next step asked for qwen3:14b
-    again, and each swap costs minutes on a free CPU runner.
-    """
-
-    def test_a_hand_over_is_remembered_for_the_rest_of_the_run(self):
+    def test_stale_sticky_state_cannot_replace_the_requested_selected_model(self):
         import tempfile
 
-        handler = type("Handler", (_TooSlowPrimary,), {"models": []})
+        handler = type("Handler", (_AlwaysAnswers,), {"models": []})
         server = HTTPServer(("127.0.0.1", 0), handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.shutdown)
@@ -949,54 +905,32 @@ class ModelResidencyTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
+            (workdir / ".ai_model").write_text("qwen3:4b\n", encoding="utf-8")
             github_env = workdir / "github_env"
             github_env.touch()
-            first = workdir / "first.json"
-            first.write_text(json.dumps({
-                "model": "qwen3:14b",
-                "messages": [{"role": "user", "content": "plan the world"}],
-                "think": True, "stream": False,
-                "options": {"num_predict": 200},
-            }), encoding="utf-8")
             environment = {**os.environ, "GITHUB_ENV": str(github_env), "AI_COLOR": "0"}
-            result = subprocess.run(
-                [sys.executable, "tools/ollama_stream.py",
-                 "--request", str(first), "--output", str(workdir / "first_out.json"),
-                 "--label", "world plan", "--timeout", "30",
-                 "--fallback-model", "qwen3:4b",
-                 "--url", f"http://127.0.0.1:{server.server_port}/api/chat"],
-                cwd=ROOT, capture_output=True, text=True, env=environment,
-            )
-            self.assertEqual(result.returncode, 0, msg=result.stderr[-2000:])
-            self.assertIn("switching to the known-good fallback model", result.stdout)
+            models = ["qwen3:14b", "qwen3:8b"]
+            for index, selected in enumerate(models):
+                request = workdir / f"request{index}.json"
+                output = workdir / f"output{index}.json"
+                request.write_text(json.dumps({
+                    "model": selected,
+                    "messages": [{"role": "user", "content": "plan the world"}],
+                    "think": True, "stream": False,
+                    "options": {"num_predict": 200},
+                }), encoding="utf-8")
+                result = subprocess.run(
+                    [sys.executable, "tools/ollama_stream.py", "--request", str(request),
+                     "--output", str(output), "--label", "world plan", "--timeout", "30",
+                     "--url", f"http://127.0.0.1:{server.server_port}/api/chat"],
+                    cwd=ROOT, capture_output=True, text=True, env=environment,
+                )
+                self.assertEqual(result.returncode, 0, msg=result.stderr[-2000:])
+                self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["model"], selected)
+            self.assertEqual(github_env.read_text(encoding="utf-8"), "")
+        self.assertEqual(handler.models, models)
 
-            # The rest of the workflow is told to stop asking for the slow model.
-            exported = github_env.read_text(encoding="utf-8")
-            self.assertIn("AI_MODEL=qwen3:4b", exported)
-            self.assertIn("AI_MODEL_STICKY=1", exported)
-            # And the next call inside the SAME step, which cannot see GITHUB_ENV,
-            # still uses the warm model instead of reloading the slow one.
-            second = workdir / "second.json"
-            second.write_text(json.dumps({
-                "model": "qwen3:14b",
-                "messages": [{"role": "user", "content": "and the cameras"}],
-                "think": True, "stream": False,
-                "options": {"num_predict": 200},
-            }), encoding="utf-8")
-            again = subprocess.run(
-                [sys.executable, "tools/ollama_stream.py",
-                 "--request", str(second), "--output", str(workdir / "second_out.json"),
-                 "--label", "world plan retry", "--timeout", "30",
-                 "--fallback-model", "qwen3:4b",
-                 "--url", f"http://127.0.0.1:{server.server_port}/api/chat"],
-                cwd=ROOT, capture_output=True, text=True, env=environment,
-            )
-            self.assertEqual(again.returncode, 0, msg=again.stderr[-2000:])
-            self.assertIn("already loaded for this run", again.stdout)
-            self.assertIn("qwen3:4b", again.stdout)
-        self.assertEqual(handler.models[-1], "qwen3:4b", "the retry must reuse the warm model")
-
-    def test_the_workflow_checks_that_the_model_is_still_resident(self):
+    def test_the_workflow_checks_that_the_selected_model_is_still_resident(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
         for label in ('"model warm-up"', '"story"', '"world plan"', '"creation summary"'):
             self.assertIn(f'python tools/model_residency.py --check --model "$AI_MODEL" --label {label}'
@@ -1006,19 +940,17 @@ class ModelResidencyTests(unittest.TestCase):
         self.assertIn("python tools/model_residency.py --summary", workflow)
 
     def test_the_summary_is_written_before_the_model_is_unloaded(self):
-        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
         summary = workflow.index("Write the AI creation summary while the model is still in memory")
         unload = workflow.index("Free model RAM for the physics renderer")
         render = workflow.index("Render the complete vertical MP4 without Roblox Studio or Blender")
         self.assertLess(summary, unload,
                         "the last AI call must happen while the model is still warm")
         self.assertLess(unload, render)
-        # Nothing may call the model after it was evicted for the render.
-        after = workflow[unload:render]
-        self.assertNotIn("ollama_stream.py", after)
+        self.assertNotIn("ollama_stream.py", workflow[unload:render])
 
     def test_the_model_is_warmed_once_on_purpose(self):
-        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
         self.assertIn("/api/generate", workflow)
         self.assertIn("is resident after", workflow)
         self.assertIn("OLLAMA_KEEP_ALIVE=60m", workflow)
@@ -1042,13 +974,8 @@ class ModelResidencyTests(unittest.TestCase):
         self.assertIn("world plan: qwen3:8b -> COLD LOAD", result.stdout)
 
 
-class MissingFallbackTests(unittest.TestCase):
-    """A silent primary with no installed fallback retries itself safely.
-
-    The test keeps the missing-model guard covered without relying on a speed
-    estimate: only a true no-thinking/no-answer stall tries the unavailable model.
-    The primary then answers on its one retry.
-    """
+class SelectedModelFailureTests(unittest.TestCase):
+    """An unusable selected model fails clearly instead of switching to another."""
 
     def _run(self, handler, extra_args=()):
         import tempfile
@@ -1075,33 +1002,51 @@ class MissingFallbackTests(unittest.TestCase):
                 cwd=ROOT, capture_output=True, text=True, env=environment,
             )
             output = workdir / "out.json"
-            return result, (output.read_text(encoding="utf-8") if output.is_file() else None)
+            return result, (output.read_text(encoding="utf-8") if output.is_file() else None), list(handler.models)
 
-    def test_a_fallback_that_is_not_installed_is_never_used(self):
-        handler = type("Handler", (_SilentPrimaryNoFallback,), {"models": [], "calls": 0})
-        result, output = self._run(
-            handler, ("--fallback-model", "qwen3:4b", "--stall-seconds", "0.08"))
-        # The primary is retried with the same no-output watchdog; only the actual
-        # silent interval attempted the absent fallback.
-        self.assertEqual(result.returncode, 0, msg=result.stdout[-2000:] + result.stderr[-1000:])
-        self.assertIn("is NOT installed", result.stdout)
-        self.assertIn("no-thinking/no-answer stall", result.stdout)
-        self.assertNotIn("speed projection", result.stdout)
-        self.assertIn("retry", output or "")
-        self.assertIn("never pulled", result.stdout)
-        self.assertEqual(handler.models, ["qwen3:8b", "qwen3:8b"])
+    def test_model_failure_retries_only_the_selected_model_and_reports_a_clear_error(self):
+        class Handler(BaseHTTPRequestHandler):
+            models: list[str] = []
 
-    def test_a_404_is_reported_as_a_missing_model(self):
-        class Handler(HTTPServer.__mro__[0] if False else object):
-            pass
+            def log_message(self, *args):
+                pass
 
+            def do_GET(self):
+                body = json.dumps({"models": []}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                payload = json.loads(self.rfile.read(length))
+                type(self).models.append(str(payload.get("model")))
+                body = b'{"error":"selected model cannot run"}'
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        result, output, models = self._run(Handler)
+        self.assertEqual(result.returncode, 1)
+        self.assertIsNone(output)
+        self.assertEqual(models, ["qwen3:8b", "qwen3:8b"])
+        self.assertIn("retrying the selected model qwen3:8b once", result.stdout)
+        self.assertIn("selected model qwen3:8b could not continue", result.stderr)
+        self.assertIn("Selected Ollama model failed", result.stderr)
+        self.assertNotIn("qwen3:4b", result.stdout + result.stderr)
+
+    def test_a_404_is_reported_as_a_missing_selected_model(self):
         # Directly: a 404 from /api/chat must raise ModelMissing, not HTTPError.
         sys.path.insert(0, str(ROOT / "tools"))
         import ollama_stream
 
         class FakeResponse:
             def read(self):
-                return b'{"error":"model \\"qwen3:4b\\" not found"}'
+                return b'{"error":"model \"qwen3:8b\" not found"}'
 
             def close(self):
                 return None
@@ -1115,7 +1060,7 @@ class MissingFallbackTests(unittest.TestCase):
         ollama_stream.urllib.request.urlopen = fake_urlopen
         try:
             with self.assertRaises(ollama_stream.ModelMissing):
-                ollama_stream.stream({"model": "qwen3:4b", "messages": []},
+                ollama_stream.stream({"model": "qwen3:8b", "messages": []},
                                      "http://127.0.0.1:1/api/chat", "test", 10, True)
         finally:
             ollama_stream.urllib.request.urlopen = original

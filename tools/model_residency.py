@@ -4,7 +4,7 @@
 The runner used to reload the model before several steps: each unload costs
 minutes of CPU time on a free GitHub runner and makes the console look like the
 AI is "starting over" every few minutes. Keep-alive was already set, so the
-reloads came from somewhere else - a hand-over to the fallback model, or a call
+reloads came from somewhere else - an unexpected model change, or a call
 made after the model was deliberately evicted for the render. Both are fixed, and
 this tool is the proof: it records, for every AI step, whether the model was
 already resident before that step ran.

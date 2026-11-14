@@ -149,11 +149,17 @@ class SubAgentInvitationTests(unittest.TestCase):
             "YOU CAN USE IT ONE OR TWO TIMES, OR AS MANY TIMES AS YOU LIKE, AT ANY POINT"), 1)
         self.assertIn("There is no quota and no rule that you must ask", WORKFLOW)
 
-    def test_the_map_prompt_names_the_required_keys(self):
-        self.assertIn('REQUIRED TOP-LEVEL KEYS, every one of them present and non-empty', WORKFLOW)
-        self.assertIn('"name", "theme", "props", "character_placements", "camera_shots", '
-                      '"face_expressions"', WORKFLOW)
-        self.assertIn('never the words "AUTO FROM STORY"', WORKFLOW)
+    def test_the_map_subagent_task_requests_the_complete_blueprint_keys(self):
+        start = WORKFLOW.index("- name: Orchestrate and review the delegated map")
+        end = WORKFLOW.index("- name: Re-view the AI world", start)
+        prompt = WORKFLOW[start:end]
+        self.assertIn('one complete JSON world blueprint with name, theme, time_of_day', prompt)
+        self.assertIn("at least 8 map-only prop anchors, character_placements", prompt)
+        self.assertIn("camera_shots", prompt)
+        self.assertIn("face_expressions", prompt)
+        self.assertIn('The other task must have topic "models"', prompt)
+        schema = (ROOT / "tools" / "plan_schema.py").read_text(encoding="utf-8")
+        self.assertIn('"name", "theme", "time_of_day", "props", "character_placements"', schema)
 
 
 class DefaultTopicTests(unittest.TestCase):

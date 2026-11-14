@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Stream an Ollama chat request and show the model's live thinking in the log.
+"""Stream Ollama output, show a colored thinking status and live answer, and save activity.
 
 The workflow used to post a blocking request, so the Actions console sat silent
-for minutes while the model worked. This wrapper asks Ollama to stream, prints
-the reasoning and the answer as they arrive, and finally writes the same
-aggregated JSON envelope the rest of the pipeline already reads.
+for minutes while the model worked. This wrapper streams the response, keeps
+private reasoning text out of the human-facing console, shows the answer live,
+and writes the aggregated response plus structured activity artifacts.
 """
 from __future__ import annotations
 
@@ -42,14 +42,8 @@ def looks_stuck(text: str) -> bool:
 
 CONSOLE_LOCK = threading.Lock()
 
-# The reasoning is printed inside a light frame so it is obviously one block of
-# machine thought rather than part of the answer.
-#
-# The model streams one long paragraph per thought with no line breaks of its
-# own, and the log viewer only wraps visually - so a whole paragraph arrived as
-# a single log line with the rule at the start and nowhere else. The console now
-# breaks the text itself at a modest width, so every visible line begins with the
-# rule and the block reads as many lines instead of one endless one.
+# A short, framed thinking-status note distinguishes private reasoning from the
+# answer without exposing internal reasoning text in the Actions console.
 BOX_WIDTH = 66
 BOX_LEFT = "\u2502 "
 BOX_TOP = "\u250c\u2500 "
@@ -70,8 +64,9 @@ class TypedConsole:
     character by character, each flush acting as a single write, makes the log
     build up letter by letter exactly as the model produces it.
 
-    Reasoning and answer are written in different colours (grey vs bright cyan)
-    so it is visible at a glance which channel is producing text.
+    The thinking status and answer use different colours (grey vs bright cyan)
+    so it is visible at a glance which channel is active without printing private
+    reasoning text.
 
     Pacing is bounded by a per-call budget: after that many seconds the remaining
     characters are written at full speed, so watching the AI type can never delay
@@ -276,28 +271,6 @@ class ModelMissing(Exception):
     """The model named in the request is not installed on this runner."""
 
 
-def installed_models(url: str, timeout: float = 30) -> set[str]:
-    """Names Ollama reports in /api/tags, as 'name:tag'.
-
-    Asked before a hand-over: switching to a model that is not on disk is not a
-    rescue, it is a 404 that loses the call.
-    """
-    base = url.split("/api/")[0]
-    try:
-        with urllib.request.urlopen(f"{base}/api/tags", timeout=timeout) as handle:
-            payload = json.loads(handle.read().decode("utf-8", "replace"))
-    except Exception:  # noqa: BLE001 - never let the probe itself break a call
-        return set()
-    names = set()
-    for entry in payload.get("models") or []:
-        name = str(entry.get("name") or entry.get("model") or "")
-        if name:
-            names.add(name)
-            if ":" not in name:
-                names.add(f"{name}:latest")
-    return names
-
-
 def resident_models(url: str, timeout: float = 10) -> set[str]:
     """Names Ollama currently holds IN MEMORY (/api/ps), as 'name:tag'.
 
@@ -334,13 +307,18 @@ class ModelUnusable(Exception):
 
 
 class NoOutputStall(Exception):
-    """Raised only when no thinking or answer content arrives for the stall window."""
+    """Raised only when the selected model emits no content for the stall window."""
+
+
+class CallDeadlineExceeded(Exception):
+    """Raised when an explicitly bounded request exceeds its wall-clock budget."""
 
 
 def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
            stall_seconds: float = 0.0,
            type_delay: float = 0.002, type_budget: float = 120.0,
-           heartbeat_seconds: float = 15.0) -> dict:
+           heartbeat_seconds: float = 15.0,
+           deadline: float | None = None) -> dict:
     request = {**request, "stream": True}
     payload = json.dumps(request).encode("utf-8")
     http = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
@@ -406,8 +384,8 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
             "channel": channel, "preview": preview, "characters": len(accumulated),
         }, path=Path("dist/ai_activity.jsonl"), emit=False)
 
-    def hand_off_if_silent_timeout(exc: BaseException) -> None:
-        """Turn an idle socket timeout into a hand-off only after the stall window."""
+    def check_silent_timeout(exc: BaseException) -> None:
+        """Turn a true no-content timeout into a bounded failure for this model."""
         reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
         if not stall_seconds or not isinstance(reason, (TimeoutError, socket.timeout)):
             return
@@ -416,24 +394,63 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
             console.close_box()
             raise NoOutputStall(
                 f"no thinking or answer output for {idle:.0f}s "
-                f"(stall window {stall_seconds:.0f}s); handing this call to the fallback model") from exc
+                f"(stall window {stall_seconds:.0f}s); the selected model will not be switched") from exc
 
     def response_lines(response):
-        """Read lines while making a truly silent stream observable."""
+        """Read lines with both an idle watchdog and an optional hard deadline."""
+        iterator = iter(response)
         try:
-            yield from response
+            while True:
+                now = time.monotonic()
+                if deadline is not None:
+                    remaining = deadline - now
+                    if remaining <= 0:
+                        console.close_box()
+                        raise CallDeadlineExceeded(
+                            f"exceeded its {deadline - started_at:.0f}s wall-clock budget")
+                else:
+                    remaining = 0.0
+                idle_remaining = (max(0.001, stall_seconds - (now - last_progress))
+                                  if stall_seconds > 0 else 0.0)
+                read_limits = [value for value in (timeout, remaining, idle_remaining) if value > 0]
+                if read_limits:
+                    read_timeout = min(read_limits)
+                    try:
+                        sock = response.fp.raw._sock
+                        sock.settimeout(read_timeout)
+                    except (AttributeError, OSError):
+                        pass
+                try:
+                    raw = next(iterator)
+                except StopIteration:
+                    return
+                now = time.monotonic()
+                if deadline is not None and now >= deadline:
+                    console.close_box()
+                    raise CallDeadlineExceeded(
+                        f"exceeded its {deadline - started_at:.0f}s wall-clock budget")
+                yield raw
+        except CallDeadlineExceeded:
+            raise
         except (TimeoutError, urllib.error.URLError, OSError) as exc:
-            hand_off_if_silent_timeout(exc)
+            if deadline is not None and time.monotonic() >= deadline:
+                console.close_box()
+                raise CallDeadlineExceeded(
+                    f"exceeded its {deadline - started_at:.0f}s wall-clock budget") from exc
+            check_silent_timeout(exc)
             raise
         finally:
             if beat:
                 beat.stop()
 
-    # urllib's timeout is an idle-socket timeout, not a total call deadline.
-    # Limit an idle read to the configured stall window so a model that never
-    # emits a first token (or goes silent mid-thought) can be handed off on time.
-    request_timeout = (min(timeout, stall_seconds)
-                       if stall_seconds > 0 and timeout > 0 else timeout)
+    # urllib's socket timeout is an idle-read guard. Tighten it to the remaining
+    # total budget for bounded map-orchestration/review calls.
+    now = time.monotonic()
+    remaining = max(0.001, deadline - now) if deadline is not None else 0.0
+    idle_remaining = (max(0.001, stall_seconds - (now - last_progress))
+                      if stall_seconds > 0 else 0.0)
+    request_limits = [value for value in (timeout, remaining, idle_remaining) if value > 0]
+    request_timeout = min(request_limits) if request_limits else timeout
     try:
         handle = urllib.request.urlopen(http, timeout=request_timeout)
     except urllib.error.HTTPError as exc:
@@ -443,11 +460,8 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
         if exc.code == 400 and "think" in detail.lower():
             raise ThinkingUnsupported(detail.strip()[:300]) from exc
         if exc.code == 404:
-            # Ollama answers 404 for a model it does not have ("model 'qwen3:4b' not
-            # found"). This used to escape as a bare HTTPError and kill the whole
-            # call - the world plan died that way when the fallback had never been
-            # pulled, and the run silently produced a procedural world instead of the
-            # AI's furnished one.
+            # Ollama answers 404 for a selected model it does not have ("model
+            # 'qwen3:4b' not found"). Convert it to a clear selected-model failure.
             raise ModelMissing(f"HTTP 404: {detail.strip()[:300]}") from exc
         if exc.code >= 500:
             # For example llama3.2-vision: Ollama exits with
@@ -456,7 +470,10 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
         raise
     except (TimeoutError, urllib.error.URLError, OSError) as exc:
         try:
-            hand_off_if_silent_timeout(exc)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise CallDeadlineExceeded(
+                    f"exceeded its {deadline - started_at:.0f}s wall-clock budget") from exc
+            check_silent_timeout(exc)
         finally:
             if beat:
                 beat.stop()
@@ -469,7 +486,7 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                 console.close_box()
                 raise NoOutputStall(
                     f"no thinking or answer output for {idle:.0f}s "
-                    f"(stall window {stall_seconds:.0f}s); handing this call to the fallback model")
+                    f"(stall window {stall_seconds:.0f}s); the selected model will not be switched")
             line = raw.decode("utf-8", "replace").strip()
             if not line:
                 continue
@@ -491,8 +508,9 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                             beat.touch()
                         console.use("thinking")
                         console.open_box(f"[{label}] thinking")
+                        console.note("Reasoning is in progress; private text is hidden.",
+                                     kind="thinking")
                         thinking_open = True
-                    console.write(piece_thinking)
             if piece_content:
                 content.append(piece_content)
                 emit_activity_progress("answer")
@@ -563,8 +581,8 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                 console.line(f"[{label}] first word after {first_char_seconds:.0f}s "
                              f"(no reload: the weights were already in memory){prefill}.",
                              kind="success")
-        console.line(f"[{label}] \u2713 finished in {elapsed:.0f}s: {len(answer):,} answer chars, "
-                     f"{len(reasoning):,} reasoning chars, {tokens} tokens{rate}"
+        console.line(f"[{label}] \u2713 done in {elapsed:.0f}s: {len(answer):,} answer chars, "
+                     f"{tokens} tokens{rate}"
                      f"{', CUT OFF at the token ceiling' if done_reason == 'length' else ''}.",
                      kind="error" if done_reason == "length" else "success")
     return {
@@ -594,37 +612,6 @@ def next_token_budget(current: int) -> int:
     return min(MAX_PREDICT_CEILING, max(int(current) * 2, 4096))
 
 
-def stick_to_fallback(model: str, label: str, state_path: Path | None = None) -> None:
-    """Tell the rest of the workflow to keep using `model` from now on.
-
-    Written through GITHUB_ENV so later steps see it, and applied to this process
-    too. Every later call in the run names the run's primary model, so without
-    this the next call reloads the slow model (minutes), finds it slow again, then
-    reloads the fallback: a reload before every step. Nothing happens when
-    GITHUB_ENV is absent, which keeps local runs unchanged.
-    """
-    os.environ["AI_MODEL"] = model
-    os.environ["AI_MODEL_STICKY"] = "1"
-    if state_path is not None:
-        try:
-            state_path.parent.mkdir(parents=True, exist_ok=True)
-            state_path.write_text(model + "\n", encoding="utf-8")
-        except OSError:
-            pass
-    target = os.environ.get("GITHUB_ENV")
-    print(paint(f"[{label}] {model} is now this run's model, so the remaining steps "
-                "think on the weights already in memory instead of reloading "
-                "between steps.", "plan"), flush=True)
-    if not target:
-        return
-    try:
-        with Path(target).open("a", encoding="utf-8") as out:
-            out.write(f"AI_MODEL={model}\n")
-            out.write("AI_MODEL_STICKY=1\n")
-    except OSError:
-        return
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--request", required=True, type=Path, help="Ollama chat request JSON")
@@ -633,13 +620,10 @@ def main() -> None:
     parser.add_argument("--url", default=DEFAULT_URL)
     parser.add_argument("--timeout", type=float, default=900.0)
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--fallback-model", default="",
-                        help="known-good model to retry on when the selected one cannot run")
-    parser.add_argument("--fallback-thinking", default="true",
-                        help="whether the fallback model should use thinking (default true)")
     parser.add_argument("--stall-seconds", type=float, default=0.0,
-                        help="hand off only if no thinking or answer content arrives for this "
-                             "long; 0 = no limit")
+                        help="fail a call after this much silence from the selected model; 0 = no limit")
+    parser.add_argument("--max-seconds", type=float, default=0.0,
+                        help="optional hard wall-clock cap for the whole call, including retries; 0 = no cap")
     parser.add_argument("--type-delay", type=float,
                         default=float(os.environ.get("AI_TYPE_DELAY", "0.002")),
                         help="seconds to pause between printed characters; 0 prints at full "
@@ -657,34 +641,23 @@ def main() -> None:
     args = parser.parse_args()
 
     request = json.loads(args.request.read_text(encoding="utf-8"))
-    # One model resident for the whole run. The state file sits next to the output
-    # so every call in this run - including a second attempt inside the same step,
-    # where GITHUB_ENV has already been read for the last time - is rewritten to the
-    # model that is actually loaded. That is what stops the reload-per-step cycle.
-    state_path = args.output.parent / ".ai_model"
-    if state_path.is_file():
-        resident = state_path.read_text(encoding="utf-8").strip()
-        if resident and resident != request.get("model"):
-            print(paint(f"[{args.label}] {resident} is already loaded for this run, so this "
-                        f"call uses it instead of reloading {request.get('model')}.",
-                        "notice"), flush=True)
-            request["model"] = resident
     model = request.get("model", "model")
     thinking_on = bool(request.get("think"))
     print(paint(f"[{args.label}] sending {model} request "
                 f"(temperature {request.get('options', {}).get('temperature', 'default')}, "
-                f"thinking {'on' if thinking_on else 'off'}); live thinking is printed below.",
+                f"thinking {'on' if thinking_on else 'off'}); private reasoning is not printed.",
                 "label"), flush=True)
     quiet_note = ("" if args.heartbeat_seconds <= 0 else
                   f" If it goes quiet you get at most {HEARTBEAT_NOTES} short notes, "
                   f"{int(args.heartbeat_seconds)}s apart; no repeated chatter.")
-    print(paint(f"[{args.label}] \u25b8 streaming live: the model's reasoning then its answer "
-                f"will appear here letter by letter as it produces them, reasoning in a "
-                f"framed box.{quiet_note}", "notice"), flush=True)
+    print(paint(f"[{args.label}] \u25b8 streaming live: a brief colored thinking status and the "
+                f"answer appear here letter by letter as it arrives; private reasoning stays "
+                f"out of the console.{quiet_note}", "notice"), flush=True)
 
+    deadline = time.monotonic() + args.max_seconds if args.max_seconds > 0 else None
     limits = {"stall_seconds": args.stall_seconds,
               "type_delay": args.type_delay, "type_budget": args.type_budget,
-              "heartbeat_seconds": args.heartbeat_seconds}
+              "heartbeat_seconds": args.heartbeat_seconds, "deadline": deadline}
 
     def run_once(payload: dict, note: str) -> dict:
         result = stream(payload, args.url, args.label, args.timeout, args.quiet, **limits)
@@ -741,6 +714,8 @@ def main() -> None:
     def attempt(payload: dict, note: str = "") -> dict | None:
         try:
             return run_once(payload, note)
+        except CallDeadlineExceeded:
+            raise
         except ThinkingUnsupported as exc:
             # Thinking is requested for every preset, but a few architectures
             # have no reasoning channel. Answer normally instead of failing.
@@ -769,58 +744,36 @@ def main() -> None:
 
     try:
         result = attempt(request)
-        switched = False
-        if result is None and args.fallback_model and args.fallback_model != model:
-            # Only hand over to a model that is actually on disk. A run whose
-            # fallback had never been pulled used to switch to it anyway, take a 404
-            # and lose the call entirely - the world plan died that way and the run
-            # shipped a procedural world instead of the AI's.
-            available = installed_models(args.url)
-            if available and args.fallback_model not in available:
-                print(paint(f"[{args.label}] {args.fallback_model} is NOT installed "
-                            f"(Ollama has: {', '.join(sorted(available)) or 'nothing'}), so "
-                            f"there is nothing to hand over to. Trying {model} once more.",
-                            "warning"), flush=True)
-                print("::warning title=Fallback model missing::"
-                      f"{args.fallback_model} was never pulled, so this call could not "
-                      f"hand over. Pull it (ollama pull {args.fallback_model}).", flush=True)
-            else:
-                if not available:
-                    print(paint(f"[{args.label}] could not ask Ollama which models it has; "
-                                f"trying the fallback anyway.", "warning"), flush=True)
-                print(paint(f"[{args.label}] switching to the known-good fallback model "
-                            f"{args.fallback_model} so the run continues.", "warning"), flush=True)
-                fallback = {**request, "model": args.fallback_model,
-                            "think": bool(args.fallback_thinking)}
-                result = attempt(fallback, f" (fallback {args.fallback_model})")
-                if result is not None:
-                    result["fallback_model"] = args.fallback_model
-                    switched = True
-                    # Sticky hand-over. Every later call in the run names the run's
-                    # primary model, so without this the next step would reload the
-                    # slow model (minutes), find it slow again, and reload the
-                    # fallback: a reload before every single step.
-                    stick_to_fallback(args.fallback_model, args.label,
-                                      args.output.parent / ".ai_model")
-                else:
-                    print(paint(f"[{args.label}] the fallback {args.fallback_model} could not "
-                                f"answer either; trying {model} once more with the same "
-                                f"no-output stall watchdog.", "warning"), flush=True)
-        if result is None and not switched:
-            # Retry the primary once, but keep the same no-thinking/no-answer stall
-            # window. No model is interrupted merely because its measured speed is low.
-            print(paint(f"[{args.label}] asking {model} once more; only a full "
-                        f"no-thinking/no-answer stall will trigger another hand-off.",
-                        "warning"), flush=True)
+        if result is None:
+            # Retry only the same selected model after a genuine stall/error. The
+            # absolute --max-seconds deadline, when configured, covers both tries.
+            print(paint(f"[{args.label}] retrying the selected model {model} once; "
+                        "no other local model will be tried.", "warning"), flush=True)
             result = attempt(request)
         if result is None:
+            reason = "selected model produced no answer after one same-model retry"
+            print(paint(f"[{args.label}] selected model {model} could not continue; no different local model was tried.",
+                        "error"), file=sys.stderr, flush=True)
+            print(f"::error title=Selected Ollama model failed::{args.label}: {model} produced no answer after one same-model retry.",
+                  file=sys.stderr, flush=True)
             append_activity({"type": "model_error", "stage": "ollama",
                              "tag": f"[{args.label} AI]", "label": args.label,
                              "provider": "ollama", "model": model,
-                             "status": "failed",
-                             "reason": "selected and configured fallback models produced no answer"},
+                             "status": "failed", "reason": reason},
                             path=Path("dist/ai_activity.jsonl"), emit=False)
             raise SystemExit(1)
+    except CallDeadlineExceeded as exc:
+        detail = " ".join(str(exc).split())[:240]
+        print(paint(f"[{args.label}] {model} exceeded its wall-clock budget ({detail}); "
+                    "the selected model was not changed.", "error"), file=sys.stderr, flush=True)
+        print(f"::error title=Selected Ollama model timed out::{args.label}: {model} exceeded its configured wall-clock budget.",
+              file=sys.stderr, flush=True)
+        append_activity({"type": "model_error", "stage": "ollama",
+                         "tag": f"[{args.label} AI]", "label": args.label,
+                         "provider": "ollama", "model": model, "status": "failed",
+                         "reason": "selected model exceeded the configured wall-clock budget"},
+                        path=Path("dist/ai_activity.jsonl"), emit=False)
+        raise SystemExit(1) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         print(paint(f"[{args.label}] streaming request failed: {type(exc).__name__}.",
                     "error"), file=sys.stderr, flush=True)
@@ -840,13 +793,12 @@ def main() -> None:
                         path=Path("dist/ai_activity.jsonl"), emit=False)
         raise SystemExit(1)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    result["model"] = request.get("model") if "fallback_model" not in result else result["fallback_model"]
+    result["model"] = model
     append_activity({
         "type": "model_response", "stage": "ollama",
         "activity_id": result.get("activity_id"), "tag": f"[{args.label} AI]",
         "label": args.label, "provider": "ollama", "model": result.get("model"),
         "status": "complete", "seconds": result.get("elapsed_seconds"),
-        "fallback": bool(result.get("fallback_model")),
         "prompt_messages": request.get("messages", []),
         "thinking": result.get("thinking", ""),
         "output": result.get("response", ""),
@@ -879,8 +831,7 @@ def main() -> None:
             "model_was_resident": result.get("model_was_resident"),
             "prompt_tokens": result.get("prompt_eval_count"),
             "prompt_seconds": result.get("prompt_eval_seconds"),
-            "fallback": bool(result.get("fallback_model")),
-        }, ensure_ascii=False) + "\n")
+            }, ensure_ascii=False) + "\n")
 
 
 if __name__ == "__main__":

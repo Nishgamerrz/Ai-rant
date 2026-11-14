@@ -79,6 +79,8 @@ class MemoryTests(unittest.TestCase):
         self.assertIn("normal, noob", text)
         self.assertIn("Max waits for Ben to fall asleep.", text)
         self.assertIn("Naptime Heights", text)
+        self.assertIn("The text sub-agent creates the map", text)
+        self.assertIn("never write the world blueprint locally", text)
 
     def test_it_tells_the_model_not_to_ask_for_what_it_already_knows(self):
         text = ai_memory.system_prompt(ai_memory.empty_memory())
@@ -103,17 +105,18 @@ class WorkflowMemoryTests(unittest.TestCase):
     def setUp(self):
         self.text = WORKFLOW.read_text(encoding="utf-8")
 
-    def test_every_ai_request_sends_a_real_system_message(self):
-        # Eight jq-built requests (story, story re-ask, narration repair, world
-        # plan, delegation repair, helper round, map retry, creation summary) +
-        # the python-built confirmation request.
-        self.assertEqual(self.text.count('role:"system"'), 8)
-        self.assertIn("{'role': 'system', 'content': system}", self.text)
+    def test_every_local_model_request_sends_a_real_system_message(self):
+        # Story, story re-ask, narration repair, first-response orchestration, and
+        # creation summary are jq-built in the workflow. The compact acceptance
+        # review is built separately by map_orchestration.py.
+        self.assertEqual(self.text.count('role:"system"'), 5)
+        review_helper = (ROOT / "tools" / "map_orchestration.py").read_text(encoding="utf-8")
+        self.assertIn('{"role": "system", "content": system}', review_helper)
 
     def test_the_memory_is_filled_before_the_first_call_and_reused_after(self):
         self.assertIn('--set "story_topic=${STORY_TOPIC}"', self.text)
         self.assertIn("--set-file narration=dist/narration.txt", self.text)
-        self.assertIn("--add-subagent subagent_results.json", self.text)
+        self.assertIn("--add-subagent story_subagent_results.json", self.text)
         # The topic is remembered before the story request is even built.
         self.assertLess(self.text.index('--set "story_topic='),
                         self.text.index("narration_request.json"))
