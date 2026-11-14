@@ -10,6 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from durations import parse_duration  # noqa: E402
+from ai_activity import append_activity, redact_secrets  # noqa: E402
+from console_style import paint  # noqa: E402
 
 # Run #85 rendered its whole video and was then refused with
 #   SHORT NOT APPROVED: narration reads out selected usernames: noob
@@ -108,6 +110,41 @@ def extract_narration(payload):
     return raw
 
 
+def narration_from_subagent(path: Path, *, expected_id: str = "t1") -> str:
+    """Accept only the complete required edit result authored for narration."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit("Could not read the narration proofread result; the draft was not used.") from exc
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict):
+        raise SystemExit("The narration sub-agent did not return exactly one complete proofread; the draft was not used.")
+    result = results[0]
+    text = result.get("text")
+    if (result.get("id") != expected_id or result.get("kind") != "edit"
+            or result.get("ok") is not True or result.get("status") != "complete"
+            or not isinstance(text, str) or not text.strip()):
+        raise SystemExit("The narration sub-agent result is incomplete or invalid; the draft was not used.")
+    if len(text) > 20000:
+        raise SystemExit("The narration proofread is unexpectedly long; the draft was not used.")
+    if text.strip().startswith("```") or text.strip().endswith("```"):
+        raise SystemExit("The narration sub-agent returned formatting instead of plain corrected text; the draft was not used.")
+    return text
+
+
+def _word_limit(name: str, default: int) -> int:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return default
+    try:
+        limit = int(value)
+    except ValueError as exc:
+        raise SystemExit(f"{name} must be a positive whole number.") from exc
+    if limit < 1:
+        raise SystemExit(f"{name} must be a positive whole number.")
+    return limit
+
+
 def cast_usernames() -> list[str]:
     """The selected Roblox usernames, from the environment or the cast file."""
     names = [name.strip() for name in os.environ.get("CAST_NAMES", "").split(",") if name.strip()]
@@ -202,32 +239,53 @@ def scrub_file(path: Path) -> int:
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == "--scrub":
         raise SystemExit(scrub_file(Path(sys.argv[2])))
-    if len(sys.argv) not in (4, 6):
+    subagent_mode = len(sys.argv) in (5, 7) and sys.argv[1] == "--subagent"
+    if not subagent_mode and len(sys.argv) not in (4, 6):
         raise SystemExit(
             "usage: prepare_narration.py RESPONSE.json OUTPUT.txt DURATION_SECONDS "
-            "[--truncate TOPIC] | prepare_narration.py --scrub narration.txt "
-            "[--truncate TOPIC]"
+            "[--truncate TOPIC] | prepare_narration.py --subagent RESULTS.json OUTPUT.txt DURATION_SECONDS "
+            "[--task-id ID] | prepare_narration.py --scrub narration.txt"
         )
-    response_path, output_path = map(Path, sys.argv[1:3])
-    duration = parse_duration(sys.argv[3])
-    truncate = len(sys.argv) == 6 and sys.argv[4] == "--truncate"
-    topic = sys.argv[5] if truncate else "a small act of honesty"
-    if len(sys.argv) == 6 and not truncate:
-        raise SystemExit("the optional arguments must be --truncate TOPIC")
+    if subagent_mode:
+        response_path, output_path = Path(sys.argv[2]), Path(sys.argv[3])
+        duration = parse_duration(sys.argv[4])
+        expected_task_id = "t1"
+        if len(sys.argv) == 7:
+            if sys.argv[5] != "--task-id" or not sys.argv[6].strip():
+                raise SystemExit("the sub-agent option must be followed by --task-id ID")
+            expected_task_id = sys.argv[6].strip()
+        topic = "a complete narration proofread"
+        truncate = False
+    else:
+        response_path, output_path = map(Path, sys.argv[1:3])
+        duration = parse_duration(sys.argv[3])
+        truncate = len(sys.argv) == 6 and sys.argv[4] == "--truncate"
+        topic = sys.argv[5] if truncate else "a small act of honesty"
+        if len(sys.argv) == 6 and not truncate:
+            raise SystemExit("the optional arguments must be --truncate TOPIC")
 
-    # Word limits scale with the requested length. The old hard 100-word cap
-    # silently rejected every 90-180 second short, so long videos could never
-    # pass this gate. The floor matches validate_short.py exactly: rejecting a
-    # narration the final quality gate would accept only costs another long,
-    # thinking-heavy generation round.
-    minimum = max(1, int(duration * 1.4))
-    maximum = max(24, int(duration * 5 / 3))
-    try:
-        payload = json.loads(response_path.read_text(encoding="utf-8"))
-        text = re.sub(r"\s+", " ", extract_narration(payload)).strip()
-    except (OSError, json.JSONDecodeError):
-        payload, text = {}, ""
+    # The workflow exports its exact spoken-rate budget for the proofread to
+    # meet. Standalone callers keep the established duration-scaled defaults.
+    minimum = _word_limit("MIN_WORDS", max(1, int(duration * 1.4)))
+    maximum = _word_limit("MAX_WORDS", max(24, int(duration * 5 / 3)))
+    if minimum > maximum:
+        raise SystemExit("MIN_WORDS cannot be greater than MAX_WORDS.")
+    if subagent_mode:
+        payload = {"response": {"narration": narration_from_subagent(
+            response_path, expected_id=expected_task_id)}}
+        text = str(payload["response"]["narration"])
+    else:
+        try:
+            payload = json.loads(response_path.read_text(encoding="utf-8"))
+            text = extract_narration(payload)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            payload, text = {}, ""
+    if not subagent_mode:
+        text = re.sub(r"\s+", " ", text).strip()
     text, replaced_usernames = scrub_usernames(text)
+    if subagent_mode and replaced_usernames:
+        raise SystemExit("The narration proofread included a selected username; it was not used. "
+                         "Ask the sub-agent to replace it with an invented first name.")
     if replaced_usernames:
         print("Replaced spoken Roblox username(s) " + ", ".join(replaced_usernames)
               + " with invented first names before the voiceover.",
@@ -278,8 +336,25 @@ def main():
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(text + "\n", encoding="utf-8")
-    print(f"Prepared one continuous narration ({len(words)} words; maximum {maximum}).")
+    output_path.write_text(text if subagent_mode else text + "\n", encoding="utf-8")
+    if subagent_mode:
+        append_activity({
+            "type": "narration_finalized", "stage": "narration",
+            "tag": "[narration source]", "status": "complete",
+            "source": "narration sub-agent proofread", "output": text,
+            "word_count": len(words), "minimum_words": minimum,
+            "maximum_words": maximum, "duration_seconds": duration,
+        }, path=Path("dist/ai_activity.jsonl"), emit=False)
+        print(paint(f"Sub-agent proofread accepted: {len(words)} words. This exact corrected text is now the narration source used downstream.",
+                    "success", bold=True))
+        display_text = redact_secrets(text)
+        heading = ("[final corrected narration · exact downstream source]"
+                   if display_text == text else
+                   "[final corrected narration · exact downstream source; credentials masked in logs]")
+        print(paint(heading, "label"), flush=True)
+        print(paint(display_text, "tool"), flush=True)
+    else:
+        print(f"Prepared one continuous narration ({len(words)} words; maximum {maximum}).")
 
 
 if __name__ == "__main__":

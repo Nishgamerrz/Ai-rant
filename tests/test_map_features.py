@@ -295,7 +295,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn('topic "models"', step)
         self.assertIn("python tools/map_delegation.py map_orchestration_response.json", step)
         self.assertIn('"write"', step)
-        self.assertIn("Do NOT write props, coordinates, camera shots", step)
+        self.assertIn("Do NOT reveal hidden reasoning or write props, coordinates, camera shots", step)
 
     def test_search_is_optional_and_authored_by_the_local_director(self):
         self.assertNotIn("Web search the AI can reuse in every planning stage", WORKFLOW)

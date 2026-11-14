@@ -3,19 +3,113 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { SubagentTimeline } from "./SubagentTimeline";
 import { encodeFaceReference } from "@/lib/faceReference";
 
-type Msg = { role: string; content: string; thought?: string; tool_calls?: any[]; time?: string; tool?: string; output?: any; id?: string; queue_id?: string; delivery?: string };
+type Msg = { role: string; content: string; public_status?: string; tool_calls?: any[]; time?: string; tool?: string; output?: any; id?: string; queue_id?: string; delivery?: string };
 
-function parseLiveLogTail(tail: string): { msgs: Msg[]; tools: any[] } {
+export function parseLiveLogTail(tail: string): { msgs: Msg[]; tools: any[] } {
   const msgs: Msg[] = [];
   const tools: any[] = [];
   const lines = tail.split("\n");
   let buf = "";
   let inAnswer = false;
+  let streamedSubagent: { id: string; text: string } | null = null;
+  const seenProgress = new Set<string>();
+
+  const finishSubagentAnswer = () => {
+    if (!streamedSubagent) return;
+    const content = safeActivityText(streamedSubagent.text.trim());
+    if (content) {
+      msgs.push({
+        role: "assistant", content,
+        public_status: `Sub-agent ${streamedSubagent.id} · public result`,
+        time: new Date().toISOString(),
+      });
+    }
+    streamedSubagent = null;
+  };
+
   for (const ln of lines) {
-    // thinking box: look for boxed thinking already handled in RawLogBlock, but also capture for msg
-    if (ln.includes("answer") && ln.includes("▸")) {
+    // GitHub Actions preserves ANSI escapes. Strip them before parsing the live
+    // markers; only public helper output is present in the colored sub-agent stream.
+    const plain = ln.replace(/\x1b\[[0-9;]*m/g, "");
+    const answerMarker = plain.indexOf("[subagent answer]");
+    const headerText = answerMarker >= 0 ? plain.slice(answerMarker) : "";
+    const subagentHeader = headerText.match(/^\[subagent answer\]\s+([^·]+?)\s*·\s*public result \(streaming\):\s*$/i);
+    if (subagentHeader) {
+      finishSubagentAnswer();
+      streamedSubagent = { id: safeActivityText(subagentHeader[1].trim()), text: "" };
+      continue;
+    }
+    if (streamedSubagent && (["[subagent progress]", "[subagent tool]", "[subagent answer]"]
+        .some((marker) => plain.includes(marker)))) {
+      finishSubagentAnswer();
+    }
+    if (streamedSubagent) {
+      const answerLine = plain.replace(/^\d{4}-\d\d-\d\dT[^\s]+\s+/, "");
+      streamedSubagent.text += (streamedSubagent.text ? "\n" : "") + answerLine;
+    }
+
+    let publicStatus = "";
+    const subagentProgressIndex = plain.indexOf("[subagent progress]");
+    const agentProgressIndex = plain.indexOf("[agent progress]");
+    const publicStatusIndex = plain.indexOf("public status ▸");
+    const publicRationaleIndex = plain.indexOf("public rationale ▸");
+    const safeModelProgress = plain.match(/\[[^\]]+\]\s+(reasoning is active; private model thoughts are hidden\.|preparing the structured result; raw JSON is hidden\.)/i);
+    const quietModelProgress = plain.match(/\[([^\]]+)\]\s+((?:already in memory, no reload|still loading the model into memory|no first token yet|still working)[^\n]*?)(?:\s+\(quiet note (\d+\/\d+)\))?\s*$/i);
+    if (subagentProgressIndex >= 0) {
+      const separator = plain.indexOf("·", subagentProgressIndex);
+      if (separator >= 0) publicStatus = plain.slice(separator + 1).trim();
+    } else if (agentProgressIndex >= 0) {
+      publicStatus = plain.slice(agentProgressIndex + "[agent progress]".length).trim();
+    } else if (publicStatusIndex >= 0 || publicRationaleIndex >= 0) {
+      const markerIndex = Math.max(publicStatusIndex, publicRationaleIndex);
+      const separator = plain.indexOf("▸", markerIndex);
+      if (separator >= 0) publicStatus = plain.slice(separator + 1).trim();
+    } else if (safeModelProgress) {
+      publicStatus = safeModelProgress[1].startsWith("reasoning is active")
+        ? "Selected model is processing the plan; private reasoning is hidden."
+        : "Selected model is preparing its structured plan; raw JSON stays hidden until validation.";
+    } else if (quietModelProgress) {
+      const label = safeActivityText(quietModelProgress[1]);
+      const detail = safeActivityText(quietModelProgress[2]);
+      const note = quietModelProgress[3] ? ` · update ${quietModelProgress[3]}` : "";
+      publicStatus = `${label}: ${detail}${note}`;
+    }
+    publicStatus = safePublicStatus(publicStatus);
+    if (publicStatus && !seenProgress.has(publicStatus)) {
+      seenProgress.add(publicStatus);
+      msgs.push({ role: "assistant", content: "", public_status: publicStatus, time: new Date().toISOString() });
+    }
+
+    const subagentToolIndex = plain.indexOf("[subagent tool]");
+    if (subagentToolIndex >= 0) {
+      const summary = safeActivityText(plain.slice(subagentToolIndex + "[subagent tool]".length).trim());
+      const detail = summary.match(/(?:^|·)\s*([a-z0-9_-]+)\s+(started|succeeded|finished|failed)\b(.*)$/i);
+      const actualTool = detail?.[1] || "sub-agent";
+      const phase = detail?.[2]?.toLowerCase() || "started";
+      const ok = /^(?:succeeded|finished)$/.test(phase) ? true
+        : phase === "failed" ? false : undefined;
+      tools.push({ tool: actualTool, source: "subagent", input: {},
+        output: { summary, ...(ok === undefined ? {} : { ok }) } });
+    }
+
+    const toolEvent = plain.match(/\[tool ([^\]]+)\]\s+(started|succeeded|finished|failed)(?:\s*[·-]\s*(.*))?/i);
+    if (toolEvent) {
+      const phase = toolEvent[2].toLowerCase();
+      const ok = /^(?:succeeded|finished)$/.test(phase) ? true
+        : phase === "failed" ? false : undefined;
+      const detail = safeActivityText(toolEvent[3]?.trim() || "");
+      const eventId = detail.match(/(?:^|[·\s])event=([a-z0-9_-]+)/i)?.[1];
+      const visibleDetail = detail.replace(/(?:^|\s*·\s*)event=[a-z0-9_-]+/ig, "").trim();
+      tools.push({ tool: toolEvent[1].trim(), source: "agent", event_id: eventId,
+        status: phase, input: {},
+        output: { summary: `${phase}${visibleDetail ? ` · ${visibleDetail}` : ""}`,
+          ...(ok === undefined ? {} : { ok }) } });
+    }
+
+    // Legacy local-model result lines contain JSON, but private fields are ignored.
+    if (plain.includes("answer") && plain.includes("▸")) {
       inAnswer = true;
-      buf = ln.slice(ln.indexOf("{"));
+      buf = plain.slice(plain.indexOf("{"));
       try {
         const obj = JSON.parse(buf);
         if (obj.answer || obj.tool_calls) {
@@ -25,7 +119,7 @@ function parseLiveLogTail(tail: string): { msgs: Msg[]; tools: any[] } {
         }
       } catch {}
     } else if (inAnswer) {
-      buf += "\n" + ln;
+      buf += "\n" + plain;
       try {
         const obj = JSON.parse(buf);
         msgs.push({ role: "assistant", content: String(obj.answer || ""), tool_calls: obj.tool_calls || [], time: new Date().toISOString() });
@@ -35,27 +129,52 @@ function parseLiveLogTail(tail: string): { msgs: Msg[]; tools: any[] } {
         if (buf.length > 9000) inAnswer = false;
       }
     }
-    if (ln.includes("Prompt:")) {
-      const p = ln.split("Prompt:").slice(1).join("Prompt:").trim().slice(0, 500);
+    if (plain.includes("Prompt:")) {
+      const p = plain.split("Prompt:").slice(1).join("Prompt:").trim().slice(0, 500);
       if (p) msgs.push({ role: "user", content: p, time: new Date().toISOString() });
     }
-    // tool lines: [tool xxx] -> {ok:...}
-    if (ln.includes("[tool ") && ln.includes("->")) {
-      try {
-        const m = ln.match(/\[tool ([^\]]+)\].*->\s*(\{.*\})/);
-        if (m) {
-          const tool = m[1].trim();
-          const out = JSON.parse(m[2]);
-          tools.push({ tool, output: out, input: {} });
-        }
-      } catch {}
-    }
-    if (ln.includes("[gemini sub-agent]") || ln.includes("Subagent")) {
-      // capture subagent as tool too
-    }
   }
+  finishSubagentAnswer();
   return { msgs, tools };
 }
+
+function mergeLiveMessages(persisted: Msg[], live: Msg[]): Msg[] {
+  const keyOf = (message: Msg) => JSON.stringify([
+    message.role, message.content, message.public_status || "", message.tool_calls || [],
+  ]);
+  const persistedKeys = new Set(persisted.map(keyOf));
+  const liveKeys = new Set<string>();
+  return [...persisted, ...live.filter((message) => {
+    const key = keyOf(message);
+    if (persistedKeys.has(key) || liveKeys.has(key)) return false;
+    liveKeys.add(key);
+    return true;
+  })];
+}
+
+export function mergeLiveTools(persisted: any[], live: any[]): any[] {
+  const persistedEventIds = new Set(persisted.map((item) => item?.event_id).filter(Boolean));
+  return [...persisted, ...live.filter((item) => !item?.event_id || !persistedEventIds.has(item.event_id))];
+}
+
+function safeActivityText(value: unknown): string {
+  return String(value ?? "")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]{12,}=?/gi, "Bearer [REDACTED]")
+    .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z_-]{30,}|sk-[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16})\b/g, "[REDACTED]")
+    .replace(/(\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\b["']?\s*[:=]\s*["']?)[^\s,}"']+/gi, "$1[REDACTED]");
+}
+
+function safePublicStatus(value: unknown): string {
+  const status = safeActivityText(value).replace(/\s+/g, " ").trim();
+  const lowered = status.toLowerCase();
+  const privateMarkers = ["chain of thought", "chain-of-thought", "private reasoning",
+    "hidden reasoning", "internal monologue", "scratchpad", "let me think step by step",
+    "here is my reasoning", "here's my reasoning", "my thought process"];
+  if (!status || status.length > 320 || /^(?:\{|\[)/.test(status)
+      || privateMarkers.some((marker) => lowered.includes(marker))) return "";
+  return status;
+}
+
 
 export function ChatWindow({ runId, notice = "" }: { runId: number | null; notice?: string }) {
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -249,15 +368,14 @@ export function ChatWindow({ runId, notice = "" }: { runId: number | null; notic
             <svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M7 7H15M7 11H15M7 15H12" stroke="#a1a1aa" strokeWidth="1.4" strokeLinecap="round"/><rect x="3.5" y="2.5" width="15" height="17" rx="2" stroke="#27272a" strokeWidth="1.2"/></svg>
           </div>
           <h2 className="mt-4 text-[15px] font-semibold tracking-tight">Select a workflow</h2>
-          <p className="mt-1.5 text-sm leading-relaxed text-zinc-500">Choose a run from the sidebar or create a new one. Live thinking, tool calls, and files stream here in real time via direct GitHub API — no tunnel needed.</p>
+          <p className="mt-1.5 text-sm leading-relaxed text-zinc-500">Choose a run from the sidebar or create a new one. Safe public progress, tool calls, sub-agent answers, and files stream here in real time via direct GitHub API — private chain-of-thought is never exposed.</p>
         </div>
       </div>
     );
   }
 
-  const displayMessages = messages.length ? messages : liveMsgs;
-  const displayTools = tools.length ? tools : liveTools;
-  const showLiveLog = liveLog && messages.length === 0;
+  const displayMessages = mergeLiveMessages(messages, liveMsgs);
+  const displayTools = mergeLiveTools(tools, liveTools);
 
   return (
     <div className="flex-1 flex flex-col min-h-0 bg-[#09090b]">
@@ -274,7 +392,7 @@ export function ChatWindow({ runId, notice = "" }: { runId: number | null; notic
             </span>
           </div>
           <div className="text-[11px] text-zinc-600">
-            {liveLog ? `${(liveLog.length/1024).toFixed(1)} KB live log · ${displayTools.length} tools · ${displayMessages.length} messages — direct GitHub API` : `Artifact polling · ${displayTools.length} tools · ${displayMessages.length} messages`}
+            {liveLog ? `Live public activity · ${displayTools.length} tools · ${displayMessages.length} messages — direct GitHub API` : `Artifact polling · ${displayTools.length} tools · ${displayMessages.length} messages`}
           </div>
         </div>
         <a href={`https://github.com/Nishgamerrz/Ai-rant/actions/runs/${runId}`} target="_blank" className="h-8 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-xs font-medium text-zinc-300 hover:text-white transition-colors hidden sm:flex items-center gap-1.5">
@@ -318,6 +436,7 @@ export function ChatWindow({ runId, notice = "" }: { runId: number | null; notic
                   {out.content && <pre className="mt-2 rounded-lg bg-zinc-950 border border-zinc-800 p-2 text-xs font-mono leading-relaxed text-zinc-300 whitespace-pre-wrap break-words max-h-[120px] overflow-auto">{String(out.content).slice(0, 2000)}</pre>}
                   {out.error && <div className="mt-2 rounded-lg bg-red-950/20 border border-red-900/30 p-2 text-xs font-mono text-red-300 whitespace-pre-wrap break-words">{String(out.error).slice(0, 800)}</div>}
                   {out.text && !out.output && <pre className="mt-2 rounded-lg bg-violet-950/10 border border-violet-900/20 p-2 text-xs font-mono leading-relaxed text-violet-200 whitespace-pre-wrap break-words max-h-[120px] overflow-auto">{String(out.text).slice(0, 2000)}</pre>}
+                  {out.summary && <div className="mt-2 text-xs text-violet-200">{String(out.summary).slice(0, 320)}</div>}
                   {out.path && <div className="mt-1 text-[11px] text-emerald-400">→ {out.path} {out.bytes ? `(${out.bytes} bytes)` : ""}</div>}
                   {out.files && Array.isArray(out.files) && <div className="mt-1 text-[11px] text-zinc-500">files: {(out.files as string[]).slice(0,6).join(", ")}</div>}
                 </div>
@@ -330,28 +449,17 @@ export function ChatWindow({ runId, notice = "" }: { runId: number | null; notic
       {/* Messages + Live log — single persistent plan box */}
       <div ref={scrollerRef} className="flex-1 overflow-auto">
         <div className="max-w-3xl mx-auto w-full p-4 sm:p-6 space-y-4">
-          {showLiveLog && (
-            <div className="rounded-2xl border border-zinc-800 bg-zinc-900 overflow-hidden">
-              <div className="h-8 px-3 flex items-center gap-2 border-b border-zinc-800 bg-zinc-900">
-                <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
-                <span className="text-xs font-semibold tracking-wide text-zinc-300">Live — persistent plan · thinking & tools (direct API)</span>
-                <span className="ml-auto text-[11px] text-zinc-600">streams until workflow dies</span>
-              </div>
-              <pre className="p-3 text-xs font-mono leading-relaxed whitespace-pre-wrap break-words max-h-[520px] overflow-auto text-zinc-300">
-                {liveLog.slice(-9000)}
-              </pre>
-              <div className="px-3 py-2 border-t border-zinc-800 bg-zinc-950 text-[11px] text-zinc-500">This is the single persistent plan box — it stays alive until the workflow timeout, showing every thought, tool, and file via direct GitHub API polling. No Cloudflare tunnel.</div>
-            </div>
-          )}
-          {displayMessages.length === 0 && !liveLog && (
+          {displayMessages.length === 0 && displayTools.length === 0 && (
             <div className="rounded-2xl border border-dashed border-zinc-800 bg-zinc-900/20 p-6 text-center">
               <div className="text-sm font-medium text-zinc-300">Waiting for agent</div>
-              <div className="text-xs text-zinc-600 mt-1 leading-relaxed">The workflow is starting (model loading can take 60–90s). Thinking, tool calls, and files stream here live via direct API — the last plan stays active until the run finishes.</div>
+              <div className="text-xs text-zinc-600 mt-1 leading-relaxed">The persistent plan stays active until the workflow ends. Safe progress, public answers, and tool activity will appear here as soon as the direct GitHub API returns them; private chain-of-thought and raw runner logs are never displayed.</div>
             </div>
           )}
           {displayMessages.map((m, i) => {
             const isUser = m.role === "user";
             const isTool = m.role === "tool";
+            const isSubagent = !isUser && Boolean(m.public_status?.startsWith("Sub-agent ")
+              && m.public_status.includes("public result"));
             if (isTool) {
               const out = typeof m.output === "string" ? m.output : JSON.stringify(m.output, null, 2);
               return (
@@ -374,14 +482,14 @@ export function ChatWindow({ runId, notice = "" }: { runId: number | null; notic
                     <span className="text-[11px] font-bold tracking-wide text-zinc-400">AI</span>
                   </div>
                 )}
-                <div className={`max-w-[82%] rounded-2xl px-4 py-3 ${isUser ? "bg-white text-zinc-900 shadow-soft" : "bg-zinc-900 border border-zinc-800 text-zinc-100 shadow-soft"}`}>
-                  {m.thought && !isUser && (
-                    <details className="mb-2.5 group">
-                      <summary className="list-none flex items-center gap-1.5 text-[11px] font-semibold tracking-wide text-zinc-500 hover:text-zinc-400 cursor-pointer select-none">
+                <div className={`max-w-[82%] rounded-2xl px-4 py-3 ${isUser ? "bg-white text-zinc-900 shadow-soft" : isSubagent ? "bg-violet-950/20 border border-violet-900/40 text-violet-100 shadow-soft" : "bg-zinc-900 border border-zinc-800 text-zinc-100 shadow-soft"}`}>
+                  {m.public_status && !isUser && (
+                    <details className="mb-2.5 group" open>
+                      <summary className="list-none flex items-center gap-1.5 text-[11px] font-semibold tracking-wide text-sky-400 hover:text-sky-300 cursor-pointer select-none">
                         <svg width="10" height="10" viewBox="0 0 10 10" fill="none" className="group-open:rotate-90 transition-transform"><path d="M3 2L7 5L3 8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                        Reasoning
+                        Public progress
                       </summary>
-                      <div className="mt-2 rounded-xl bg-zinc-800/50 border border-zinc-800 p-3 text-xs font-mono leading-relaxed text-zinc-400 whitespace-pre-wrap break-words">{String(m.thought).slice(0, 2000)}</div>
+                      <div className="mt-2 rounded-xl bg-sky-950/20 border border-sky-900/30 p-3 text-xs font-mono leading-relaxed text-sky-200 whitespace-pre-wrap break-words">{String(m.public_status).slice(0, 320)}</div>
                     </details>
                   )}
                   <div className="text-sm leading-relaxed whitespace-pre-wrap break-words">{m.content}</div>
@@ -401,14 +509,6 @@ export function ChatWindow({ runId, notice = "" }: { runId: number | null; notic
               </div>
             );
           })}
-          {!showLiveLog && liveLog && messages.length > 0 && (
-            <details className="rounded-2xl border border-zinc-800 bg-zinc-900 overflow-hidden">
-              <summary className="h-8 px-3 flex items-center gap-2 text-xs font-medium text-zinc-400 cursor-pointer select-none hover:text-zinc-300">
-                <span className="h-1.5 w-1.5 rounded-full bg-zinc-600" /> Live log tail ({(liveLog.length/1024).toFixed(1)} KB) — persistent plan still streaming
-              </summary>
-              <pre className="p-3 text-xs font-mono leading-relaxed whitespace-pre-wrap break-words max-h-[300px] overflow-auto text-zinc-500 border-t border-zinc-800">{liveLog.slice(-6000)}</pre>
-            </details>
-          )}
           {err && <div className="rounded-2xl border border-amber-900/50 bg-amber-950/20 p-3.5 text-sm leading-relaxed text-amber-200">{err}</div>}
         </div>
       </div>

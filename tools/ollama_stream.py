@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Stream Ollama thinking and answers in color, and save structured activity.
+"""Show safe Ollama progress and validated public results in color.
 
-The workflow used to post a blocking request, so the Actions console sat silent
-for minutes while the model worked. This wrapper streams the model's thinking
-in a framed pane and its answer in a separate color, then writes the aggregated
-response plus structured activity artifacts.
+The model's private reasoning channel is used internally for retries and loop
+detection, but is never echoed to the console or stored in user-facing activity.
+Structured responses are parsed and only explicitly public fields are displayed;
+the complete response remains in the private workflow file for downstream steps.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from console_style import RESET, ansi, paint  # noqa: E402
-from ai_activity import append_activity  # noqa: E402
+from ai_activity import append_activity, redact_secrets  # noqa: E402
 
 DEFAULT_URL = "http://127.0.0.1:11434/api/chat"
 
@@ -40,9 +40,60 @@ def looks_stuck(text: str) -> bool:
     return bool(LOOP_RE.search(tail))
 
 
+_PUBLIC_FIELDS = (
+    ("public_status", "public status", "plan", 320),
+    ("public_rationale", "public rationale", "plan", 320),
+    ("design_brief", "design brief", "plan", 700),
+    ("note", "review note", "plan", 320),
+    ("narration", "narration", "answer", 12000),
+    ("summary", "summary", "answer", 4000),
+    ("answer", "answer", "answer", 4000),
+)
+_PRIVATE_REASONING_MARKERS = (
+    "chain of thought", "chain-of-thought", "private reasoning", "internal monologue",
+    "let me think step by step", "here is my reasoning", "my hidden reasoning",
+)
+
+
+def _public_text(value, limit: int) -> str:
+    """Normalize one explicitly public answer field and redact any credentials."""
+    text = " ".join(str(value or "").split()).strip()
+    lowered = text.casefold()
+    if (not text or text.startswith(("{", "["))
+            or any(marker in lowered for marker in _PRIVATE_REASONING_MARKERS)):
+        return ""
+    text = redact_secrets(text)
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
+def public_output_parts(response: str) -> list[tuple[str, str, str]]:
+    """Extract only allowlisted user-facing fields; never display a JSON wrapper."""
+    raw = str(response or "").strip()
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        # A malformed JSON-looking answer is still not safe to print as prose.
+        if raw.startswith(("{", "[")):
+            return []
+        text = _public_text(raw, 4000)
+        return [("answer", "answer", text)] if text else []
+    if not isinstance(value, dict):
+        return []
+
+    parts = []
+    for key, label, color, limit in _PUBLIC_FIELDS:
+        text = _public_text(value.get(key), limit)
+        if text:
+            parts.append((label, color, text))
+    return parts
+
+
 CONSOLE_LOCK = threading.Lock()
 
-# A framed thinking pane keeps streamed reasoning visually separate from the answer.
+# A frame can distinguish a short public rationale from the final answer; the
+# private model-thinking channel is never sent to this console.
 BOX_WIDTH = 66
 BOX_LEFT = "\u2502 "
 BOX_TOP = "\u250c\u2500 "
@@ -55,16 +106,14 @@ HEARTBEAT_NOTES = 3
 
 
 class TypedConsole:
-    """Write the live model output one character at a time, in colour.
+    """Write validated public text in colour with bounded optional pacing.
 
-    The stream used to print whatever chunk Ollama happened to send. A chunk can
-    be hundreds of characters, so the console showed text in bursts of whole words
-    or whole paragraphs and looked like it "snapped" instead of typing. Writing
-    character by character, each flush acting as a single write, makes the log
-    build up letter by letter exactly as the model produces it.
+    Raw provider chunks are buffered until structured output can be parsed. Only
+    validated public text is handed to this console, so neither JSON wrappers nor
+    the private reasoning channel can leak through the streaming UI.
 
-    The thinking pane and answer use different colours (grey vs bright cyan),
-    so both channels are visible at a glance without mixing them together.
+    Public rationale/progress and final answers use distinct colours so the safe
+    summary is visible without exposing internal deliberation.
 
     Pacing is bounded by a per-call budget: after that many seconds the remaining
     characters are written at full speed, so watching the AI type can never delay
@@ -344,10 +393,9 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
     prompt_tokens = 0
     prompt_ns = 0
     done_reason = ""
-    # Live console: every streamed piece is printed verbatim the moment it
-    # arrives, so the log fills in letter by letter. The old code reprinted a
-    # truncated "thinking... 2,117 chars, 333s - ...tail" line every two seconds,
-    # which looked like the text was being replaced instead of streamed.
+    # Private reasoning and structured provider JSON are never echoed live.
+    # Emit a safe progress note for each channel, then show only allowlisted,
+    # validated public fields after the complete response has been parsed.
     thinking_open = False
     answer_open = False
     repeated = False
@@ -371,10 +419,11 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
         progress_chars[channel] = len(accumulated)
         last_activity_channel = channel
         last_activity_emit = now
-        preview = " ".join(accumulated.split())[-200:]
-        # Keep structured progress in the uploaded activity artifact. The live
-        # thinking/answer text is already streamed below; do not inject JSON logs
-        # into the Actions console or the user's readable model output.
+        preview = ("Private reasoning is hidden; phase progress only."
+                   if channel == "thinking" else
+                   "Structured response is being prepared; fields are not shown until validation.")
+        # Keep useful, structured progress without persisting private reasoning
+        # or an unvalidated JSON fragment into the user-visible activity feed.
         append_activity({
             "type": "model_progress", "stage": "ollama",
             "activity_id": activity_id, "tag": f"[{label} AI]", "label": label,
@@ -456,15 +505,15 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
         if beat:
             beat.stop()
         if exc.code == 400 and "think" in detail.lower():
-            raise ThinkingUnsupported(detail.strip()[:300]) from exc
+            raise ThinkingUnsupported("selected model does not support the requested thinking mode") from exc
         if exc.code == 404:
             # Ollama answers 404 for a selected model it does not have ("model
             # 'qwen3:4b' not found"). Convert it to a clear selected-model failure.
-            raise ModelMissing(f"HTTP 404: {detail.strip()[:300]}") from exc
+            raise ModelMissing("selected model is not installed on the runner") from exc
         if exc.code >= 500:
             # For example llama3.2-vision: Ollama exits with
             # "unknown model architecture: 'mllama'" and returns HTTP 500.
-            raise ModelUnusable(f"HTTP {exc.code}: {detail.strip()[:300]}") from exc
+            raise ModelUnusable(f"HTTP {exc.code}: selected model architecture could not run on this runner") from exc
         raise
     except (TimeoutError, urllib.error.URLError, OSError) as exc:
         try:
@@ -500,23 +549,17 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
             if piece_thinking:
                 thinking.append(piece_thinking)
                 emit_activity_progress("thinking")
-                if not quiet:
-                    if not thinking_open:
-                        if beat:
-                            beat.touch()
-                        console.use("thinking")
-                        console.open_box(f"[{label}] thinking")
-                        thinking_open = True
-                    console.write(piece_thinking)
+                if not quiet and not thinking_open:
+                    console.line(f"[{label}] reasoning is active; private model thoughts are hidden.",
+                                 kind="thinking")
+                    thinking_open = True
             if piece_content:
                 content.append(piece_content)
                 emit_activity_progress("answer")
-                if not quiet:
-                    if not answer_open:
-                        console.use("answer")   # leaving the reasoning colour closes the box
-                        console.write(f"[{label}] answer \u25b8 ")
-                        answer_open = True
-                    console.write(piece_content)
+                if not quiet and not answer_open:
+                    console.line(f"[{label}] preparing the structured result; raw JSON is hidden.",
+                                 kind="notice")
+                    answer_open = True
             # Watch the reasoning channel while it streams: that is where a local
             # model loops ("let me count again", "another attempt:"). The answer is
             # only checked at the end, so a legitimate list of similar JSON objects
@@ -547,7 +590,11 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
     if content:
         emit_activity_progress("answer", force=True)
     answer = "".join(content)
-    reasoning = "".join(thinking)
+    public_parts = public_output_parts(answer)
+    public_output = [{"label": title, "kind": color, "text": text}
+                     for title, color, text in public_parts]
+    public_rationale = next((part[2] for part in public_parts
+                             if part[0] == "public rationale"), "")
     if not repeated and done_reason == "length" and looks_stuck(answer):
         repeated = True
         if not quiet:
@@ -562,20 +609,26 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
     first_char_seconds = round((first_output - started_at), 1) if first_output else None
     if not quiet:
         console.close_box()
+        if public_parts:
+            for title, color, text in public_parts:
+                console.line(f"[{label}] {title} \u25b8 {text}", kind=color)
+        else:
+            console.line(f"[{label}] response received; structured fields used by the workflow are hidden.",
+                         kind="notice")
         rate = f", {tokens / elapsed:.1f} tok/s" if elapsed >= 1 and tokens else ""
         prefill = (f", it read {prompt_tokens:,} prompt tokens in "
                    f"{prompt_ns / 1e9:.0f}s first" if prompt_tokens and prompt_ns else "")
         if first_char_seconds is not None:
             if first_char_seconds >= 15 and not resident:
-                console.line(f"[{label}] the first word took {first_char_seconds:.0f}s: the "
+                console.line(f"[{label}] the first model token took {first_char_seconds:.0f}s: the "
                              f"weights were NOT in memory, so this call loaded "
                              f"{model_name} first{prefill}.", kind="warning")
             elif first_char_seconds >= 15:
-                console.line(f"[{label}] first word after {first_char_seconds:.0f}s - no "
+                console.line(f"[{label}] first model token after {first_char_seconds:.0f}s - no "
                              f"reload: {model_name} was already in memory, that was prompt "
                              f"reading{prefill}.", kind="success")
             else:
-                console.line(f"[{label}] first word after {first_char_seconds:.0f}s "
+                console.line(f"[{label}] first model token after {first_char_seconds:.0f}s "
                              f"(no reload: the weights were already in memory){prefill}.",
                              kind="success")
         console.line(f"[{label}] \u2713 done in {elapsed:.0f}s: {len(answer):,} answer chars, "
@@ -584,9 +637,11 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                      kind="error" if done_reason == "length" else "success")
     return {
         "activity_id": activity_id,
-        "message": {"role": "assistant", "content": answer, "thinking": reasoning},
+        "message": {"role": "assistant", "content": answer, "thinking": ""},
         "response": answer,
-        "thinking": reasoning,
+        "thinking": "",
+        "public_rationale": public_rationale,
+        "public_output": public_output,
         "prompt_eval_count": prompt_tokens,
         "prompt_eval_seconds": round(prompt_ns / 1e9, 1) if prompt_ns else None,
         "model_was_resident": resident,
@@ -642,13 +697,14 @@ def main() -> None:
     thinking_on = bool(request.get("think"))
     print(paint(f"[{args.label}] sending {model} request "
                 f"(temperature {request.get('options', {}).get('temperature', 'default')}, "
-                f"thinking {'on' if thinking_on else 'off'}); live thinking and answer are color-coded.",
+                f"thinking {'on' if thinking_on else 'off'}); private reasoning stays hidden.",
                 "label"), flush=True)
     quiet_note = ("" if args.heartbeat_seconds <= 0 else
                   f" If it goes quiet you get at most {HEARTBEAT_NOTES} short notes, "
                   f"{int(args.heartbeat_seconds)}s apart; no repeated chatter.")
-    print(paint(f"[{args.label}] \u25b8 streaming live: thinking appears in the framed gray pane; "
-                f"the answer appears in cyan as it arrives.{quiet_note}", "notice"), flush=True)
+    print(paint(f"[{args.label}] \u25b8 streaming safe progress; private reasoning and raw JSON are hidden. "
+                f"Validated public rationale and result fields appear when ready.{quiet_note}",
+                "notice"), flush=True)
 
     deadline = time.monotonic() + args.max_seconds if args.max_seconds > 0 else None
     limits = {"stall_seconds": args.stall_seconds,
@@ -790,19 +846,24 @@ def main() -> None:
         raise SystemExit(1)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     result["model"] = model
+    safe_output = "\n".join(
+        f"{item['label']}: {item['text']}" for item in result.get("public_output", [])
+        if item.get("text"))
     append_activity({
         "type": "model_response", "stage": "ollama",
         "activity_id": result.get("activity_id"), "tag": f"[{args.label} AI]",
         "label": args.label, "provider": "ollama", "model": result.get("model"),
         "status": "complete", "seconds": result.get("elapsed_seconds"),
         "prompt_messages": request.get("messages", []),
-        "thinking": result.get("thinking", ""),
-        "output": result.get("response", ""),
+        "public_rationale": result.get("public_rationale", ""),
+        "output": safe_output,
+        "response_characters": len(result.get("response", "")),
     }, path=Path("dist/ai_activity.jsonl"), emit=False)
     args.output.write_text(json.dumps(result, ensure_ascii=False) + "\n", encoding="utf-8")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     first_word = result.get("first_char_seconds")
-    first_word_text = (f"first word after {first_word:.0f}s" if first_word is not None else "no timing")
+    first_word_text = (f"first model token after {first_word:.0f}s"
+                       if first_word is not None else "no timing")
     if summary:
         with Path(summary).open("a", encoding="utf-8") as out:
             out.write(f"- **{args.label}:** {result['eval_count']} tokens in {result['elapsed_seconds']}s "

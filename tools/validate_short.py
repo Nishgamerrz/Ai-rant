@@ -98,6 +98,10 @@ def main() -> None:
     parser.add_argument("--map-plan", type=Path)
     parser.add_argument("--duration", required=True, type=duration_arg,
                         help="exact expected length, e.g. 144 or 2:24")
+    parser.add_argument("--min-words", type=int,
+                        help="override the default minimum narration length")
+    parser.add_argument("--max-words", type=int,
+                        help="override the default maximum narration length")
     args = parser.parse_args()
 
     for label, path in (("final MP4", args.video), ("silent render", args.silent_video),
@@ -168,8 +172,10 @@ def main() -> None:
 
     narration = args.narration.read_text(encoding="utf-8").strip()
     word_count = len(WORD_RE.findall(narration))
-    min_words = max(1, int(args.duration * 1.4))
-    max_words = int(args.duration * 1.8)
+    min_words = args.min_words if args.min_words is not None else max(1, int(args.duration * 1.4))
+    max_words = args.max_words if args.max_words is not None else int(args.duration * 1.8)
+    if min_words < 1 or max_words < 1 or min_words > max_words:
+        fail("narration word-count limits must be positive and the minimum cannot exceed the maximum")
     if not min_words <= word_count <= max_words:
         fail(f"narration has {word_count} words; target for {args.duration}s is {min_words}–{max_words}")
     if META_RE.search(narration):

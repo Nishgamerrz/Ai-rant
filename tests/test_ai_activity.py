@@ -17,27 +17,33 @@ from ai_activity import (SecretStreamRedactor, append_activity, parse_live_recor
 
 
 class ActivityLogTests(unittest.TestCase):
-    def test_artifact_keeps_complete_text_while_live_record_is_compact(self):
+    def test_artifact_keeps_public_text_but_strips_private_reasoning_everywhere(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
                 os.environ, {"BAZAAR_LINK_API": "bazaar-secret-value"}):
             path = Path(tmp) / "dist" / "ai_activity.jsonl"
             output = "A complete generated answer that should be preserved. " * 30
-            thinking = "The complete model-authored thinking belongs in the artifact."
+            private = "This private chain-of-thought must never be stored."
             prompt_messages = [{"role": "user", "content": "Full request content."}]
             with patch("sys.stdout") as stdout:
                 append_activity({"type": "model_response", "stage": "ollama",
                                  "provider": "ollama", "output": output,
-                                 "thinking": thinking, "prompt_messages": prompt_messages},
-                                path=path)
+                                 "thinking": private, "reasoning_content": private,
+                                 "thought": private,
+                                 "nested": {"chain_of_thought": private, "private_thoughts": private},
+                                 "prompt_messages": prompt_messages}, path=path)
             row = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(row["output"], output)
-            self.assertEqual(row["thinking"], thinking)
             self.assertEqual(row["prompt_messages"], prompt_messages)
+            self.assertNotIn("thinking", row)
+            self.assertNotIn("reasoning_content", row)
+            self.assertNotIn("thought", row)
+            self.assertNotIn("chain_of_thought", row["nested"])
+            self.assertNotIn("private_thoughts", row["nested"])
             live = stdout.write.call_args_list
             live_text = "".join(str(call.args[0]) for call in live)
             self.assertIn("[ai-log]", live_text)
             self.assertNotIn(output, live_text)
-            self.assertNotIn(thinking, live_text)
+            self.assertNotIn(private, live_text)
             self.assertNotIn("Full request content", live_text)
 
     def test_live_progress_can_stream_without_repeating_large_artifact_text(self):
@@ -116,6 +122,13 @@ class ActivityLogTests(unittest.TestCase):
         self.assertIn("name: Roblox-Story-Short-AI-Activity", block)
         self.assertIn("dist/ai_activity.jsonl", block)
         self.assertIn("story_subagent_results.json", block)
+
+    def test_activity_timeline_labels_the_safe_rationale_and_final_narration(self):
+        component = (ROOT / "web" / "components" / "AiActivityTimeline.tsx").read_text(encoding="utf-8")
+        self.assertIn("Public rationale", component)
+        self.assertIn("Narration source ·", component)
+        self.assertIn("Final narration used downstream", component)
+        self.assertNotIn("Model-authored thinking", component)
 
     def test_live_records_are_parsed_and_non_ai_lines_are_ignored(self):
         line = '[ai-log] {"type":"provider_attempt","provider":"bazaarlink","status":"fallback"}'

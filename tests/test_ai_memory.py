@@ -80,6 +80,12 @@ class MemoryTests(unittest.TestCase):
         self.assertIn("Max waits for Ben to fall asleep.", text)
         self.assertIn("Naptime Heights", text)
         self.assertIn("The text sub-agent creates the map", text)
+        self.assertIn("Never reveal private chain-of-thought", text)
+        self.assertIn("audience-facing rationale summary", text)
+        self.assertIn("author one", text)
+        self.assertIn("narration-edit sub-agent task", text)
+        self.assertIn("then use its", text)
+        self.assertIn("complete proofread as the final narration", text)
         self.assertIn("never write the world blueprint locally", text)
 
     def test_it_tells_the_model_not_to_ask_for_what_it_already_knows(self):
@@ -106,10 +112,9 @@ class WorkflowMemoryTests(unittest.TestCase):
         self.text = WORKFLOW.read_text(encoding="utf-8")
 
     def test_every_local_model_request_sends_a_real_system_message(self):
-        # Story, story re-ask, narration repair, first-response orchestration, and
-        # creation summary are jq-built in the workflow. The compact acceptance
-        # review is built separately by map_orchestration.py.
-        self.assertEqual(self.text.count('role:"system"'), 5)
+        # Story, first-response orchestration, and creation summary are jq-built
+        # in the workflow. The compact acceptance review is built by its helper.
+        self.assertEqual(self.text.count('role:"system"'), 3)
         review_helper = (ROOT / "tools" / "map_orchestration.py").read_text(encoding="utf-8")
         self.assertIn('{"role": "system", "content": system}', review_helper)
 
