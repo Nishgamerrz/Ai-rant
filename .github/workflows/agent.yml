@@ -125,6 +125,16 @@ jobs:
           python --version || true
           which python && ls -la $(which python) || true
 
+      - name: Resolve the requested model preset
+        id: model-preset
+        env:
+          MODEL_QUALITY: ${{ inputs.model_quality }}
+        run: |
+          mkdir -p dist
+          python3 tools/model_presets.py "$MODEL_QUALITY" \
+            --github-output "$GITHUB_OUTPUT" \
+            --json-output dist/model_selection.json
+
       - name: Install agent dependencies
         run: |
           sudo apt-get update
@@ -136,7 +146,7 @@ jobs:
       - name: Reclaim disk for the selected model
         id: disk-space
         env:
-          MODEL_QUALITY: ${{ inputs.model_quality }}
+          MODEL_QUALITY: ${{ steps.model-preset.outputs.quality }}
         run: |
           python3 tools/say.py plan "Runner storage before cleanup:"
           df -h "$GITHUB_WORKSPACE"
@@ -154,7 +164,9 @@ jobs:
 
       - name: Download the selected AI model
         env:
-          MODEL_QUALITY: ${{ inputs.model_quality }}
+          MODEL_QUALITY: ${{ steps.model-preset.outputs.quality }}
+          MODEL_PRESET_LABEL: ${{ steps.model-preset.outputs.label }}
+          SELECTED_MODEL: ${{ steps.model-preset.outputs.selected_model }}
         run: |
           mkdir -p dist dist/agent_workspace dist/preview
           MODEL_LOG=dist/model-setup.log
@@ -178,14 +190,7 @@ jobs:
             sleep 3
           done
           curl -fsS http://127.0.0.1:11434/api/tags || { tail -n 80 ollama.log; exit 1; }
-          case "$MODEL_QUALITY" in
-            fast) SELECTED_MODEL=qwen3:4b ;;
-            medium) SELECTED_MODEL=qwen3:8b ;;
-            hard) SELECTED_MODEL=qwen3:8b ;;
-            smart_11b) SELECTED_MODEL=qwen3:14b ;;
-            animation_best) SELECTED_MODEL=deepseek-r1:8b ;;
-            *) SELECTED_MODEL=qwen3:8b ;;
-          esac
+          python3 tools/say.py success "Selected preset $MODEL_PRESET_LABEL ($MODEL_QUALITY) -> Ollama model $SELECTED_MODEL; the same model is used throughout this run."
           echo "SELECTED_MODEL=$SELECTED_MODEL" >> "$GITHUB_ENV"
           echo "AI_MODEL=$SELECTED_MODEL" >> "$GITHUB_ENV"
           case "$MODEL_QUALITY" in
@@ -194,7 +199,7 @@ jobs:
             hard) MAP_TOKENS=6500; OLLAMA_CTX=12288 ;;
             smart_11b) MAP_TOKENS=8000; OLLAMA_CTX=16384 ;;
             animation_best) MAP_TOKENS=9000; OLLAMA_CTX=16384 ;;
-            *) MAP_TOKENS=6000; OLLAMA_CTX=8192 ;;
+            *) echo "Unknown model quality: $MODEL_QUALITY" >&2; exit 1 ;;
           esac
           echo "AI_NUM_CTX=$OLLAMA_CTX" >> "$GITHUB_ENV"
           echo "OLLAMA_THINKING=true" >> "$GITHUB_ENV"
@@ -207,7 +212,8 @@ jobs:
         id: agent
         env:
           PROMPT: ${{ inputs.prompt }}
-          MODEL_QUALITY: ${{ inputs.model_quality }}
+          MODEL_QUALITY: ${{ steps.model-preset.outputs.quality }}
+          MODEL_PRESET_LABEL: ${{ steps.model-preset.outputs.label }}
           AI_MODEL: ${{ env.AI_MODEL }}
           BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}
           BAZAARLINK_API_KEY: ${{ secrets.BAZAAR_LINK_API }}
@@ -223,7 +229,7 @@ jobs:
           printf '::add-mask::%s\n' "$PROMPT"
           printf '::add-mask::%s\n' "$AGENT_CHAT_KEY"
           mkdir -p dist/agent_workspace
-          python3 tools/say.py plan "NishAgent starting — model $AI_MODEL (preset $MODEL_QUALITY)"
+          python3 tools/say.py plan "NishAgent starting — preset $MODEL_PRESET_LABEL ($MODEL_QUALITY), selected model $AI_MODEL"
           python3 tools/say.py tool "Prompt: $PROMPT"
           python3 tools/nish_agent.py --prompt "$PROMPT" --model "$MODEL_QUALITY"
           echo "--- agent workspace ---"
@@ -246,6 +252,7 @@ jobs:
           path: |
             dist/agent_chat.json
             dist/agent_tools.jsonl
+            dist/model_selection.json
             dist/agent_system.txt
             dist/agent_workspace
             dist/preview/agent_chat.json

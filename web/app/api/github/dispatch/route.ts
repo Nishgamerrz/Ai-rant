@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { AGENT_WORKFLOW, SHORT_WORKFLOW, dispatchWorkflow } from "@/lib/github";
+import { MODEL_IDS, MODEL_PRESETS, normalizeModelId } from "@/lib/modelPresets";
 import { makeChatToken, makeDispatchId } from "@/lib/agentChat";
 
 // POST { kind: "agent"|"rbx", model, prompt, story_topic, character_usernames, duration_seconds, map_detail, voice_style, world_theme }
@@ -7,6 +8,11 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const kind = (body.kind || "agent") as string;
+    const modelQuality = normalizeModelId(body.model_quality || body.model || "hard");
+    if (!modelQuality) {
+      return NextResponse.json({ error: `Unknown model preset. Choose ${MODEL_IDS.join(", ")}.` }, { status: 400 });
+    }
+    const preset = MODEL_PRESETS[modelQuality];
     if (kind === "rbx" || kind === "short" || body.story_topic) {
       // RBX short — mirrors main.yml inputs exactly
       const inputs: Record<string, string> = {
@@ -14,30 +20,37 @@ export async function POST(req: NextRequest) {
         character_usernames: String(body.character_usernames || ""),
         duration_seconds: String(body.duration_seconds || "120"),
         map_detail: String(body.map_detail || "dense"),
-        model_quality: String(body.model_quality || body.model || "hard"),
+        model_quality: modelQuality,
         voice_style: String(body.voice_style || "thin_male"),
         world_theme: String(body.world_theme || ""),
       };
       if (!inputs.story_topic) return NextResponse.json({ error: "story_topic required" }, { status: 400 });
       await dispatchWorkflow(SHORT_WORKFLOW, inputs);
-      return NextResponse.json({ ok: true, workflow: SHORT_WORKFLOW, inputs });
+      return NextResponse.json({
+        ok: true,
+        workflow: SHORT_WORKFLOW,
+        inputs,
+        model_quality: modelQuality,
+        model_label: preset.label,
+        selected_model: preset.model,
+      });
     }
     // Direct GitHub API only: the run-scoped token is masked in Actions and lets
     // the website exchange encrypted messages with this same persistent plan.
     const prompt = String(body.prompt || body.story_topic || "").trim();
     if (!prompt) return NextResponse.json({ error: "prompt required" }, { status: 400 });
     if (prompt.length > 4_000) return NextResponse.json({ error: "prompt exceeds 4000 characters" }, { status: 413 });
-    const model = String(body.model_quality || body.model || "hard");
     const chatToken = makeChatToken();
     const dispatchId = makeDispatchId();
     await dispatchWorkflow(AGENT_WORKFLOW, {
       prompt,
-      model_quality: model,
+      model_quality: modelQuality,
       agent_chat_key: chatToken,
       chat_dispatch_id: dispatchId,
     });
     return NextResponse.json({ ok: true, workflow: AGENT_WORKFLOW, prompt,
-      model_quality: model, chatToken, dispatchId });
+      model_quality: modelQuality, model_label: preset.label, selected_model: preset.model,
+      chatToken, dispatchId });
   } catch (e: any) {
     const msg = String(e?.message || e);
     if (msg.includes("409") || msg.toLowerCase().includes("already")) {

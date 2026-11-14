@@ -1,7 +1,8 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { ModelSelector } from "@/components/ModelSelector";
+import { ModelSelector, type ModelId } from "@/components/ModelSelector";
+import { MODEL_PRESETS, normalizeModelId } from "@/lib/modelPresets";
 import { LogViewer } from "@/components/LogViewer";
 import { AiActivityTimeline } from "@/components/AiActivityTimeline";
 import { FileExplorer } from "@/components/FileExplorer";
@@ -28,7 +29,7 @@ export default function RbxShortPage() {
   const [usernames, setUsernames] = useState("normal,noob");
   const [duration, setDuration] = useState("120");
   const [mapDetail, setMapDetail] = useState("dense");
-  const [model, setModel] = useState("hard");
+  const [model, setModel] = useState<ModelId>("hard");
   const [voice, setVoice] = useState("thin_male");
   const [worldTheme, setWorldTheme] = useState("");
   const [busy, setBusy] = useState(false);
@@ -134,13 +135,28 @@ export default function RbxShortPage() {
         }),
       });
       const j = await res.json();
+      const requestedPreset = MODEL_PRESETS[model];
+      let modelReport = `Requested preset ${requestedPreset.label} (${model}) → ${requestedPreset.model}`;
+      let dispatchAccepted = res.ok;
+      let modelMatches = true;
       if (!res.ok) {
-        // 409 = workflow already running / dispatch throttled — still poll for the run
+        // 409 = workflow already running / dispatch throttled — still poll for the run,
+        // but never imply that this new selection was applied to the already-queued run.
         if (res.status === 409 || String(j.error||"").includes("409") || String(j.error||"").toLowerCase().includes("already")) {
-          setMsg({ text: "Dispatch accepted (workflow already queued) — tracking latest run…", ok: true });
+          dispatchAccepted = false;
+          modelReport += "; dispatch was rate-limited, so this preset is not confirmed for the existing run";
+          setMsg({ text: `Dispatch was rate-limited — ${modelReport}. Tracking the latest run…`, ok: true });
         } else throw new Error(j.error);
       } else {
-        setMsg({ text: "Workflow dispatched. Tracking new run…", ok: true });
+        const dispatchedQuality = normalizeModelId(j.model_quality) || model;
+        const dispatchedPreset = MODEL_PRESETS[dispatchedQuality];
+        const dispatchedModel = String(j.selected_model || dispatchedPreset.model);
+        const dispatchedLabel = String(j.model_label || dispatchedPreset.label);
+        modelMatches = dispatchedQuality === model && dispatchedModel === requestedPreset.model;
+        modelReport = modelMatches
+          ? `Dispatch resolved ${dispatchedLabel} (${dispatchedQuality}) → ${dispatchedModel}`
+          : `Model selection mismatch: form requested ${requestedPreset.label} (${model}) → ${requestedPreset.model}; dispatch resolved ${dispatchedLabel} (${dispatchedQuality}) → ${dispatchedModel}`;
+        setMsg({ text: `Workflow dispatched — ${modelReport}. Tracking new run…`, ok: modelMatches });
       }
       // Poll for new run and select it
       for (let i = 0; i < 10; i++) {
@@ -152,7 +168,10 @@ export default function RbxShortPage() {
           if (newest && new Date(newest.created_at).getTime() > before - 5000) {
             setSelected(newest.id);
             setTab("execution");
-            setMsg({ text: `Run #${newest.id} started — viewing live execution.`, ok: true });
+            const runtimeHint = dispatchAccepted
+              ? " The AI Logs show the workflow's runtime-resolved model."
+              : " This run may have a different preset; its AI Logs show its own runtime-resolved model.";
+            setMsg({ text: `Run #${newest.id} started — ${modelReport}.${runtimeHint}`, ok: dispatchAccepted && modelMatches });
             break;
           }
         } catch {}

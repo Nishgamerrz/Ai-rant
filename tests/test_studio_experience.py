@@ -134,18 +134,20 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertLess(disk_cleanup_step, cache_restore_step)
         self.assertLess(cache_restore_step, model_pull_step)
         self.assertIn("id: disk-space", workflow)
-        self.assertIn("smart_11b) REQUIRED_GIB=20", workflow)
+        self.assertIn("MODEL_REQUIRED_GIB: ${{ steps.model-preset.outputs.minimum_gib }}", workflow)
         self.assertIn('if [ "$AVAILABLE_GIB" -lt "$REQUIRED_GIB" ]', workflow)
         self.assertIn("steps.disk-space.outputs.cache_restore_allowed == 'true'", workflow)
         self.assertIn("sudo rm -rf /usr/local/lib/android/sdk", workflow)
         self.assertIn("this preset needs at least ${REQUIRED_GIB} GiB", workflow)
         self.assertIn("rm -f ollama.tar.zst", workflow)
-        self.assertIn("ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'animation_best' && 'deepseek-r1-8b-v1' || inputs.model_quality == 'smart_11b' && 'qwen3-14b-v1' || inputs.model_quality == 'hard' && 'qwen3-8b-v3' || inputs.model_quality == 'medium' && 'qwen3-8b-v1' || 'qwen3-4b-v1' }}", workflow)
-        self.assertIn("fast) SELECTED_MODEL=qwen3:4b", workflow)
-        self.assertIn("medium) SELECTED_MODEL=qwen3:8b", workflow)
-        self.assertIn("hard) SELECTED_MODEL=qwen3:8b", workflow)
-        self.assertIn("smart_11b) SELECTED_MODEL=qwen3:14b", workflow)
-        self.assertIn("animation_best) SELECTED_MODEL=deepseek-r1:8b; MODEL_THINKING=true", workflow)
+        self.assertIn("python tools/model_presets.py", workflow)
+        self.assertIn("key: ollama-${{ runner.os }}-${{ steps.model-preset.outputs.quality }}-${{ steps.model-preset.outputs.cache_version }}", workflow)
+        self.assertIn("SELECTED_MODEL: ${{ steps.model-preset.outputs.selected_model }}", workflow)
+        self.assertIn("MODEL_TIMEOUT_SECONDS: ${{ steps.model-preset.outputs.timeout_seconds }}", workflow)
+        self.assertIn("Selected preset $MODEL_PRESET_LABEL ($MODEL_QUALITY) -> Ollama model $SELECTED_MODEL", workflow)
+        self.assertNotIn("fast) SELECTED_MODEL=qwen3:4b", workflow)
+        self.assertNotIn("medium) SELECTED_MODEL=qwen3:8b", workflow)
+        self.assertNotIn("hard) SELECTED_MODEL=qwen3:8b", workflow)
         self.assertIn("OLLAMA_THINKING=$MODEL_THINKING", workflow)
         self.assertIn("ollama_stream.py", workflow)
         self.assertIn("/api/chat", (ROOT / "tools/ollama_stream.py").read_text(encoding="utf-8"))
@@ -158,10 +160,7 @@ class StudioExperienceTests(unittest.TestCase):
         warmup = workflow[workflow.index("/api/generate") - 400:workflow.index("/api/generate") + 400]
         self.assertIn("num_predict:1", warmup)
         self.assertIn("128K-context, text-only DeepSeek-R1 reasoning model for world/shot planning", workflow)
-        marker = workflow.index("case \"$MODEL_QUALITY\" in", workflow.index("ollama serve"))
-        case_block = workflow[marker:]
-        case_block = case_block[:case_block.index("esac")]
-        self.assertNotIn("llama3.2-vision", case_block,
+        self.assertNotIn("SELECTED_MODEL=llama3.2-vision", workflow,
                          "a model current Ollama cannot load must never be selected")
         self.assertIn("--min-props 8 --target-props", workflow)
         self.assertIn("map_orchestration.py", workflow)
@@ -203,22 +202,19 @@ class StudioExperienceTests(unittest.TestCase):
         order = [line.strip().strip("- ") for line in options.splitlines() if line.strip().startswith("- ")]
         self.assertEqual(order, ["fast", "medium", "hard", "smart_11b", "animation_best"],
                          "the 11B preset must be listed directly under hard")
-        self.assertIn("smart_11b) SELECTED_MODEL=qwen3:14b; MODEL_THINKING=true", workflow)
-        self.assertIn("'qwen3-14b-v1'", workflow)
-        # The 14B model needs a bigger disk requirement than the small presets;
-        # a second Ollama model is not downloaded.
-        gate = workflow[workflow.index("Reclaim runner disk space"):workflow.index("cache_restore_allowed=$CACHE_RESTORE_ALLOWED")]
-        self.assertIn("smart_11b) REQUIRED_GIB=20", gate)
-        self.assertIn("fast|medium) REQUIRED_GIB=8", gate)
-        self.assertIn("smart_11b qwen3:14b (14.8B)", workflow)
-        self.assertIn("fast qwen3:4b, medium qwen3:8b, hard qwen3:8b", workflow)
-        # Keeping the existing promises intact.
-        marker = workflow.index("case \"$MODEL_QUALITY\" in", workflow.index("ollama serve"))
-        case_block = workflow[marker:]
-        case_block = case_block[:case_block.index("esac")]
-        self.assertNotIn("llama3.2-vision", case_block,
+        manifest = json.loads((ROOT / "web/lib/model_presets.json").read_text(encoding="utf-8"))["presets"]
+        self.assertEqual(manifest["smart_11b"]["model"], "qwen3:14b")
+        self.assertEqual(manifest["smart_11b"]["cache_version"], "qwen3-14b-v1")
+        self.assertEqual(manifest["smart_11b"]["minimum_gib"], 20)
+        self.assertIn("MODEL_REQUIRED_GIB: ${{ steps.model-preset.outputs.minimum_gib }}", workflow)
+        self.assertIn('REQUIRED_GIB="$MODEL_REQUIRED_GIB"', workflow)
+        self.assertIn("python tools/model_presets.py", workflow)
+        self.assertIn("SELECTED_MODEL: ${{ steps.model-preset.outputs.selected_model }}", workflow)
+        self.assertIn("Selected preset $MODEL_PRESET_LABEL ($MODEL_QUALITY) -> Ollama model $SELECTED_MODEL", workflow)
+        self.assertNotIn("SELECTED_MODEL=llama3.2-vision", workflow,
                          "a model current Ollama cannot load must never be selected")
-        self.assertIn("animation_best) SELECTED_MODEL=deepseek-r1:8b; MODEL_THINKING=true", workflow)
+        self.assertNotIn("fast) SELECTED_MODEL=", workflow,
+                         "the workflow must not maintain a second handwritten preset map")
 
     def test_workflow_uses_higher_creative_model_temperatures(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
@@ -238,14 +234,11 @@ class StudioExperienceTests(unittest.TestCase):
 
     def test_every_preset_runs_with_thinking_enabled(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
-        marker = workflow.index("case \"$MODEL_QUALITY\" in", workflow.index("ollama serve"))
-        case_block = workflow[marker:]
-        case_block = case_block[:case_block.index("esac")]
-        selections = [line.strip() for line in case_block.splitlines() if "SELECTED_MODEL=" in line]
-        self.assertEqual(len(selections), 5, "all five presets must be mapped")
-        for line in selections:
-            self.assertIn("MODEL_THINKING=true", line, f"thinking must be on for: {line}")
-        self.assertNotIn("MODEL_THINKING=false", case_block)
+        presets = json.loads((ROOT / "web/lib/model_presets.json").read_text(encoding="utf-8"))["presets"]
+        self.assertEqual(list(presets), ["fast", "medium", "hard", "smart_11b", "animation_best"])
+        self.assertIn("MODEL_THINKING=true", workflow)
+        self.assertNotIn("MODEL_THINKING=false", workflow)
+        self.assertIn("SELECTED_MODEL: ${{ steps.model-preset.outputs.selected_model }}", workflow)
         self.assertIn("thinking mode: $MODEL_THINKING (on for every preset)", workflow)
 
     def test_stream_helper_survives_models_without_a_thinking_channel(self):
@@ -272,10 +265,13 @@ class StudioExperienceTests(unittest.TestCase):
 
     def test_slow_models_get_a_larger_request_budget(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
-        # Story calls keep preset-specific idle budgets; map orchestration/review
-        # have separate hard wall-clock caps.
-        self.assertIn("smart_11b) AI_TIMEOUT=9000", workflow)
-        self.assertIn("hard) AI_TIMEOUT=5400", workflow)
+        # Story calls take preset-specific idle budgets from the shared manifest;
+        # map orchestration/review have separate hard wall-clock caps.
+        presets = json.loads((ROOT / "web/lib/model_presets.json").read_text(encoding="utf-8"))["presets"]
+        self.assertEqual(presets["smart_11b"]["timeout_seconds"], 9000)
+        self.assertEqual(presets["hard"]["timeout_seconds"], 5400)
+        self.assertIn("MODEL_TIMEOUT_SECONDS: ${{ steps.model-preset.outputs.timeout_seconds }}", workflow)
+        self.assertIn('AI_TIMEOUT="$MODEL_TIMEOUT_SECONDS"', workflow)
         self.assertIn('echo "AI_TIMEOUT=$AI_TIMEOUT" >> "$GITHUB_ENV"', workflow)
         self.assertEqual(workflow.count('--timeout "${AI_TIMEOUT:-900}"'), 1)
         self.assertNotIn("narration repair", workflow)
