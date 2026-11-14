@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { parseLiveSubagentLog } from "@/lib/liveSubagentLog.mjs";
 
 type FileEdit = { path: string; operation?: string; bytes?: number; content?: string; tool?: string };
 type ProviderAttempt = { provider?: string; model?: string; status?: string; reason?: string; fallback_to?: string; seconds?: number };
@@ -27,6 +28,8 @@ type SubagentCall = {
   attempts?: ProviderAttempt[];
   toolCalls?: unknown[];
   toolResults?: unknown[];
+  toolActivity?: Array<{ tool: string; status: string; publicStatus: string }>;
+  publicStatus?: string;
   files?: string[];
   live?: boolean;
 };
@@ -49,78 +52,13 @@ function fallbackName(attempt: ProviderAttempt) {
 }
 
 function parseLiveLogForSubagent(tail: string): SubagentCall[] {
-  const events: ActivityRecord[] = [];
-  const marker = "[ai-log] ";
-  for (const line of String(tail || "").split(/\r?\n/)) {
-    const index = line.indexOf(marker);
-    if (index < 0) continue;
-    try {
-      const value = JSON.parse(line.slice(index + marker.length).trim());
-      if (value && typeof value === "object" && !Array.isArray(value)) events.push(value);
-    } catch {
-      // The active log tail may end in the middle of a JSON record.
-    }
-  }
-
-  const calls: SubagentCall[] = [];
-  const active = new Map<string, number>();
-  let sequence = 0;
-  for (const event of events) {
-    if (event.stage !== "subagent") continue;
-    const type = String(event.type || "");
-    const taskId = String(event.task_id || event.id || "");
-    if (!taskId) continue;
-    const activityId = String(event.activity_id || taskId);
-    if (type === "subagent_task") {
-      const call: SubagentCall = {
-        key: `live:${sequence++}:${taskId}`,
-        id: taskId,
-        topic: event.topic,
-        kind: event.kind,
-        instruction: event.preview || "Task instructions are stored in the run artifact.",
-        provider: "",
-        status: "started",
-        output: "Waiting for the subagent reply and full result artifact…",
-        live: true,
-      };
-      calls.push(call);
-      active.set(activityId, calls.length - 1);
-      continue;
-    }
-    let index = active.get(activityId);
-    if (index === undefined) {
-      calls.push({
-        key: `live:${sequence++}:${taskId}`,
-        id: taskId,
-        topic: event.topic,
-        kind: event.kind,
-        instruction: event.preview || "Task instructions are stored in the run artifact.",
-        live: true,
-      });
-      index = calls.length - 1;
-      active.set(activityId, index);
-    }
-    const current = calls[index];
-    if (type === "provider_attempt") {
-      current.attempts = [...(current.attempts || []), event];
-      if (event.status === "answered") {
-        current.provider = event.provider;
-        current.providerModel = event.model;
-      }
-      continue;
-    }
-    if (type === "subagent_result") {
-      current.provider = event.provider || current.provider;
-      current.providerModel = event.provider_model || current.providerModel;
-      current.seconds = event.seconds;
-      current.status = event.status || (event.ok ? "complete" : "failed");
-      current.ok = event.ok;
-      current.output = event.error || event.preview || "Full response is being loaded from the run artifact.";
-      current.error = event.error;
-      current.fileEdited = event.edited_files?.join(", ") || event.applied_to;
-    }
-  }
-  return calls;
+  return parseLiveSubagentLog(tail).map((call: any) => ({
+    ...call,
+    publicStatus: call.publicStatus || "",
+    attempts: call.attempts || [],
+    toolActivity: call.toolActivity || [],
+    live: true,
+  }));
 }
 
 async function readTextArtifact(runId: number, artifactName: string, fileName: string): Promise<string | null> {
@@ -439,8 +377,10 @@ export function SubagentTimeline({ runId, kind, liveLog }: {
                     {call.status && <span className="text-[10px] uppercase tracking-wide text-zinc-600">{call.status}</span>}
                   </div>
                   <div className="mt-1 text-xs text-zinc-300 leading-relaxed line-clamp-2">{call.instruction || "Task instruction is in the activity artifact."}</div>
+                  {call.publicStatus && <div className="mt-1 text-[11px] text-sky-300 leading-relaxed">{call.publicStatus}</div>}
                   {editedFiles && <div className="mt-1 text-[11px] text-emerald-400">Edited: {editedFiles}</div>}
-                  {output && <div className="mt-1 text-[11px] text-zinc-500 line-clamp-2">{output}</div>}
+                  {output && <div className="mt-1 text-[11px] text-violet-200 line-clamp-2 whitespace-pre-wrap break-words">{output}</div>}
+                  {call.toolActivity && call.toolActivity.length > 0 && <div className="mt-1 text-[11px] text-fuchsia-300 line-clamp-2">Tools: {call.toolActivity.slice(-3).map((event) => event.publicStatus).join(" · ")}</div>}
                   {!output && call.error && <div className="mt-1 text-[11px] text-red-300">{call.error}</div>}
                 </div>
                 <span className="text-zinc-600 text-xs">{isOpen ? "−" : "+"}</span>
@@ -475,6 +415,9 @@ export function SubagentTimeline({ runId, kind, liveLog }: {
                   )}
                   {call.toolResults && call.toolResults.length > 0 && (
                     <DetailBlock title="Tool results">{JSON.stringify(call.toolResults, null, 2)}</DetailBlock>
+                  )}
+                  {call.toolActivity && call.toolActivity.length > 0 && (
+                    <DetailBlock title="Live tool activity">{call.toolActivity.map((event) => event.publicStatus).join("\n")}</DetailBlock>
                   )}
                   {(call.error || call.applyError) && (
                     <DetailBlock title="Error / result" tone="text-red-300">

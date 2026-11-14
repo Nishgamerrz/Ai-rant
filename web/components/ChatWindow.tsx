@@ -39,6 +39,27 @@ export function parseLiveLogTail(tail: string): { msgs: Msg[]; tools: any[] } {
       streamedSubagent = { id: safeActivityText(subagentHeader[1].trim()), text: "" };
       continue;
     }
+    const chunkMarker = plain.indexOf("[subagent answer chunk]");
+    if (chunkMarker >= 0) {
+      const frame = plain.slice(chunkMarker + "[subagent answer chunk]".length).trim();
+      const separator = frame.indexOf("·");
+      if (separator >= 0) {
+        const id = safeActivityText(frame.slice(0, separator).trim());
+        try {
+          const text = JSON.parse(frame.slice(separator + 1).trim());
+          if (id && typeof text === "string") {
+            if (!streamedSubagent || streamedSubagent.id !== id) {
+              finishSubagentAnswer();
+              streamedSubagent = { id, text: "" };
+            }
+            streamedSubagent.text += text;
+            continue;
+          }
+        } catch {
+          // Ignore an incomplete or malformed public-answer frame.
+        }
+      }
+    }
     if (streamedSubagent && (["[subagent progress]", "[subagent tool]", "[subagent answer]"]
         .some((marker) => plain.includes(marker)))) {
       finishSubagentAnswer();

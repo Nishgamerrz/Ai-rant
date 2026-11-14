@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { liveSubagentActivityEvents } from "@/lib/liveSubagentLog.mjs";
 
 type ActivityEvent = {
   schema_version?: number;
@@ -87,6 +88,10 @@ function parseLiveLog(text: string): ActivityEvent[] {
       // Ignore runner lines and incomplete structured records.
     }
   }
+  // The activity JSONL file is uploaded after later workflow steps. Until then,
+  // expose the safe, newline-framed console stream instead of leaving the helper
+  // at a static "working" row.
+  events.push(...(liveSubagentActivityEvents(text) as ActivityEvent[]));
   return events;
 }
 
@@ -120,6 +125,7 @@ function eventTitle(event: ActivityEvent) {
   if (type === "subagent_progress") return `Subagent task ${event.task_id || event.id || ""} · ${event.status || "working"}`;
   if (type === "subagent_task") return `Subagent task ${event.task_id || event.id || ""} · ${event.status || "started"}`;
   if (type === "subagent_result") return `Subagent task ${event.task_id || event.id || ""} · ${event.status || (event.ok ? "complete" : "failed")}`;
+  if (type === "subagent_answer") return `Sub-agent ${event.task_id || ""} · public result streaming`;
   if (type === "model_progress") return `${label} · ${event.channel === "thinking" ? "private processing active" : "answer progress"}`;
   if (type === "model_response") return `${label} · completed`;
   if (type === "model_error") return `${label} · failed`;

@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,8 +18,8 @@ import nish_agent  # noqa: E402
 
 
 class SharedToolTests(unittest.TestCase):
-    def test_exactly_twenty_five_tools_are_shared(self):
-        self.assertEqual(len(agent_tools.TOOL_NAMES), 25)
+    def test_exactly_twenty_nine_tools_are_shared(self):
+        self.assertEqual(len(agent_tools.TOOL_NAMES), 29)
         for name in agent_tools.TOOL_NAMES:
             self.assertIn(name, agent_tools._DISPATCH)
         self.assertIn("inspect_image", agent_tools.TOOL_GUIDE)
@@ -150,6 +151,142 @@ class SharedToolTests(unittest.TestCase):
                     "https://localhost/image.png", "https://10.0.0.1/image.png"):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 agent_tools._public_https(url)
+
+    def test_creator_store_api_call_is_bounded_and_uses_only_public_query_parameters(self):
+        payload = b'{"creatorStoreAssets": []}'
+
+        class Response:
+            headers = {"Content-Length": str(len(payload))}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, limit):
+                self.limit = limit
+                return payload
+
+        with (patch("agent_tools._public_https") as public_https,
+              patch("agent_tools.urllib.request.build_opener") as build_opener):
+            response = Response()
+            build_opener.return_value.open.return_value = response
+            result = agent_tools._creator_store_search("cozy house", "Model")
+        self.assertEqual(result, {"creatorStoreAssets": []})
+        request = build_opener.return_value.open.call_args.args[0]
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query), {
+            "searchCategoryType": ["Model"], "query": ["cozy house"],
+        })
+        self.assertFalse(any(name.lower() in {"x-api-key", "authorization", "cookie"}
+                             for name, _ in request.header_items()))
+        self.assertEqual(response.limit, 2 * 1024 * 1024 + 1)
+        public_https.assert_called_once()
+
+    def test_roblox_mesh_search_uses_official_store_results_without_fabricating_ids(self):
+        house = {"creatorStoreAssets": [{
+            "asset": {"id": "123456", "name": "Cozy House", "description": "A cabin model."},
+            "creator": {"name": "Verified Builder"},
+        }]}
+        tree = {"creatorStoreAssets": [{
+            "asset": {"id": 234567, "name": "Oak Tree", "description": "A tree mesh."},
+            "creator": {"name": "Garden Creator"},
+        }]}
+        with patch("agent_tools._creator_store_search", side_effect=[house, tree]) as search:
+            result = agent_tools.execute_tool("search_roblox_meshes", {
+                "query": "cozy house", "limit": 8,
+            }, ROOT)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual([item["asset_id"] for item in result["results"]], ["123456", "234567"])
+        self.assertTrue(all(item["url"].startswith("https://create.roblox.com/store/asset/")
+                            for item in result["results"]))
+        self.assertEqual(search.call_args_list[0].args, ("cozy house", "Model"))
+        self.assertEqual(search.call_args_list[1].args, ("cozy house", "MeshPart"))
+        self.assertEqual(result["creator_store_api_status"], "available")
+        self.assertIn("does not supply verified mesh dimensions", result["note"])
+        self.assertIn("licensing", result["note"])
+        self.assertIn("create.roblox.com/store/asset?query=cozy+house",
+                      result["creator_store_search_url"])
+
+    def test_roblox_mesh_search_falls_back_to_web_references_on_store_failure(self):
+        search_rows = [{"title": "House reference", "url": "https://example.com/house",
+                        "snippet": "A possible visual reference."}]
+        with patch("agent_tools._creator_store_search", side_effect=ValueError("HTTP 503")), \
+                patch("agent_tools._search", side_effect=[search_rows, [], []]) as web_search:
+            result = agent_tools.execute_tool("search_roblox_meshes", {
+                "query": "wooden house", "limit": 4,
+            }, ROOT)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["source"], "public web reference search")
+        self.assertEqual(result["creator_store_api_status"], "unavailable")
+        self.assertEqual(result["creator_store_errors"], ["Model: ValueError", "MeshPart: ValueError"])
+        self.assertNotIn("asset_id", result["results"][0])
+        self.assertEqual(web_search.call_count, 3)
+
+    def test_mesh_fetch_inspection_and_placement_form_a_bounded_reference_pipeline(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            obj = b"v -2 0 0\nv 2 2 1\nf 1 2 1\n"
+            with patch("agent_tools._download_mesh", return_value=(obj, "model/obj",
+                                                                  "https://assets.example/house.obj")):
+                fetched = agent_tools.execute_tool("fetch_mesh_reference", {
+                    "url": "https://assets.example/house.obj", "path": "references/house.obj",
+                }, root)
+            self.assertTrue(fetched["ok"], fetched)
+            self.assertEqual(fetched["path"], "references/house.obj")
+            measured = agent_tools.execute_tool("inspect_mesh_dimensions", {
+                "path": fetched["path"], "studs_per_unit": 2,
+            }, root)
+            self.assertTrue(measured["ok"], measured)
+            self.assertEqual(measured["dimensions_source_units"], [4.0, 2.0, 1.0])
+            self.assertEqual(measured["estimated_dimensions_studs"], [8.0, 4.0, 2.0])
+            self.assertIn("not assumed", measured["units"])
+
+            unscaled = agent_tools.execute_tool("plan_mesh_placement", {
+                "name": "House Reference", "dimensions": measured["dimensions_source_units"],
+                "room_size": [12, 8, 12], "position": [100, 0, 100],
+                "model": "house",
+            }, root)
+            self.assertFalse(unscaled["ok"])
+            self.assertIn("not assumed to be Roblox studs", unscaled["error"])
+
+            placement = agent_tools.execute_tool("plan_mesh_placement", {
+                "name": "House Reference", "dimensions": measured["dimensions_source_units"],
+                "studs_per_unit": 2, "room_size": [12, 8, 12], "position": [100, 0, 100],
+                "model": "house",
+            }, root)
+            self.assertTrue(placement["ok"], placement)
+            anchor = placement["anchor"]
+            self.assertEqual(anchor["shape"], "Block")
+            self.assertEqual(anchor["model"], "house")
+            self.assertEqual(anchor["size"], [8.0, 4.0, 2.0])
+            self.assertEqual(anchor["position"], [1.0, 2.0, 4.0])
+            from build_story_map import validate
+            normalized = validate({"props": [anchor]}, duration=60, min_props=1)
+            self.assertEqual(normalized["props"][0]["size"], anchor["size"])
+            self.assertEqual(normalized["props"][0]["model"], "house")
+            self.assertIn("does not import the downloaded mesh", placement["note"])
+
+    def test_mesh_dimensions_support_gltf_bounds_and_reject_unsafe_paths(self):
+        document = {
+            "asset": {"version": "2.0"},
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+            "accessors": [{"min": [-1, 0, -3], "max": [2, 4, 3]}],
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "house.gltf").write_text(json.dumps(document), encoding="utf-8")
+            result = agent_tools.execute_tool("inspect_mesh_dimensions", {
+                "path": "house.gltf",
+            }, root)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["dimensions_source_units"], [3.0, 4.0, 6.0])
+            escaped = agent_tools.execute_tool("inspect_mesh_dimensions", {
+                "path": "../house.gltf",
+            }, root)
+            self.assertFalse(escaped["ok"])
+            self.assertIn("workspace-relative", escaped["error"])
 
     def test_video_and_zip_tools_return_clear_missing_input_errors(self):
         with tempfile.TemporaryDirectory() as temp:

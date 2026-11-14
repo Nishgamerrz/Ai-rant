@@ -38,7 +38,8 @@ CODES = {
     "success": "\033[32m",    # green: finished, accepted
     "warning": "\033[93m",    # bright yellow: recovered from something
     "error": "\033[91m",      # bright red: failed, dropped
-    "tool": "\033[35m",       # magenta: tools, gemini, sub-agent
+    "tool": "\033[35m",       # magenta: tool calls and tool results
+    "subagent": "\033[95m",   # bright magenta: helper progress and public helper answers
     "plan": "\033[34m",       # blue: plan/world details
     "thought": "\033[90m",    # grey: the rare quiet waiting note
     "frame": "\033[90m",      # grey: the thinking box edge

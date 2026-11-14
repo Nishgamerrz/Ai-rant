@@ -103,6 +103,8 @@ BOX_BOTTOM = "\u2514"
 # thinking model pauses mid-sentence. One quiet line is useful; a line every
 # fifteen seconds buried the model's actual words, so the note is capped.
 HEARTBEAT_NOTES = 3
+SAFE_PROGRESS_INTERVAL_SECONDS = 30.0
+SAFE_PROGRESS_UPDATES_PER_CALL = 8
 
 
 class TypedConsole:
@@ -365,7 +367,9 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
            stall_seconds: float = 0.0,
            type_delay: float = 0.002, type_budget: float = 120.0,
            heartbeat_seconds: float = 15.0,
-           deadline: float | None = None) -> dict:
+           deadline: float | None = None,
+           progress_interval_seconds: float = SAFE_PROGRESS_INTERVAL_SECONDS,
+           progress_limit: int = SAFE_PROGRESS_UPDATES_PER_CALL) -> dict:
     request = {**request, "stream": True}
     payload = json.dumps(request).encode("utf-8")
     http = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
@@ -406,6 +410,10 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
     progress_chars = {"thinking": 0, "answer": 0}
     last_activity_channel = ""
     last_activity_emit = 0.0
+    progress_interval = max(0.001, float(progress_interval_seconds))
+    progress_limit = max(0, int(progress_limit))
+    last_safe_progress = started_at
+    safe_progress_updates = 0
 
     def emit_activity_progress(channel: str, *, force: bool = False) -> None:
         nonlocal last_activity_channel, last_activity_emit
@@ -430,6 +438,26 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
             "provider": "ollama", "model": model_name, "status": "streaming",
             "channel": channel, "preview": preview, "characters": len(accumulated),
         }, path=Path("dist/ai_activity.jsonl"), emit=False)
+
+    def emit_safe_progress(channel: str) -> None:
+        """Pulse a concise public status while private tokens are arriving."""
+        nonlocal last_safe_progress, safe_progress_updates
+        if quiet or progress_limit <= 0 or safe_progress_updates >= progress_limit:
+            return
+        now = time.monotonic()
+        if now - last_safe_progress < progress_interval:
+            return
+        safe_progress_updates += 1
+        last_safe_progress = now
+        if channel == "thinking":
+            status = ("Private planning continues; internal thought text stays hidden "
+                     f"(safe update {safe_progress_updates}).")
+            colour = "thought"
+        else:
+            status = ("Structured result is still being prepared; raw JSON stays hidden "
+                      f"until validation (safe update {safe_progress_updates}).")
+            colour = "notice"
+        console.line(f"[{label}] {status}", kind=colour)
 
     def check_silent_timeout(exc: BaseException) -> None:
         """Turn a true no-content timeout into a bounded failure for this model."""
@@ -549,6 +577,7 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
             if piece_thinking:
                 thinking.append(piece_thinking)
                 emit_activity_progress("thinking")
+                emit_safe_progress("thinking")
                 if not quiet and not thinking_open:
                     console.line(f"[{label}] reasoning is active; private model thoughts are hidden.",
                                  kind="thinking")
@@ -556,6 +585,7 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
             if piece_content:
                 content.append(piece_content)
                 emit_activity_progress("answer")
+                emit_safe_progress("answer")
                 if not quiet and not answer_open:
                     console.line(f"[{label}] preparing the structured result; raw JSON is hidden.",
                                  kind="notice")
@@ -688,6 +718,12 @@ def main() -> None:
                         default=float(os.environ.get("AI_HEARTBEAT", "60")),
                         help="print one quiet 'still working' note when nothing has "
                              "arrived for this long (at most 3 per call); 0 disables it")
+    parser.add_argument("--progress-seconds", type=float,
+                        default=float(os.environ.get("AI_PROGRESS_INTERVAL", str(SAFE_PROGRESS_INTERVAL_SECONDS))),
+                        help="emit a bounded, safe progress update this often while hidden reasoning or structured output streams")
+    parser.add_argument("--progress-limit", type=int,
+                        default=int(os.environ.get("AI_PROGRESS_LIMIT", str(SAFE_PROGRESS_UPDATES_PER_CALL))),
+                        help="maximum safe progress updates per model call")
     parser.add_argument("--keep-stream-flag", action="store_true",
                         help="keep stream:true in the written request file for debugging")
     args = parser.parse_args()
@@ -709,7 +745,9 @@ def main() -> None:
     deadline = time.monotonic() + args.max_seconds if args.max_seconds > 0 else None
     limits = {"stall_seconds": args.stall_seconds,
               "type_delay": args.type_delay, "type_budget": args.type_budget,
-              "heartbeat_seconds": args.heartbeat_seconds, "deadline": deadline}
+              "heartbeat_seconds": args.heartbeat_seconds, "deadline": deadline,
+              "progress_interval_seconds": args.progress_seconds,
+              "progress_limit": args.progress_limit}
 
     def run_once(payload: dict, note: str) -> dict:
         result = stream(payload, args.url, args.label, args.timeout, args.quiet, **limits)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -28,6 +29,18 @@ class LiveSubagentUiTests(unittest.TestCase):
         self.assertIn("public_status:", source)
         self.assertNotIn("liveLog.slice(", source, "raw workflow logs must never render in chat")
         self.assertIn("Subagent-authored tool calls", (ROOT / "web" / "components" / "AiActivityTimeline.tsx").read_text(encoding="utf-8"))
+        subagent_timeline = (ROOT / "web" / "components" / "SubagentTimeline.tsx").read_text(encoding="utf-8")
+        self.assertIn("parseLiveSubagentLog", subagent_timeline)
+        self.assertIn("call.publicStatus", subagent_timeline)
+        self.assertIn("call.toolActivity", subagent_timeline)
+        activity_timeline = (ROOT / "web" / "components" / "AiActivityTimeline.tsx").read_text(encoding="utf-8")
+        self.assertIn("liveSubagentActivityEvents", activity_timeline)
+        self.assertIn("[subagent answer chunk]", (ROOT / "web" / "lib" / "liveSubagentLog.mjs").read_text(encoding="utf-8"))
+        result = subprocess.run(
+            ["node", "--test", str(ROOT / "web" / "tests" / "liveSubagentLog.test.cjs")],
+            cwd=ROOT / "web", capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
 
     def test_chat_ui_never_renders_legacy_private_thought_fields(self):
         chat = (ROOT / "web" / "components" / "ChatWindow.tsx").read_text(encoding="utf-8")
