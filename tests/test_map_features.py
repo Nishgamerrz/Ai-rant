@@ -266,32 +266,44 @@ class EffectTests(unittest.TestCase):
 
 
 class PromptTests(unittest.TestCase):
-    """The model must be told it may use all of this."""
+    """The delegated text model gets the full map schema; the local model only directs."""
 
-    def test_the_prompt_names_the_new_shapes(self):
+    @staticmethod
+    def map_guide():
+        import gemini_workspace
+        return gemini_workspace.guide({"topic": "map", "instruction": "Design the story map."})
+
+    def test_the_delegated_map_guide_names_the_new_shapes(self):
+        guide = self.map_guide()
         for shape in ("Wedge", "Prism", "Cone", "Pyramid", "Torus", "Ring", "Hemisphere", "Truss"):
-            self.assertIn(shape, WORKFLOW)
+            self.assertIn(shape, guide)
 
-    def test_the_prompt_explains_lights_and_effects(self):
-        self.assertIn("brightness", WORKFLOW)
-        self.assertIn("range is how far the pool of light reaches", WORKFLOW)
-        self.assertIn("520 ready presets", WORKFLOW)
-        self.assertIn("gold sparkles", WORKFLOW)
+    def test_the_delegated_map_guide_explains_lights_and_effects(self):
+        guide = self.map_guide()
+        self.assertIn("brightness", guide)
+        self.assertIn("range", guide)
+        self.assertIn("520 presets", guide)
+        self.assertIn("gold sparkles", guide)
 
-    def test_the_ai_must_author_map_and_camera_subagent_calls_in_its_first_response(self):
-        # The workflow must verify the AI's own first response instead of silently
-        # inserting a synthetic task (see tests/test_required_subagent.py).
-        self.assertIn("MANUALLY AUTHOR THE SUB-AGENT TOOL CALLS YOURSELF", WORKFLOW)
-        self.assertIn("python tools/map_delegation.py map_response.json", WORKFLOW)
-        self.assertIn('"write"', WORKFLOW)
+    def test_the_local_model_authors_first_response_calls_and_does_not_write_the_map(self):
+        start = WORKFLOW.index("- name: Orchestrate and review the delegated map")
+        end = WORKFLOW.index("- name: Re-view the AI world", start)
+        step = WORKFLOW[start:end]
+        self.assertIn("In your FIRST response", step)
+        self.assertIn('"subagent_tasks"', step)
+        self.assertIn('topic "map"', step)
+        self.assertIn('topic "models"', step)
+        self.assertIn("python tools/map_delegation.py map_orchestration_response.json", step)
+        self.assertIn('"write"', step)
+        self.assertIn("Do NOT write props, coordinates, camera shots", step)
 
-    def test_search_is_no_longer_forced_up_front(self):
+    def test_search_is_optional_and_authored_by_the_local_director(self):
         self.assertNotIn("Web search the AI can reuse in every planning stage", WORKFLOW)
-        self.assertIn("nothing is scraped unless you ask", WORKFLOW)
+        self.assertIn("zero to three short research queries only if real-world facts are genuinely useful", WORKFLOW)
+        self.assertIn('If no research is useful, return "search_queries":[]', WORKFLOW)
 
     def test_gemini_knows_the_new_fields(self):
-        import gemini_workspace
-        guide = gemini_workspace.guide({"topic": "map", "instruction": "design a lamp"})
+        guide = self.map_guide()
         self.assertIn("Wedge", guide)
         self.assertIn("brightness", guide)
         self.assertIn("520 presets", guide)

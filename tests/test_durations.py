@@ -329,7 +329,7 @@ class SharedRulesTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
         self.assertIn("runs exactly ${DURATION_SECONDS} seconds (${DURATION_LABEL})", workflow)
         self.assertIn("The ending is a specific moment, not a round number", workflow)
-        self.assertIn("not on a round minute", workflow)
+        self.assertIn("Never pad toward a round minute", workflow)
 
 
 if __name__ == "__main__":

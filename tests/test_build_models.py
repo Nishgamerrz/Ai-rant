@@ -155,12 +155,15 @@ class SchemaTests(unittest.TestCase):
         for expected in ("house", "tree", "bench", "stall", "plant", "lamp", "shop"):
             self.assertIn(expected, model["enum"])
 
-    def test_the_prompt_teaches_models_and_glass(self):
-        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
-        self.assertIn("BUILD MODELS, NOT BARE BLOCKS", workflow)
-        self.assertIn('"model":"house"', workflow)
-        self.assertIn("GLASS windows", workflow)
-        self.assertIn("Never return one giant featureless box", workflow)
+    def test_the_delegated_map_guide_teaches_models_and_glass(self):
+        from gemini_workspace import guide
+
+        text = guide({"topic": "map", "instruction": "Build a furnished story world."})
+        self.assertIn('"model"', text)
+        self.assertIn("hollow enterable shell", text)
+        self.assertIn("stepped gable roof", text)
+        self.assertIn("glass windows", text.lower())
+        self.assertIn("fully furnished", text.lower())
 
     def test_the_gemini_file_rules_describe_the_models(self):
         from gemini_workspace import guide

@@ -186,10 +186,8 @@ jobs:
             animation_best) SELECTED_MODEL=deepseek-r1:8b ;;
             *) SELECTED_MODEL=qwen3:8b ;;
           esac
-          AI_FALLBACK_MODEL=qwen3:8b
           echo "SELECTED_MODEL=$SELECTED_MODEL" >> "$GITHUB_ENV"
           echo "AI_MODEL=$SELECTED_MODEL" >> "$GITHUB_ENV"
-          echo "AI_FALLBACK_MODEL=$AI_FALLBACK_MODEL" >> "$GITHUB_ENV"
           case "$MODEL_QUALITY" in
             fast) MAP_TOKENS=5000; OLLAMA_CTX=8192 ;;
             medium) MAP_TOKENS=6000; OLLAMA_CTX=8192 ;;
@@ -201,7 +199,6 @@ jobs:
           echo "AI_NUM_CTX=$OLLAMA_CTX" >> "$GITHUB_ENV"
           echo "OLLAMA_THINKING=true" >> "$GITHUB_ENV"
           ollama pull "$SELECTED_MODEL" || { echo "pull $SELECTED_MODEL failed"; exit 1; }
-          ollama pull "$AI_FALLBACK_MODEL" || true
           ollama show "$SELECTED_MODEL" >/dev/null
           sudo mkdir -p /usr/local/lib/ollama
           df -h "$GITHUB_WORKSPACE"
@@ -212,7 +209,6 @@ jobs:
           PROMPT: ${{ inputs.prompt }}
           MODEL_QUALITY: ${{ inputs.model_quality }}
           AI_MODEL: ${{ env.AI_MODEL }}
-          AI_FALLBACK_MODEL: ${{ env.AI_FALLBACK_MODEL }}
           BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}
           BAZAARLINK_API_KEY: ${{ secrets.BAZAAR_LINK_API }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

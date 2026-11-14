@@ -63,10 +63,12 @@ class WorkflowNarrationTests(unittest.TestCase):
         self.assertIn('python tools/say.py plan "Token budget for this '
                       '${DURATION_SECONDS}s story:', WORKFLOW)
 
-    def test_a_retry_is_not_the_same_colour_as_a_success(self):
+    def test_map_failures_and_optional_research_use_distinct_status_colours(self):
         self.assertIn('python tools/say.py success "Narration passed the', WORKFLOW)
-        self.assertIn('python tools/say.py warning "Blueprint rejected', WORKFLOW)
-        self.assertIn('python tools/say.py tool "The AI asked for more web research', WORKFLOW)
+        self.assertIn('python tools/say.py error "The accepted delegated blueprint failed strict map validation',
+                      WORKFLOW)
+        self.assertIn('python tools/say.py tool "The local director requested one focused research pass',
+                      WORKFLOW)
 
     def test_the_summary_file_is_still_written_plain(self):
         # These echo into $GITHUB_STEP_SUMMARY: an escape code there would show up

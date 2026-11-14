@@ -361,20 +361,18 @@ def run_one_round(model: str, prompt: str, history: list[dict], label: str, enab
         rp = Path(td) / "req.json"
         op = Path(td) / "out.json"
         rp.write_text(_json.dumps(req), encoding="utf-8")
-        # use ollama_stream for coloured output + streaming + fallback handling
+        # use ollama_stream for coloured output and streaming on the selected model
         cmd = [
             sys.executable, str(ROOT / "tools" / "ollama_stream.py"),
             "--request", str(rp), "--output", str(op), "--label", label,
             "--timeout", "900", "--stall-seconds", os.environ.get("AI_STALL", "900"),
         ]
-        # fallback model
-        fallback = os.environ.get("AI_FALLBACK_MODEL", "qwen3:8b")
-        if fallback:
-            cmd += ["--fallback-model", fallback]
         print(paint(f"[{label}] calling {model} …", "label"), flush=True)
         proc = subprocess.run(cmd)
+        if proc.returncode != 0:
+            raise SystemExit(f"{label}: selected Ollama model {model} failed (exit {proc.returncode}); no fallback model was attempted.")
         if not op.is_file():
-            raise SystemExit(f"{label}: no output from ollama_stream")
+            raise SystemExit(f"{label}: selected Ollama model {model} returned no output; no fallback model was attempted.")
         data = _json.loads(op.read_text(encoding="utf-8"))
         text = data.get("response") or ""
         # The structured format gives us JSON string in response

@@ -33,13 +33,12 @@ class OllamaModelSetupTests(unittest.TestCase):
         self.assertIn('sleep "$retry_wait"', MODEL_SETUP)
         self.assertIn('ollama show "$model" >/dev/null 2>&1', MODEL_SETUP)
 
-    def test_fallback_is_really_pulled_and_can_degrade_without_blocking_primary(self):
-        self.assertIn('AI_FALLBACK_MODEL="$FALLBACK_MODEL"', MODEL_SETUP)
+    def test_only_the_selected_local_model_is_installed_for_the_run(self):
         self.assertIn('if ! ensure_model_available "$SELECTED_MODEL" selected; then', MODEL_SETUP)
-        self.assertIn('if ! ensure_model_available "$AI_FALLBACK_MODEL" fallback; then', MODEL_SETUP)
-        self.assertIn('AI_FALLBACK_MODEL="$SELECTED_MODEL"', MODEL_SETUP)
-        self.assertIn('echo "AI_FALLBACK_MODEL=$AI_FALLBACK_MODEL" >> "$GITHUB_ENV"', MODEL_SETUP)
-        self.assertNotIn('if [ -n "${AI_FALLBACK_MODEL:-}" ]', MODEL_SETUP)
+        self.assertNotIn("AI_FALLBACK_MODEL", MODEL_SETUP)
+        self.assertNotIn("FALLBACK_MODEL", MODEL_SETUP)
+        self.assertNotIn('purpose fallback', MODEL_SETUP)
+        self.assertNotIn('ollama pull "$AI_FALLBACK_MODEL"', MODEL_SETUP)
 
     def test_ollama_startup_poll_does_not_log_expected_connection_refusals(self):
         self.assertIn('curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1', MODEL_SETUP)
@@ -164,19 +163,12 @@ class StudioExperienceTests(unittest.TestCase):
         case_block = case_block[:case_block.index("esac")]
         self.assertNotIn("llama3.2-vision", case_block,
                          "a model current Ollama cannot load must never be selected")
-        self.assertIn("for attempt in 1 2; do", workflow)
-        self.assertIn('--min-props 8 --target-props "$TARGET_PROPS"', workflow)
-        self.assertIn("every deliberate snap cut must change both camera and focus", workflow)
-        self.assertIn('"camera_shots[].time_of_day" overrides', workflow)
-        self.assertIn("AUTOMATIC LIGHTING PLAN (required)", workflow)
-        self.assertNotIn("inputs.time_of_day", workflow)
-        self.assertNotIn("scene_time_notes", workflow)
-        self.assertIn("only when the user's story/topic explicitly requests that effect", workflow)
-        self.assertIn("num_predict:$tokens}}' > map_request.json", workflow)
-        self.assertIn('--timeout "${AI_TIMEOUT:-900}"', workflow)
-        self.assertIn("dist/web_research.json", workflow)
-        self.assertIn("--fallback --theme", workflow)
+        self.assertIn("--min-props 8 --target-props", workflow)
+        self.assertIn("map_orchestration.py", workflow)
+        self.assertIn("map_orchestration_schema.json", workflow)
+        self.assertIn("tools/ai_web_search.py", workflow)
         self.assertIn("individually named, grid-aligned editable Parts", workflow)
+        self.assertNotIn("--fallback", workflow)
         self.assertIn("Show the public AI build plan and tools", workflow)
         self.assertIn("not private chain-of-thought", workflow)
 
@@ -189,7 +181,8 @@ class StudioExperienceTests(unittest.TestCase):
         ]
         self.assertNotIn("time_of_day:", workflow[:workflow.index("permissions:")])
         self.assertNotIn("scene_time_notes", workflow)
-        self.assertIn("AUTOMATIC LIGHTING PLAN (required)", workflow)
+        self.assertIn('"time_of_day"', workflow)
+        self.assertIn('"time_of_day"', (ROOT / "tools/plan_schema.py").read_text(encoding="utf-8"))
         self.assertIn('"--time-of-day", choices=TIME_OF_DAY_CHOICES, default="auto"',
                       (ROOT / "tools/build_story_map.py").read_text(encoding="utf-8"))
         self.assertIn("--time-of-day auto", workflow)
@@ -212,8 +205,8 @@ class StudioExperienceTests(unittest.TestCase):
                          "the 11B preset must be listed directly under hard")
         self.assertIn("smart_11b) SELECTED_MODEL=qwen3:14b; MODEL_THINKING=true", workflow)
         self.assertIn("'qwen3-14b-v1'", workflow)
-        # The 14B model needs a bigger disk requirement than the small presets,
-        # and it also has to leave room for the qwen3:8b fallback.
+        # The 14B model needs a bigger disk requirement than the small presets;
+        # a second Ollama model is not downloaded.
         gate = workflow[workflow.index("Reclaim runner disk space"):workflow.index("cache_restore_allowed=$CACHE_RESTORE_ALLOWED")]
         self.assertIn("smart_11b) REQUIRED_GIB=20", gate)
         self.assertIn("fast|medium) REQUIRED_GIB=8", gate)
@@ -231,12 +224,12 @@ class StudioExperienceTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
         # The creative temperature is 10x the original presets (clamped to the
         # highest value the models can still use coherently).
-        # Narration and repair budgets scale with the story length so a thinking
-        # model cannot spend the whole ceiling reasoning and cut the answer off;
-        # the map plan and the summary keep their own generous budgets.
+        # Narration and repair budgets scale with the story length. Map orchestration
+        # and review are deliberately small because the text sub-agent builds the map.
         self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:$ctx, num_predict:$tokens}}' > narration_request.json", workflow)
         self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:$ctx, num_predict:$tokens}, messages:", workflow)
-        self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:$ctx, num_predict:$tokens}}' > map_request.json", workflow)
+        self.assertIn("options:{temperature:0.7,top_p:0.95,num_ctx:$ctx,num_predict:$tokens}}'", workflow)
+        self.assertIn('"num_predict": 420', (ROOT / "tools/map_orchestration.py").read_text(encoding="utf-8"))
         self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:$ctx, num_predict:900}}' > creation_summary_request.json", workflow)
         self.assertIn("NARRATION_TOKENS=$((1200 + DURATION_SECONDS * 8))", workflow)
         for legacy in ("temperature:0.9,", "temperature:1.5,", "temperature:0.45,", "temperature:0.75,", "temperature:0.6,"):
@@ -262,31 +255,30 @@ class StudioExperienceTests(unittest.TestCase):
         # A model that rejects thinking must still produce a usable answer file.
         self.assertIn("except ThinkingUnsupported", helper)
 
-    def test_models_that_cannot_run_have_a_known_good_fallback(self):
-        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
-        # Every streaming call must be able to retry on a model we know loads.
-        # Story, story repair, narration edit, world plan, delegation repair,
-        # helper round, map retry and the short post-sub-agent confirmation.
-        self.assertEqual(workflow.count("--fallback-model"), 8)
-        self.assertIn("FALLBACK_MODEL=qwen3:4b", workflow)
-        self.assertIn("FALLBACK_MODEL=qwen3:8b", workflow)
-        # llama3.2-vision is the mllama architecture, which current Ollama cannot
-        # even load (HTTP 500), so it must never be selected again.
+    def test_a_failed_selected_model_is_never_switched_to_another_ollama_model(self):
+        workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
+        agent_workflow = (ROOT / ".github/workflows/agent.yml").read_text(encoding="utf-8")
+        helper = (ROOT / "tools/ollama_stream.py").read_text(encoding="utf-8")
+        agent_helper = (ROOT / "tools/nish_agent.py").read_text(encoding="utf-8")
+        for text in (workflow, agent_workflow, helper, agent_helper):
+            self.assertNotIn("--fallback-model", text)
+            self.assertNotIn("AI_FALLBACK_MODEL", text)
+        self.assertNotIn("fallback_model", helper)
+        self.assertIn("selected model was not changed", helper)
+        self.assertIn("Selected Ollama model failed", helper)
+        self.assertIn("CallDeadlineExceeded", helper)
         self.assertNotIn("SELECTED_MODEL=llama3.2-vision", workflow)
-        helper = (ROOT / "tools" / "ollama_stream.py").read_text(encoding="utf-8")
-        self.assertIn("class ModelUnusable", helper)
-        self.assertIn("exc.code >= 500", helper)
-        self.assertIn("fallback_model", helper)
 
     def test_slow_models_get_a_larger_request_budget(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
-        # Slow presets are allowed to take as long as they need: the socket guard
-        # is hours, not minutes, and there is no wall-clock cap on any call.
+        # Story calls keep preset-specific idle budgets; map orchestration/review
+        # have separate hard wall-clock caps.
         self.assertIn("smart_11b) AI_TIMEOUT=9000", workflow)
         self.assertIn("hard) AI_TIMEOUT=5400", workflow)
         self.assertIn('echo "AI_TIMEOUT=$AI_TIMEOUT" >> "$GITHUB_ENV"', workflow)
-        self.assertEqual(workflow.count('--timeout "${AI_TIMEOUT:-900}"'), 6)
-        self.assertNotIn("--max-seconds", workflow)
+        self.assertEqual(workflow.count('--timeout "${AI_TIMEOUT:-900}"'), 3)
+        self.assertIn("--max-seconds 600", workflow)
+        self.assertIn("--max-seconds 300", workflow)
         self.assertNotIn("NARRATION_MAX", workflow)
 
     def test_workflow_streams_ai_output_and_supports_live_search(self):
@@ -296,7 +288,8 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertGreaterEqual(workflow.count("python tools/ollama_stream.py"), 5)
         self.assertIn("tools/ai_web_search.py", workflow)
         self.assertIn('search_queries', workflow)
-        self.assertIn("AI help round", workflow)
+        self.assertIn("map_orchestration.py queries", workflow)
+        self.assertIn("sub-agent creates the actual map", workflow)
 
     def test_workflow_form_is_compact_and_lists_comma_separated_usernames(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")

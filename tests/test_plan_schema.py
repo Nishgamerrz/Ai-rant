@@ -124,13 +124,25 @@ class AliasTests(unittest.TestCase):
 
 
 class PromptTests(unittest.TestCase):
-    def test_prompt_names_the_real_cast(self):
+    def test_director_forwards_the_real_cast_to_the_map_subagent(self):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
-        self.assertIn("The ONLY usernames that exist are:", workflow)
-        self.assertIn('FIRST_CAST=$(jq -r', workflow)
-        self.assertIn('SECOND_CAST=$(jq -r', workflow)
-        self.assertIn('{"username":"${FIRST_CAST}"', workflow)
+        self.assertIn("Cast usernames, in lead-first order: ${CAST_NAMES:-none supplied}", workflow)
+        self.assertIn("Use the exact supplied usernames in cast placements, camera focus, and face timelines.",
+                      workflow)
+        schema = build_schema(CAST)
+        placements = schema["properties"]["character_placements"]["items"]["properties"]["username"]
+        self.assertEqual(placements["enum"], CAST)
 
-    def test_prompt_demands_the_exact_keys(self):
-        workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
-        self.assertIn("USE THE EXACT KEYS: shape (never type/dimensions)", workflow)
+    def test_the_delegated_map_guide_and_schema_demand_exact_keys(self):
+        from gemini_workspace import guide
+
+        text = guide({"topic": "map", "instruction": "Create the map and camera plan."})
+        self.assertIn("Top level keys: name, theme, ground_material, ground_color, ambient_color, props,", text)
+        self.assertIn('Every prop is {"name","shape","material","position","size","color","physics",', text)
+        schema = build_schema(CAST)
+        required = set(schema["required"])
+        self.assertTrue({"name", "theme", "props", "character_placements",
+                         "camera_shots", "face_expressions"}.issubset(required))
+        prop_fields = schema["properties"]["props"]["items"]["properties"]
+        self.assertIn("shape", prop_fields)
+        self.assertNotIn("type", prop_fields)

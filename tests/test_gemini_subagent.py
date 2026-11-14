@@ -720,12 +720,15 @@ class QuotaTests(unittest.TestCase):
 
 
 class QuotaWorkflowTests(unittest.TestCase):
-    def test_the_workflow_fails_if_no_fallback_can_run_required_ai_authored_tasks(self):
+    def test_an_incomplete_mandatory_helper_result_stops_map_creation(self):
         text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("Path('dist/gemini_quota_exhausted').is_file()", text)
-        self.assertIn("cannot execute the AI-authored mandatory map sub-agent calls", text)
-        self.assertIn("Neither BazaarLink, Gemini nor the Groq fallback edited the narration", text)
-        self.assertNotIn("skipped and the plan you already wrote stands", text)
+        start = text.index("- name: Orchestrate and review the delegated map")
+        end = text.index("- name: Re-view the AI world", start)
+        step = text[start:end]
+        self.assertIn("python tools/gemini_subagent.py --request subagent_tasks.json", step)
+        self.assertIn('if [ "$HELPER_STATUS" -ne 0 ]; then', step)
+        self.assertIn("if ! python tools/map_orchestration.py assemble", step)
+        self.assertIn("no local or procedural map will be substituted", step)
 
 
 class StaleMarkerTests(unittest.TestCase):
@@ -1333,8 +1336,10 @@ class BazaarLinkWorkflowTests(unittest.TestCase):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertEqual(text.count("BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}"), 3)
         self.assertEqual(text.count("BAZAARLINK_API_KEY: ${{ secrets.BAZAAR_LINK_API }}"), 3)
-        self.assertIn("and not os.environ.get('BAZAAR_LINK_API', '').strip()", text)
-        self.assertIn('[ -n "${BAZAAR_LINK_API:-}" ]', text)
+        helper = (ROOT / "tools" / "gemini_subagent.py").read_text(encoding="utf-8")
+        self.assertIn('BAZAAR_LINK_KEY_ENV = "BAZAAR_LINK_API"', helper)
+        self.assertIn("bazaar_link_api_key_from_env()", helper)
+        self.assertNotIn("echo BAZAAR_LINK_API=", text)
         agent = (ROOT / ".github" / "workflows" / "agent.yml").read_text(encoding="utf-8")
         self.assertIn("BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}", agent)
         self.assertIn("BAZAARLINK_API_KEY: ${{ secrets.BAZAAR_LINK_API }}", agent)
@@ -1345,7 +1350,9 @@ class GroqWorkflowTests(unittest.TestCase):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertEqual(text.count("GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}"), 3)
         self.assertEqual(text.count("GROQ_MODEL: llama-3.3-70b-versatile"), 3)
-        self.assertIn("Groq's default order is llama-3.3-70b-versatile → openai/gpt-oss-120b", text)
+        helper = (ROOT / "tools" / "gemini_subagent.py").read_text(encoding="utf-8")
+        self.assertIn("llama-3.3-70b-versatile", helper)
+        self.assertIn("openai/gpt-oss-120b", helper)
 
     def test_agent_workflow_uses_the_same_groq_model_order(self):
         text = (ROOT / ".github" / "workflows" / "agent.yml").read_text(encoding="utf-8")
@@ -1354,6 +1361,10 @@ class GroqWorkflowTests(unittest.TestCase):
 
     def test_exhausted_quota_never_silently_skips_mandatory_ai_authored_calls(self):
         text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("and not os.environ.get('GROQ_API_KEY', '').strip()", text)
-        self.assertIn("cannot execute the AI-authored mandatory map sub-agent calls", text)
-        self.assertIn('{ [ -n "${BAZAAR_LINK_API:-}" ] || [ -n "${GEMINI_API_KEY:-}" ] || [ -n "${GROQ_API_KEY:-}" ]; }', text)
+        start = text.index("- name: Orchestrate and review the delegated map")
+        end = text.index("- name: Re-view the AI world", start)
+        step = text[start:end]
+        self.assertIn("python tools/gemini_subagent.py --request subagent_tasks.json", step)
+        self.assertIn('if [ "$HELPER_STATUS" -ne 0 ]; then', step)
+        self.assertIn("if ! python tools/map_orchestration.py assemble", step)
+        self.assertIn("no local or procedural map will be substituted", step)
