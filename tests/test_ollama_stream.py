@@ -304,7 +304,10 @@ class RuntimeSpeedTests(unittest.TestCase):
         self.assertIn("--max-seconds 300", map_step)
         self.assertIn("AI_STALL=900", self.workflow)
         self.assertIn('--stall-seconds "${AI_STALL:-900}"', self.workflow)
-        self.assertIn("smart_11b) AI_TIMEOUT=9000", self.workflow)
+        presets = json.loads((ROOT / "web/lib/model_presets.json").read_text(encoding="utf-8"))["presets"]
+        self.assertEqual(presets["smart_11b"]["timeout_seconds"], 9000)
+        self.assertIn("MODEL_TIMEOUT_SECONDS: ${{ steps.model-preset.outputs.timeout_seconds }}", self.workflow)
+        self.assertIn('AI_TIMEOUT="$MODEL_TIMEOUT_SECONDS"', self.workflow)
         self.assertNotIn("--max-seconds", self.workflow[:start])
 
     def test_map_research_and_reviews_do_not_reenter_a_full_plan_loop(self):
@@ -807,7 +810,8 @@ class BlueprintSizeTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
         start = workflow.index("- name: Orchestrate and review the delegated map")
         block = workflow[start:start + 900]
-        self.assertIn("MODEL_QUALITY: ${{ inputs.model_quality }}", block)
+        self.assertIn("MODEL_QUALITY: ${{ steps.model-preset.outputs.quality }}", block)
+        self.assertIn("AI_MODEL: ${{ env.AI_MODEL }}", block)
 
 
 class TypingCommandLineTests(unittest.TestCase):

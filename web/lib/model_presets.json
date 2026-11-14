@@ -1,0 +1,49 @@
+{
+  "presets": {
+    "fast": {
+      "label": "Fast",
+      "model": "qwen3:4b",
+      "summary": "Quick drafts",
+      "meta": "8 GB",
+      "cache_version": "qwen3-4b-v1",
+      "minimum_gib": 8,
+      "timeout_seconds": 3600
+    },
+    "medium": {
+      "label": "Medium",
+      "model": "qwen3:8b",
+      "summary": "Balanced",
+      "meta": "Default",
+      "cache_version": "qwen3-8b-v1",
+      "minimum_gib": 8,
+      "timeout_seconds": 3600
+    },
+    "hard": {
+      "label": "Hard",
+      "model": "qwen3:8b",
+      "summary": "Strong reasoning",
+      "meta": "Recommended",
+      "cache_version": "qwen3-8b-v3",
+      "minimum_gib": 8,
+      "timeout_seconds": 5400
+    },
+    "smart_11b": {
+      "label": "Smart 11B",
+      "model": "qwen3:14b",
+      "summary": "Deeper reasoning",
+      "meta": "20 GB",
+      "cache_version": "qwen3-14b-v1",
+      "minimum_gib": 20,
+      "timeout_seconds": 9000
+    },
+    "animation_best": {
+      "label": "Animation",
+      "model": "deepseek-r1:8b",
+      "summary": "Cinematic",
+      "meta": "Slower",
+      "cache_version": "deepseek-r1-8b-v1",
+      "minimum_gib": 14,
+      "timeout_seconds": 7200
+    }
+  }
+}

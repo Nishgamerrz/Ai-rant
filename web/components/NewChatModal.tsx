@@ -1,11 +1,24 @@
 "use client";
 import { useState } from "react";
-import { ModelSelector } from "./ModelSelector";
+import { ModelSelector, type ModelId } from "./ModelSelector";
+import { MODEL_PRESETS, normalizeModelId } from "@/lib/modelPresets";
 import { encodeFaceReference } from "@/lib/faceReference";
+
+function modelDispatchReport(requested: ModelId, response: any): string {
+  const requestedPreset = MODEL_PRESETS[requested];
+  const quality = normalizeModelId(response?.model_quality) || requested;
+  const resolvedPreset = MODEL_PRESETS[quality];
+  const model = String(response?.selected_model || resolvedPreset.model);
+  const label = String(response?.model_label || resolvedPreset.label);
+  if (quality !== requested || model !== requestedPreset.model) {
+    return `Model selection mismatch: UI requested ${requestedPreset.label} (${requested}) → ${requestedPreset.model}; dispatch resolved ${label} (${quality}) → ${model}.`;
+  }
+  return `Dispatch resolved ${label} (${quality}) → ${model}. The workflow log reports the model loaded at runtime.`;
+}
 
 export function NewChatModal({ open, onClose, onStart }: { open: boolean; onClose: () => void; onStart: (payload: any) => void }) {
   const [kind, setKind] = useState<"agent" | "rbx">("agent");
-  const [model, setModel] = useState("hard");
+  const [model, setModel] = useState<ModelId>("hard");
   const [prompt, setPrompt] = useState("");
   const [referenceImage, setReferenceImage] = useState<File | null>(null);
   const [storyTopic, setStoryTopic] = useState("In a world where the last person to fall asleep each night gets one wish, two brothers keep each other awake on purpose");
@@ -33,6 +46,7 @@ export function NewChatModal({ open, onClose, onStart }: { open: boolean; onClos
         });
         const j = await res.json();
         if (!res.ok) throw new Error(j.error || "Dispatch failed");
+        const modelReport = modelDispatchReport(model, j);
         const chatToken = String(j.chatToken || "");
         const dispatchId = String(j.dispatchId || "");
         if (chatToken) sessionStorage.setItem("nishagent_pending_chat_key", chatToken);
@@ -89,7 +103,7 @@ export function NewChatModal({ open, onClose, onStart }: { open: boolean; onClos
         } else if (referenceImage) {
           imageQueueError = "The run started but is still being discovered. Select it from the sidebar and attach the face reference with Photo.";
         }
-        onStart({ kind: "agent", model, prompt, runId, chatToken, dispatchId, createdAfter: before - 5000, chatNotice: imageQueueError });
+        onStart({ kind: "agent", model, prompt, runId, chatToken, dispatchId, modelReport, createdAfter: before - 5000, chatNotice: imageQueueError });
         setReferenceImage(null);
         onClose();
       } else {
@@ -113,6 +127,9 @@ export function NewChatModal({ open, onClose, onStart }: { open: boolean; onClos
           const is409rbx = res.status === 409 || String(j.error||"").includes("409") || String(j.error||"").toLowerCase().includes("already");
           if (!is409rbx) throw new Error(j.error || "Dispatch failed");
         }
+        const modelReport = res.ok
+          ? modelDispatchReport(model, j)
+          : `Requested preset ${MODEL_PRESETS[model].label} (${model}) → ${MODEL_PRESETS[model].model}; the dispatch was rate-limited, so the existing run's selection is not confirmed.`;
         let runId: number | null = null;
         for (let i = 0; i < 10; i++) {
           await new Promise((r) => setTimeout(r, 1500));
@@ -125,7 +142,7 @@ export function NewChatModal({ open, onClose, onStart }: { open: boolean; onClos
             }
           } catch {}
         }
-        onStart({ kind: "rbx", model, storyTopic, runId });
+        onStart({ kind: "rbx", model, storyTopic, runId, modelReport });
         onClose();
       }
     } catch (e: any) {

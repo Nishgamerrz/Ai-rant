@@ -135,6 +135,16 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Resolve the requested model preset
+        id: model-preset
+        env:
+          MODEL_QUALITY: ${{ inputs.model_quality }}
+        run: |
+          mkdir -p dist
+          python tools/model_presets.py "$MODEL_QUALITY" \
+            --github-output "$GITHUB_OUTPUT" \
+            --json-output dist/model_selection.json
+
       - name: Verify ANSI colours in the Actions console
         run: |
           python - <<'PY'
@@ -229,7 +239,9 @@ jobs:
         env:
           STORY_TOPIC: ${{ steps.refine.outputs.story_topic || inputs.story_topic }}
           WORLD_THEME: ${{ steps.refine.outputs.world_theme || inputs.world_theme }}
-          MODEL_QUALITY: ${{ inputs.model_quality }}
+          MODEL_QUALITY: ${{ steps.model-preset.outputs.quality }}
+          MODEL_PRESET_LABEL: ${{ steps.model-preset.outputs.label }}
+          SELECTED_MODEL: ${{ steps.model-preset.outputs.selected_model }}
           CAST_NAMES: ${{ env.CAST_NAMES }}
           VOICE_STYLE: ${{ inputs.voice_style || 'thin_male' }}
         run: |
@@ -251,6 +263,7 @@ jobs:
                   f'- **Story prompt:** {topic}\n'
                   f'- **Theme:** {theme}\n'
                   f'- **Length / preset / voice:** {clean(os.environ.get("DURATION_LABEL", "?"))} ({clean(os.environ["DURATION_SECONDS"])} s, window {clean(os.environ.get("DURATION_WINDOW", ""))}) / {clean(os.environ["MODEL_QUALITY"])} / {clean(os.environ["VOICE_STYLE"])}\n'
+                  f'- **Selected local model:** {clean(os.environ["MODEL_PRESET_LABEL"])} ({clean(os.environ["MODEL_QUALITY"])}) → {clean(os.environ["SELECTED_MODEL"])}; this exact preset/model pair is used by the workflow.\n'
                   '- **Lighting:** the AI chooses a story-fitting global hour and any scene-hour changes from the narration and theme.\n'
                   f'- **Avatar cast:** {clean(os.environ.get("CAST_NAMES", ""))}\n'
                   '- **Tools:** selected Ollama model, Roblox public avatar APIs, optional web research, edge-tts, Three.js + Rapier, Chromium, FFmpeg, Python validation, ReportLab, ZIP.\n'
@@ -358,7 +371,8 @@ jobs:
       - name: Reclaim runner disk space for the selected model
         id: disk-space
         env:
-          MODEL_QUALITY: ${{ inputs.model_quality }}
+          MODEL_QUALITY: ${{ steps.model-preset.outputs.quality }}
+          MODEL_REQUIRED_GIB: ${{ steps.model-preset.outputs.minimum_gib }}
         run: |
           python tools/say.py plan "Runner storage before cleanup:"
           df -h "$GITHUB_WORKSPACE"
@@ -373,14 +387,11 @@ jobs:
           AVAILABLE_GIB=$((AVAILABLE_KB / 1024 / 1024))
           python tools/say.py plan "Free storage after cleanup: ${AVAILABLE_GIB} GiB."
           CACHE_RESTORE_ALLOWED=true
-          # Space is reserved for the selected model and the renderer/build tools;
-          # no second Ollama model is downloaded as an automatic fallback.
-          case "$MODEL_QUALITY" in
-            fast|medium) REQUIRED_GIB=8 ;;
-            hard) REQUIRED_GIB=8 ;;
-            animation_best) REQUIRED_GIB=14 ;;
-            smart_11b) REQUIRED_GIB=20 ;;
-            *) REQUIRED_GIB=10 ;;
+          # Space is reserved from the same manifest that supplies the model and cache key.
+          # No second Ollama model is downloaded as an automatic fallback.
+          REQUIRED_GIB="$MODEL_REQUIRED_GIB"
+          case "$REQUIRED_GIB" in
+            ''|*[!0-9]*) echo "Invalid selected-model disk requirement: $REQUIRED_GIB" >&2; exit 1 ;;
           esac
           if [ "$AVAILABLE_GIB" -lt "$REQUIRED_GIB" ]; then
             echo "Only ${AVAILABLE_GIB} GiB is free after cleanup; this preset needs at least ${REQUIRED_GIB} GiB for its selected model and working files." >&2
@@ -398,11 +409,14 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.ollama/models
-          key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'animation_best' && 'deepseek-r1-8b-v1' || inputs.model_quality == 'smart_11b' && 'qwen3-14b-v1' || inputs.model_quality == 'hard' && 'qwen3-8b-v3' || inputs.model_quality == 'medium' && 'qwen3-8b-v1' || 'qwen3-4b-v1' }}
+          key: ollama-${{ runner.os }}-${{ steps.model-preset.outputs.quality }}-${{ steps.model-preset.outputs.cache_version }}
 
       - name: Download the selected AI model for story and world/camera planning
         env:
-          MODEL_QUALITY: ${{ inputs.model_quality }}
+          MODEL_QUALITY: ${{ steps.model-preset.outputs.quality }}
+          MODEL_PRESET_LABEL: ${{ steps.model-preset.outputs.label }}
+          SELECTED_MODEL: ${{ steps.model-preset.outputs.selected_model }}
+          MODEL_TIMEOUT_SECONDS: ${{ steps.model-preset.outputs.timeout_seconds }}
           MODEL_CACHE_HIT: ${{ steps.model-cache.outputs.cache-hit }}
         run: |
           # Everything this step prints is kept. If it fails, the tail goes into the run
@@ -444,36 +458,23 @@ jobs:
             echo "## Ollama did not start" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          # Every preset is a thinking model for narration and concise map
-          # orchestration/review. The text sub-agent receives the full map schema
-          # and creates the map, cameras, face beats, and model anchors; the local
-          # model never emits the full blueprint. Keep the established quality
-          # tiers and selected model for the entire run.
-          #   fast           4B   - quick, structured director response
-          #   medium         8B   - the everyday choice
-          #   hard           8B   - same weights, longer narration reasoning budget
-          #   smart_11b     14B   - the 11B+ class, deeper reasoning
-          #   animation_best R1 8B - reasoning model for the story and review
-          case "$MODEL_QUALITY" in
-            fast) SELECTED_MODEL=qwen3:4b; MODEL_THINKING=true ;;
-            medium) SELECTED_MODEL=qwen3:8b; MODEL_THINKING=true ;;
-            hard) SELECTED_MODEL=qwen3:8b; MODEL_THINKING=true ;;
-            smart_11b) SELECTED_MODEL=qwen3:14b; MODEL_THINKING=true ;;
-            animation_best) SELECTED_MODEL=deepseek-r1:8b; MODEL_THINKING=true ;;
-            *) echo "Unknown model quality: $MODEL_QUALITY" >&2; exit 1 ;;
+          # The preset/model/cache selection is resolved from the shared manifest
+          # before download. This step consumes that exact output; it never maps the
+          # quality label a second time or silently substitutes another local model.
+          if [ -z "$SELECTED_MODEL" ] || [ -z "$MODEL_PRESET_LABEL" ] || [ -z "$MODEL_QUALITY" ]; then
+            echo "The shared preset resolver returned incomplete model-selection data." >&2
+            exit 1
+          fi
+          case "$MODEL_TIMEOUT_SECONDS" in
+            ''|*[!0-9]*) echo "Invalid model request timeout: $MODEL_TIMEOUT_SECONDS" >&2; exit 1 ;;
           esac
+          MODEL_THINKING=true
+          AI_TIMEOUT="$MODEL_TIMEOUT_SECONDS"
+          python tools/say.py success "Selected preset $MODEL_PRESET_LABEL ($MODEL_QUALITY) -> Ollama model $SELECTED_MODEL; the same model is used for every local call."
           echo "AI_MODEL=$SELECTED_MODEL" >> "$GITHUB_ENV"
           echo "OLLAMA_THINKING=$MODEL_THINKING" >> "$GITHUB_ENV"
-          # A larger model on a CPU runner needs a much longer per-request budget.
-          # General narration calls retain their idle timeout; map orchestration and
-          # review use separate hard wall-clock budgets so planning cannot run for hours.
-          case "$MODEL_QUALITY" in
-            fast|medium) AI_TIMEOUT=3600 ;;
-            hard) AI_TIMEOUT=5400 ;;
-            smart_11b) AI_TIMEOUT=9000 ;;
-            animation_best) AI_TIMEOUT=7200 ;;
-            *) AI_TIMEOUT=5400 ;;
-          esac
+          # General narration calls retain the manifest-selected idle timeout; map
+          # orchestration and review use separate hard wall-clock budgets.
           # The local model emits only a compact orchestration brief and a short
           # review. The delegated text sub-agent creates the map, cameras and models.
           MAP_ORCHESTRATION_TOKENS=1200
@@ -559,14 +560,14 @@ jobs:
           python tools/model_residency.py --check --model "$SELECTED_MODEL" --label "model warm-up"
           {
             echo "## Selected generation model"
-            echo "- Preset: $MODEL_QUALITY"
+            echo "- Preset: $MODEL_PRESET_LABEL ($MODEL_QUALITY)"
             echo "- Model: $SELECTED_MODEL"
             echo "- Restored preset cache: ${MODEL_CACHE_HIT:-false}"
             echo "- Used for story writing, concise map orchestration and final map review; thinking mode: $MODEL_THINKING (on for every preset)."
             echo "- Map/camera/face/model creation is delegated to the text sub-agent; the selected local model only directs and reviews its work."
             echo "- Map orchestration is capped at 1,200 output tokens and 600 seconds; acceptance review is capped at 420 output tokens and 300 seconds."
             echo "- The selected local model is kept for the entire run. If it cannot continue, the call fails clearly; no other Ollama model is tried."
-            echo "- Presets: fast qwen3:4b, medium qwen3:8b, hard qwen3:8b (longer reasoning budget), smart_11b qwen3:14b (14.8B), animation_best deepseek-r1:8b."
+            echo "- Preset definitions and UI labels share web/lib/model_presets.json."
             echo "- Speed: flash attention + q8 KV cache, 60-minute model keep-alive, one loaded model, and compact per-step token budgets. The live console prints tokens/second for every AI call."
             echo "- llama3.2-vision was dropped: current Ollama cannot load its mllama architecture (HTTP 500) and it has no thinking channel."
             echo "- animation_best is the ~5.2 GB, 128K-context, text-only DeepSeek-R1 reasoning model for world/shot planning; it is not a mesh editor. Avatar mesh loading and native Roblox animation retargeting remain unchanged."
@@ -577,7 +578,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ~/.ollama/models
-          key: ollama-${{ runner.os }}-${{ inputs.model_quality }}-${{ inputs.model_quality == 'animation_best' && 'deepseek-r1-8b-v1' || inputs.model_quality == 'smart_11b' && 'qwen3-14b-v1' || inputs.model_quality == 'hard' && 'qwen3-8b-v3' || inputs.model_quality == 'medium' && 'qwen3-8b-v1' || 'qwen3-4b-v1' }}
+          key: ollama-${{ runner.os }}-${{ steps.model-preset.outputs.quality }}-${{ steps.model-preset.outputs.cache_version }}
 
       - name: Resolve username-matched local avatar models and prepare assets for the short
         env:
@@ -758,7 +759,7 @@ jobs:
         env:
           STORY_TOPIC: ${{ steps.refine.outputs.story_topic || inputs.story_topic }}
           MAP_DETAIL: ${{ inputs.map_detail }}
-          MODEL_QUALITY: ${{ inputs.model_quality }}
+          MODEL_QUALITY: ${{ steps.model-preset.outputs.quality }}
           AI_MODEL: ${{ env.AI_MODEL }}
           OLLAMA_THINKING: ${{ env.OLLAMA_THINKING }}
           WORLD_THEME: ${{ steps.refine.outputs.world_theme || inputs.world_theme }}

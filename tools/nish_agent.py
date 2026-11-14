@@ -55,6 +55,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from console_style import paint  # noqa: E402
+from model_presets import DEFAULT_MODEL, MODEL_MAP, resolve_model  # noqa: E402
 from ai_activity import redact_secrets, sanitize_data  # noqa: E402
 from agent_tools import TOOL_GUIDE, TOOL_NAMES, execute_tool  # noqa: E402
 
@@ -62,16 +63,6 @@ WORKSPACE = ROOT / "dist" / "agent_workspace"
 CHAT_LOG = ROOT / "dist" / "agent_chat.json"
 TOOLS_LOG = ROOT / "dist" / "agent_tools.jsonl"
 SYSTEM_FILE = ROOT / "dist" / "agent_system.txt"
-
-MODEL_MAP = {
-    "fast": "qwen3:4b",
-    "medium": "qwen3:8b",
-    "hard": "qwen3:8b",
-    "smart_11b": "qwen3:14b",
-    "animation_best": "deepseek-r1:8b",
-}
-
-DEFAULT_MODEL = "qwen3:8b"
 
 TOOL_DOC = """
 You are NishAgent, a helpful AI that lives inside a GitHub Actions sandbox.
@@ -733,9 +724,10 @@ def main() -> None:
     args = ap.parse_args()
 
     preset = (args.model or os.environ.get("MODEL_QUALITY") or "hard").strip().lower()
-    model = MODEL_MAP.get(preset, preset if ":" in preset else DEFAULT_MODEL)
-    if ":" not in model:
-        model = MODEL_MAP.get(model.lower(), model)
+    try:
+        model = resolve_model(preset)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
 
     WORKSPACE.mkdir(parents=True, exist_ok=True)
     # ensure gitignore inside workspace

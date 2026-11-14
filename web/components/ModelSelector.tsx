@@ -1,14 +1,18 @@
 "use client";
-export const MODELS = [
-  { id: "fast", label: "Fast", desc: "qwen3:4b · Quick drafts", meta: "8 GB" },
-  { id: "medium", label: "Medium", desc: "qwen3:8b · Balanced", meta: "Default" },
-  { id: "hard", label: "Hard", desc: "qwen3:8b · Strong reasoning", meta: "Recommended" },
-  { id: "smart_11b", label: "Smart 11B", desc: "qwen3:14b · Deeper", meta: "20 GB" },
-  { id: "animation_best", label: "Animation", desc: "deepseek-r1:8b · Cinematic", meta: "Slower" },
-] as const;
-export type ModelId = typeof MODELS[number]["id"];
+import { MODEL_IDS, MODEL_PRESETS, type ModelId } from "@/lib/modelPresets";
 
-export function ModelSelector({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+export { type ModelId };
+export const MODELS = MODEL_IDS.map((id) => {
+  const preset = MODEL_PRESETS[id];
+  return {
+    id,
+    label: preset.label,
+    desc: `${preset.model} · ${preset.summary}`,
+    meta: preset.meta,
+  };
+});
+
+export function ModelSelector({ value, onChange }: { value: ModelId; onChange: (v: ModelId) => void }) {
   return (
     <div className="space-y-2.5">
       <div className="text-[11px] font-semibold tracking-widest text-zinc-500 uppercase">Model</div>

@@ -130,7 +130,10 @@ export default function Home() {
           setModalOpen(false);
           const rid = payload?.runId;
           const chatToken = String(payload?.chatToken || "");
-          setChatNotice(String(payload?.chatNotice || ""));
+          setChatNotice([payload?.modelReport, payload?.chatNotice]
+            .map((value) => String(value || "").trim())
+            .filter(Boolean)
+            .join(" "));
           const rememberSession = (run: number) => {
             if (!chatToken) return;
             sessionStorage.setItem(`nishagent_chat_${run}`, chatToken);
