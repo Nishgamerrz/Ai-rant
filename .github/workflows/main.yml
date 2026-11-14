@@ -6,7 +6,7 @@ on:
       story_topic:
         description: 'Story topic — one line, "In a world where ..." works best (24 ideas in STORY_TOPICS.md)'
         required: true
-        default: 'In a world where the last person to fall asleep each night gets one wish, two brothers keep each other awake on purpose'
+        default: 'In this world, the last person to fall asleep each night gets one wish, so two brothers keep each other awake on purpose in their shared bedroom.'
         type: string
       character_usernames:
         description: 'Usernames, COMMA separated (e.g. Lead, Friend). First = lead.'
@@ -68,7 +68,7 @@ on:
       story_topic:
         description: 'Story topic — one line, "In a world where ..." works best'
         required: true
-        default: 'In a world where the last person to fall asleep each night gets one wish, two brothers keep each other awake on purpose'
+        default: 'In this world, the last person to fall asleep each night gets one wish, so two brothers keep each other awake on purpose in their shared bedroom.'
         type: string
       character_usernames:
         description: 'Usernames, COMMA separated (e.g. Lead, Friend). First = lead.'

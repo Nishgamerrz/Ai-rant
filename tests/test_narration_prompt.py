@@ -34,10 +34,11 @@ class OpeningLineTests(unittest.TestCase):
         self.assertIn("preserving the premise and events", WORKFLOW)
         self.assertIn("The creation helper's complete story becomes the proofreading input", WORKFLOW)
 
-    def test_the_default_topic_is_one_in_a_world_where_line(self):
+    def test_the_default_topic_is_the_shared_bedroom_premise(self):
         start = WORKFLOW.index("      story_topic:")
         block = WORKFLOW[start:WORKFLOW.index("      character_usernames:", start)]
-        self.assertIn("default: 'In a world where", block)
+        self.assertIn("default: 'In this world, the last person to fall asleep each night gets one wish, ", block)
+        self.assertIn("their shared bedroom.", block)
         self.assertNotIn("gravity", block)
         self.assertIn('"In a world where ..." works best', WORKFLOW)
 
