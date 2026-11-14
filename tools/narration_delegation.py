@@ -85,14 +85,23 @@ def _validated_task(candidate, *, task_id: str, kind: str, topic: str,
     actual_topic = candidate["topic"].strip().lower()
     instruction = candidate["instruction"].strip()
     task_input = candidate["input"].strip()
-    expected_input = narration if kind == "write" else "USE_T1_CREATION_RESULT"
-    input_is_valid = (narration in task_input if kind == "write"
-                      else task_input == expected_input)
+    expected_input = "USE_FIRST_DRAFT" if kind == "write" else "USE_T1_CREATION_RESULT"
+    if kind == "write":
+        # The local model already returns the complete narration in its top-level
+        # field. Asking it to duplicate a long story byte-for-byte inside t1.input
+        # made valid drafts fail when the structured output shortened or altered
+        # that copy. The model-authored marker keeps the call explicit; after
+        # validation, replace only that marker with the exact top-level draft.
+        input_is_valid = task_input == expected_input or narration in task_input
+        if task_input == expected_input:
+            task_input = narration
+    else:
+        input_is_valid = task_input == expected_input
     if (actual_id != task_id or actual_kind != kind or actual_topic != topic
             or not instruction or len(instruction) > MAX_TASK_INSTRUCTION_CHARS
             or not input_is_valid):
-        detail = ("include the complete first-draft narration verbatim" if kind == "write"
-                  else f"use the exact {expected_input!r} marker")
+        detail = ("use the exact 'USE_FIRST_DRAFT' marker or include the complete first-draft narration verbatim"
+                  if kind == "write" else f"use the exact {expected_input!r} marker")
         raise DelegationError(
             f"required narration task {task_id!r} must be kind={kind!r}, topic={topic!r}, "
             f"have a non-empty bounded instruction, and {detail}"

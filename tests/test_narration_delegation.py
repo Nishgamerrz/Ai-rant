@@ -36,7 +36,7 @@ class NarrationDelegationTests(unittest.TestCase):
                 {
                     "id": "t1", "kind": "write", "topic": "narration",
                     "instruction": "Create and develop the complete spoken story from this draft.",
-                    "input": self.narration,
+                    "input": "USE_FIRST_DRAFT",
                 },
                 {
                     "id": "t2", "kind": "edit", "topic": "narration",
@@ -76,6 +76,27 @@ class NarrationDelegationTests(unittest.TestCase):
         self.assertEqual(self.first_draft_path.read_text(encoding="utf-8"), self.narration + "\n")
         self.assertEqual(result["creation_task"], creation["tasks"][0])
         self.assertEqual(result["proofread_task"], template["tasks"][0])
+
+    def test_legacy_verbatim_creation_input_remains_supported(self):
+        reply = {**self.reply, "subagent_tasks": [
+            {**self.reply["subagent_tasks"][0], "input": self.narration},
+            self.reply["subagent_tasks"][1],
+        ]}
+        result = self.extract(reply)
+        creation = json.loads(self.creation_request_path.read_text(encoding="utf-8"))
+        self.assertEqual(creation["tasks"][0]["input"], self.narration)
+        self.assertEqual(result["creation_task"]["input"], self.narration)
+
+    def test_first_draft_marker_injects_a_long_narration_without_duplicate_copy(self):
+        narration = ("A lantern flickered beside the station, and Maya waited for the last train. "
+                     * 120).strip()
+        self.assertLessEqual(len(narration), 12000)
+        reply = {**self.reply, "narration": narration}
+        result = self.extract(reply)
+        creation = json.loads(self.creation_request_path.read_text(encoding="utf-8"))
+        self.assertEqual(self.reply["subagent_tasks"][0]["input"], "USE_FIRST_DRAFT")
+        self.assertEqual(creation["tasks"][0]["input"], narration)
+        self.assertEqual(result["creation_task"]["input"], narration)
 
     def test_only_the_exact_two_valid_ai_authored_tasks_are_forwarded(self):
         invalid_replies = []

@@ -46,6 +46,8 @@ class OpeningLineTests(unittest.TestCase):
         self.assertIn("YOU MUST INVOLVE THE TEXT SUB-AGENT IN BOTH NARRATION CREATION AND PROOFREADING", WORKFLOW)
         self.assertIn('kind "write", topic "narration"', WORKFLOW)
         self.assertIn('kind "edit" and topic "narration"', WORKFLOW)
+        self.assertIn('set input exactly to "USE_FIRST_DRAFT"', WORKFLOW)
+        self.assertIn("replaces only that explicit marker with your complete first draft verbatim", WORKFLOW)
         self.assertIn("proofread grammar, spelling, punctuation, dialogue", WORKFLOW)
         self.assertIn("return the complete corrected narration only", WORKFLOW)
         self.assertIn("Both helper outputs must visibly stream", WORKFLOW)
