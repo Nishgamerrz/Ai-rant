@@ -74,6 +74,30 @@ class ShapeTests(unittest.TestCase):
                                           "size": [4, 4, 4], "color": [200, 120, 240]}), 30, (), 2)
             self.assertEqual(out["props"][2]["shape"], shape)
 
+    def test_asset_search_measurements_and_review_provenance_survive_builder_normalization(self):
+        source = plan_with({"name": "Lantern", "shape": "Block", "material": "Metal",
+                            "position": [5, 4, -60], "size": [4, 4, 4],
+                            "color": [200, 120, 240]},
+            asset_references=[{"anchor_name": "Lantern", "search_status": "results_found",
+                               "matches": [{"title": "Lantern mesh", "asset_id": "7654321",
+                                            "url": "https://create.roblox.com/store/asset/7654321"}],
+                               "measurements": [{"path": "references/lantern.obj",
+                                                  "dimensions_source_units": [4, 2, 1],
+                                                  "units": "source units; not assumed studs",
+                                                  "studs_per_unit": 2,
+                                                  "estimated_dimensions_studs": [8, 4, 2]}],
+                               "reference_only": True, "imported_into_render": False}],
+            subagent_review={"accepted": ["t1", "t2"], "note": "Reviewed.",
+                             "reviewer": {"kind": "context_aware_tool_enabled_subagent",
+                                          "provider": "groq", "selected_local_model": "qwen3:8b"}})
+        normalized = bsm.validate(source, 30, (), 2)
+        reference = normalized["asset_references"][0]
+        self.assertEqual(reference["matches"][0]["asset_id"], "7654321")
+        self.assertEqual(reference["measurements"][0]["dimensions_source_units"], [4, 2, 1])
+        self.assertEqual(reference["measurements"][0]["estimated_dimensions_studs"], [8, 4, 2])
+        self.assertFalse(reference["imported_into_render"])
+        self.assertEqual(normalized["subagent_review"]["reviewer"]["selected_local_model"], "qwen3:8b")
+
     def test_an_unknown_shape_falls_back_instead_of_failing(self):
         out = bsm.validate(plan_with({"name": "Odd Shape", "shape": "dodecahedron",
                                       "material": "Slate", "position": [5, 4, -60],

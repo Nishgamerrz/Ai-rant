@@ -103,6 +103,18 @@ class RequestTests(unittest.TestCase):
         bare = normalize_request([{"kind": "verify", "instruction": "Check this"}])
         self.assertEqual(bare["context"], "")
         self.assertEqual(bare["tasks"][0]["kind"], "verify")
+        governed = normalize_request({
+            "tasks": [{"id": "t2", "kind": "write", "instruction": "Search the model.",
+                       "topic": "models", "use_tools": True}],
+            "tool_requirements": {"t2": {"asset_search_names": ["Parcel Lantern"],
+                                           "required_tools": ["audit_roblox_map", "not_a_tool"],
+                                           "inspect_fetched_meshes": True}},
+        })
+        self.assertEqual(governed["tool_requirements"]["t2"]["asset_search_names"],
+                         ["Parcel Lantern"])
+        self.assertEqual(governed["tool_requirements"]["t2"]["required_tools"],
+                         ["audit_roblox_map"])
+        self.assertTrue(governed["tool_requirements"]["t2"]["inspect_fetched_meshes"])
 
     def test_unknown_kinds_fall_back_to_answer_and_empty_tasks_are_dropped(self):
         request = normalize_request({"tasks": [
@@ -177,6 +189,111 @@ class RequestTests(unittest.TestCase):
         self.assertIn("dimensions_source_units", next_prompt)
         self.assertIn("[12.0, 8.0, 6.0]", next_prompt)
         self.assertEqual(result["tool_results"][0]["result"], mesh)
+
+    def test_missing_roblox_search_is_reprompted_until_the_model_authors_it(self):
+        missing = json.dumps({"answer": "No reference found.", "tool_calls": []})
+        search = json.dumps({"answer": "Searching the Creator Store.", "tool_calls": [{
+            "tool": "search_roblox_meshes",
+            "arguments": {"query": "Parcel Lantern Roblox model", "limit": 8},
+        }]})
+        final = json.dumps({"answer": "No supported public listing was returned.", "tool_calls": []})
+        with tempfile.TemporaryDirectory() as tmp:
+            with (patch("gemini_subagent.call_any", side_effect=[(missing, "gemini"),
+                                                                  (search, "gemini"),
+                                                                  (final, "gemini")]) as provider,
+                  patch("gemini_subagent.execute_tool", return_value={
+                      "ok": True, "query": "Parcel Lantern Roblox model", "results": [],
+                      "source": "public web reference search",
+                  }) as execute):
+                result = run_tool_agent(
+                    {"kind": "write", "topic": "models", "instruction": "Search this anchor."},
+                    "Model-anchor names assigned to the AI-authored models task: Parcel Lantern",
+                    model="gemini-2.5-flash", api_key="test-key", groq_key="",
+                    groq_model_name="", root=Path(tmp), required_asset_names=["Parcel Lantern"])
+        self.assertEqual(provider.call_count, 3)
+        self.assertIn("Required tool-use retry", provider.call_args_list[1].args[0])
+        execute.assert_called_once()
+        self.assertEqual(result["tool_calls"][0]["tool"], "search_roblox_meshes")
+        self.assertEqual(result["tool_results"][0]["result"]["results"], [])
+
+    def test_successfully_downloaded_mesh_is_measured_scaled_and_used_before_final_answer(self):
+        def turn(answer="", calls=()):
+            return json.dumps({"answer": answer, "tool_calls": list(calls)})
+
+        search_call = {"tool": "search_roblox_meshes",
+                       "arguments": {"query": "Parcel Lantern Roblox model", "limit": 8}}
+        fetch_call = {"tool": "fetch_mesh_reference",
+                      "arguments": {"url": "https://assets.example/parcel.obj",
+                                    "path": "references/parcel_lantern.obj"}}
+        inspect_call = {"tool": "inspect_mesh_dimensions",
+                        "arguments": {"path": "references/parcel_lantern.obj"}}
+        placement_call = {"tool": "plan_mesh_placement",
+                          "arguments": {"name": "Parcel Lantern", "dimensions": [4, 2, 1],
+                                        "studs_per_unit": 2, "model": "lamp"}}
+        plan_answer = json.dumps({"props": [{"name": "Parcel Lantern", "size": [2, 2, 2]}]})
+        responses = [
+            (turn("Searching the exact assigned anchor.", [search_call]), "gemini"),
+            (turn("Fetching a supported reference file.", [fetch_call]), "gemini"),
+            (turn("Measuring the downloaded file.", [inspect_call]), "gemini"),
+            (turn(plan_answer), "gemini"),  # rejected until measured bounds are placed
+            (turn("Applying the explicit source-unit scale.", [placement_call]), "gemini"),
+            (turn(plan_answer), "gemini"),
+        ]
+        search_result = {"ok": True, "query": "Parcel Lantern Roblox model",
+                         "source": "Roblox Creator Store API", "creator_store_api_status": "available",
+                         "results": [{"title": "Parcel Lantern", "asset_id": "7654321",
+                                      "url": "https://create.roblox.com/store/asset/7654321"}]}
+        fetch_result = {"ok": True, "path": "references/parcel_lantern.obj",
+                        "source": "https://assets.example/parcel.obj", "format": "obj"}
+        inspect_result = {"ok": True, "path": "references/parcel_lantern.obj",
+                          "dimensions_source_units": [4.0, 2.0, 1.0],
+                          "units": "source mesh coordinate units; not assumed to be Roblox studs"}
+        placement_result = {"ok": True, "source_dimensions": [4.0, 2.0, 1.0],
+                            "scale_applied": 1.0, "anchor": {"name": "Parcel Lantern",
+                            "position": [8, 2, 4], "size": [8, 4, 2], "model": "lamp"}}
+        with tempfile.TemporaryDirectory() as tmp:
+            with (patch("gemini_subagent.call_any", side_effect=responses) as provider,
+                  patch("gemini_subagent.execute_tool", side_effect=[search_result, fetch_result,
+                                                                       inspect_result, placement_result]) as execute):
+                result = run_tool_agent(
+                    {"kind": "write", "topic": "models", "instruction": "Create the assigned model."},
+                    "Model-anchor names assigned to the AI-authored models task: Parcel Lantern",
+                    model="gemini-2.5-flash", api_key="test-key", groq_key="",
+                    groq_model_name="", root=Path(tmp), required_asset_names=["Parcel Lantern"],
+                    inspect_fetched_meshes=True, place_measured_meshes=True)
+        self.assertEqual(provider.call_count, 6)
+        self.assertEqual(execute.call_count, 4)
+        self.assertIn("Required tool-use retry", provider.call_args_list[4].args[0])
+        self.assertEqual([call["tool"] for call in result["tool_calls"]], [
+            "search_roblox_meshes", "fetch_mesh_reference", "inspect_mesh_dimensions",
+            "plan_mesh_placement",
+        ])
+        self.assertEqual(result["tool_results"][2]["result"]["dimensions_source_units"],
+                         [4.0, 2.0, 1.0])
+        self.assertEqual(result["tool_results"][3]["result"]["anchor"]["size"], [8, 4, 2])
+
+    def test_required_handoff_audit_tool_is_not_skipped(self):
+        no_call = json.dumps({"answer": "The map is fine.", "tool_calls": []})
+        audit = json.dumps({"answer": "I will audit the actual map JSON.", "tool_calls": [{
+            "tool": "audit_roblox_map",
+            "arguments": {"path": "map_response.json", "duration": 60, "cast": ["Ava", "Bo"]},
+        }]})
+        final = json.dumps({"answer": json.dumps({"accepted": ["t1", "t2"],
+                            "note": "The plan fits.", "changes_needed": False,
+                            "revision_instruction": ""}), "tool_calls": []})
+        with tempfile.TemporaryDirectory() as tmp:
+            with (patch("gemini_subagent.call_any", side_effect=[(no_call, "gemini"),
+                                                                  (audit, "gemini"),
+                                                                  (final, "gemini")]) as provider,
+                  patch("gemini_subagent.execute_tool", return_value={"ok": True, "world_parts": 9}) as execute):
+                result = run_tool_agent(
+                    {"kind": "agent", "instruction": "Review the current map."}, "Run context",
+                    model="gemini-2.5-flash", api_key="test-key", groq_key="",
+                    groq_model_name="", root=Path(tmp), required_tools=["audit_roblox_map"])
+        self.assertEqual(provider.call_count, 3)
+        self.assertIn("Required tool-use retry", provider.call_args_list[1].args[0])
+        self.assertEqual(result["tool_calls"][0]["tool"], "audit_roblox_map")
+        execute.assert_called_once()
 
     def test_agent_json_parser_does_not_fabricate_missing_calls(self):
         parsed = parse_agent_turn('```json\\n{"answer":"ok","tool_calls":[{"tool":"inspect_image","path":"face.jpg"}]}\\n```')
@@ -474,9 +591,15 @@ class StubApiTests(unittest.TestCase):
                 run = run_tasks({"tasks": [{
                     "id": "t2", "kind": "write", "topic": "models", "use_tools": True,
                     "instruction": "Return one measured, room-fitted house anchor as JSON.",
-                }]}, api_key="test-key", model="gemini-2.5-flash", root=Path(tmp),
+                }], "tool_requirements": {"t2": {
+                    "asset_search_names": ["House Anchor"],
+                    "inspect_fetched_meshes": True, "place_measured_meshes": True,
+                }}}, api_key="test-key", model="gemini-2.5-flash", root=Path(tmp),
                     url=self.url, quiet_console=True)
         self.assertIs(helper.call_args.args[0]["use_tools"], True)
+        self.assertEqual(helper.call_args.kwargs["required_asset_names"], ["House Anchor"])
+        self.assertTrue(helper.call_args.kwargs["inspect_fetched_meshes"])
+        self.assertTrue(helper.call_args.kwargs["place_measured_meshes"])
         self.assertEqual(run["results"][0]["tool_results"][0]["result"]["dimensions_source_units"],
                          [14.0, 8.0, 10.0])
 

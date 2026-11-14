@@ -1415,6 +1415,161 @@ def accent_color(plan, fallback):
             for index, channel in enumerate(ambient)]
 
 
+def _reference_text(value, limit=500):
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
+
+
+def _clean_asset_reference_rows(values, limit=12):
+    rows = []
+    for value in values if isinstance(values, list) else []:
+        if not isinstance(value, dict):
+            continue
+        row = {}
+        for key, size in (("title", 160), ("asset_type", 40), ("creator", 100),
+                          ("snippet", 420), ("source", 100)):
+            if value.get(key):
+                row[key] = _reference_text(value[key], size)
+        asset_id = str(value.get("asset_id") or "").strip()
+        if asset_id.isdigit():
+            row["asset_id"] = asset_id[:32]
+        url = _reference_text(value.get("url"), 500)
+        if url.startswith("https://"):
+            row["url"] = url
+        if row.get("asset_id") or row.get("url"):
+            rows.append(row)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _clean_asset_references(values):
+    """Preserve bounded search/measurement provenance in the generated map JSON."""
+    output = []
+    for value in values if isinstance(values, list) else []:
+        if not isinstance(value, dict):
+            continue
+        name = re.sub(r"[^A-Za-z0-9 _-]", "", _reference_text(value.get("anchor_name"), 48)).strip()
+        if not name:
+            continue
+        searches = []
+        for search in value.get("searches", [])[:4] if isinstance(value.get("searches"), list) else []:
+            if not isinstance(search, dict):
+                continue
+            entry = {
+                "query": _reference_text(search.get("query"), 240),
+                "source": _reference_text(search.get("source"), 80),
+                "creator_store_api_status": _reference_text(search.get("creator_store_api_status"), 40),
+                "results": _clean_asset_reference_rows(search.get("results"), 8),
+            }
+            search_url = _reference_text(search.get("creator_store_search_url"), 500)
+            if search_url.startswith("https://"):
+                entry["creator_store_search_url"] = search_url
+            searches.append(entry)
+        downloads = []
+        for download in value.get("downloaded_meshes", [])[:4] if isinstance(value.get("downloaded_meshes"), list) else []:
+            if not isinstance(download, dict):
+                continue
+            entry = {key: download[key] for key in ("path", "format", "bytes")
+                     if isinstance(download.get(key), (str, int, float))}
+            source = _reference_text(download.get("source"), 500)
+            if source.startswith("https://"):
+                entry["source"] = source
+            if entry:
+                downloads.append(entry)
+        measurements = []
+        for measurement in value.get("measurements", [])[:4] if isinstance(value.get("measurements"), list) else []:
+            if not isinstance(measurement, dict):
+                continue
+            dimensions = measurement.get("dimensions_source_units")
+            if (not isinstance(dimensions, list) or len(dimensions) != 3
+                    or any(isinstance(item, bool) or not isinstance(item, (int, float))
+                           or not math.isfinite(float(item)) or float(item) <= 0 for item in dimensions)):
+                continue
+            entry = {"path": _reference_text(measurement.get("path"), 300),
+                     "dimensions_source_units": [round(float(item), 4) for item in dimensions],
+                     "units": _reference_text(measurement.get("units") or
+                                              "source mesh coordinate units; not assumed to be Roblox studs", 180)}
+            for key in ("bounds_frame", "format", "vertices_measured", "studs_per_unit",
+                        "source_units_per_stud", "scale_applied"):
+                item = measurement.get(key)
+                if isinstance(item, (str, int, float)) and not isinstance(item, bool):
+                    entry[key] = item
+            for key in ("estimated_dimensions_studs",):
+                item = measurement.get(key)
+                if (isinstance(item, list) and len(item) == 3
+                        and all(isinstance(number, (int, float)) and not isinstance(number, bool)
+                                and math.isfinite(float(number)) and float(number) > 0 for number in item)):
+                    entry[key] = [round(float(number), 4) for number in item]
+            bounds = measurement.get("bounds")
+            if isinstance(bounds, dict):
+                clean_bounds = {}
+                for side in ("min", "max"):
+                    vector = bounds.get(side)
+                    if (isinstance(vector, list) and len(vector) == 3
+                            and all(isinstance(number, (int, float)) and not isinstance(number, bool)
+                                    and math.isfinite(float(number)) for number in vector)):
+                        clean_bounds[side] = [round(float(number), 4) for number in vector]
+                if clean_bounds:
+                    entry["bounds"] = clean_bounds
+            measurements.append(entry)
+        placements = []
+        for placement in value.get("placements", [])[:4] if isinstance(value.get("placements"), list) else []:
+            if not isinstance(placement, dict):
+                continue
+            entry = {key: placement[key] for key in
+                     ("source_dimensions", "source_units_per_stud", "scale_applied", "room_size", "studs_per_unit")
+                     if isinstance(placement.get(key), (str, int, float, list))
+                     and not isinstance(placement.get(key), bool)}
+            anchor = placement.get("anchor")
+            if isinstance(anchor, dict):
+                clean_anchor = {}
+                for key in ("name", "model", "shape", "material", "physics"):
+                    if isinstance(anchor.get(key), str):
+                        clean_anchor[key] = _reference_text(anchor[key], 100)
+                for key in ("position", "size", "color"):
+                    vector = anchor.get(key)
+                    if (isinstance(vector, list) and len(vector) == 3
+                            and all(isinstance(number, (int, float)) and not isinstance(number, bool)
+                                    and math.isfinite(float(number)) for number in vector)):
+                        clean_anchor[key] = [round(float(number), 4) for number in vector]
+                if clean_anchor:
+                    entry["anchor"] = clean_anchor
+            if entry:
+                placements.append(entry)
+        output.append({
+            "anchor_name": name,
+            "search_status": _reference_text(value.get("search_status"), 40) or "unknown",
+            "searches": searches,
+            "matches": _clean_asset_reference_rows(value.get("matches"), 12),
+            "downloaded_meshes": downloads,
+            "measurements": measurements,
+            "placements": placements,
+            "reference_only": True,
+            "imported_into_render": False,
+            "note": (_reference_text(value.get("note"), 500)
+                     or "Search and measurement results are references only; external meshes are not imported."),
+        })
+        if len(output) >= 2:
+            break
+    return output
+
+
+def _clean_subagent_review(value):
+    if not isinstance(value, dict):
+        return None
+    accepted = [str(item) for item in value.get("accepted", [])
+                if str(item) in {"t1", "t2"}] if isinstance(value.get("accepted"), list) else []
+    reviewer = value.get("reviewer") if isinstance(value.get("reviewer"), dict) else {}
+    clean_reviewer = {key: _reference_text(reviewer[key], 240) for key in
+                      ("kind", "model", "provider", "provider_model", "selected_local_model", "handoff_reason")
+                      if reviewer.get(key)}
+    cleaned = {"accepted": list(dict.fromkeys(accepted)),
+               "note": _reference_text(value.get("note"), 320)}
+    if clean_reviewer:
+        cleaned["reviewer"] = clean_reviewer
+    return cleaned
+
+
 def validate(plan, duration=90, usernames=(), min_props=16, visual_request=""):
     if not isinstance(plan, dict):
         raise ValueError("map plan must be an object")
@@ -1541,6 +1696,11 @@ def validate(plan, duration=90, usernames=(), min_props=16, visual_request=""):
     global_hour = canonical_time_of_day(plan.get("time_of_day"))
     if global_hour:
         normalized_plan["time_of_day"] = global_hour
+    if isinstance(plan.get("asset_references"), list):
+        normalized_plan["asset_references"] = _clean_asset_references(plan["asset_references"])
+    review = _clean_subagent_review(plan.get("subagent_review"))
+    if review:
+        normalized_plan["subagent_review"] = review
     return normalized_plan
 
 

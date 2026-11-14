@@ -68,7 +68,13 @@ AVAILABLE TOOLS (you must write every requested call yourself in a JSON
   inspect_mesh_dimensions and plan_mesh_placement; use the returned anchor's exact size
   and position. Search snippets do not establish dimensions or Roblox-stud units. This is
   a blueprint/reference placement; the short builder renders editable Part/model anchors,
-  not an imported external mesh.
+  not an imported external mesh. For an assigned model anchor, always search its exact
+  name with search_roblox_meshes and return real IDs/URLs from the tool result; never invent
+  an ID. If a permitted supported mesh file can actually be downloaded, call
+  inspect_mesh_dimensions. For every successful measurement, call plan_mesh_placement
+  with that exact dimensions_source_units value and an explicit studs_per_unit scale, then
+  use the returned anchor size and position. If no supported file is available, report that
+  dimensions are unavailable; do not infer dimensions from a Creator Store listing.
 - create_file(path, content), read_file(path), list_files(path), search_files(query, path).
 - edit_file(path, old_text, new_text): succeeds only when old_text occurs once.
 - run_cmd(cmd): short sandbox command; credentials are stripped from its environment.

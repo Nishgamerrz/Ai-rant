@@ -823,7 +823,7 @@ jobs:
           - "model_anchor_names": one or two distinct, story-specific anchor names for the separate models task (choose furniture/set pieces for an interior scene).
           - "search_queries": zero to three short research queries only if real-world facts are genuinely useful.
           - "subagent_tasks": exactly two task calls that you author now, with IDs t1 and t2 and kind "write". One task must have topic "map" (or "cameras" or "faces"); its instruction asks the helper to return one complete JSON world blueprint with name, theme, time_of_day, ground settings, at least 8 map-only prop anchors, character_placements, ${SHOT_COUNT}-${SHOT_MAX} camera_shots, and at least 6 face_expressions. Tell it not to include the model_anchor_names because the second task creates them. Require JSON only.
-          The other task must have topic "models"; its instruction asks the helper to return JSON only in the shape {"props":[...]}, one valid map prop anchor per exact model_anchor_names, with unique names, model/shape/material, grid-aligned position and size, and bright color. Require it not to duplicate map-task props. When real asset references or measured dimensions would materially improve placement, author "use_tools":true on this models task; that enables the helper's shared Roblox model/mesh search, supported mesh download, dimension inspection, and room-fitting placement tools. The helper must author every actual tool call itself; if it uses tools, its final answer field must contain the exact required props JSON and an empty tool_calls array. Creator Store listings do not provide verified dimensions, source-file units are not Roblox studs unless scaled, and downloaded references are not imported into the MP4; use only measured dimensions to shape editable Part/model anchors.
+          The other task must have topic "models"; its instruction asks the helper to return JSON only in the shape {"props":[...]}, one valid map prop anchor per exact model_anchor_names, with unique names, model/shape/material, grid-aligned position and size, and bright color. Require it not to duplicate map-task props. ALWAYS author "use_tools":true on this models task; the validator rejects a models call without it. Require the helper to author a search_roblox_meshes query for each exact model_anchor_name and preserve any real Creator Store asset IDs, titles, URLs, and creator names. If a permitted direct OBJ/STL/ASCII-PLY/glTF/GLB mesh file is available, require fetch_mesh_reference followed by inspect_mesh_dimensions. When dimensions are measured, require plan_mesh_placement with the exact source dimensions and an explicit studs_per_unit scale, then use its returned anchor position and size in the props JSON. If no supported mesh file or measurement is available, say so and use a reasonable designed anchor without inventing IDs or dimensions. The helper must author every actual tool call itself; if it uses tools, its final answer field must contain the exact required props JSON and an empty tool_calls array. Creator Store listings do not provide verified dimensions, source-file units are not Roblox studs unless scaled, and downloaded references are not imported into the MP4; use only measured dimensions to shape editable Part/model anchors.
           These two tasks are the actual sub-agent calls. The workflow validates your untouched first response and will never invent or repair missing calls. If you omit either topic, the map step stops immediately. Do not ask the local model to produce the map in any later response.
           If no research is useful, return "search_queries":[]. Keep the brief and task instructions concise. The JSON may include the one public_rationale sentence only; never include private reasoning or chain-of-thought.
           PROMPT
@@ -898,16 +898,39 @@ jobs:
             --system system_prompt.txt --model "$AI_MODEL" --think "$OLLAMA_THINKING" \
             --num-ctx "$AI_NUM_CTX" --output map_review_request.json
           python tools/say.py plan "The selected model is reviewing the delegated plan before the builder expands it."
-          if ! python tools/ollama_stream.py --request map_review_request.json \
-              --output map_review_response.json --label "map acceptance review" \
-              --timeout 300 --stall-seconds 120 --max-seconds 300; then
-            python tools/say.py error "Selected model ${AI_MODEL} could not complete the map review; see the Ollama error above. No other local model was tried."
-            exit 1
-          fi
-          if ! python tools/map_orchestration.py accept --orchestration map_orchestration_response.json \
-              --review map_review_response.json --plan map_response.json; then
-            python tools/say.py error "The selected model did not accept both sub-agent results; stopping without a local map rewrite or a repair loop."
-            exit 1
+          REVIEW_STATUS=0
+          python tools/ollama_stream.py --request map_review_request.json \
+            --output map_review_response.json --label "map acceptance review" \
+            --timeout 300 --stall-seconds 120 --max-seconds 300 || REVIEW_STATUS=$?
+          if [ "$REVIEW_STATUS" -ne 0 ]; then
+            python tools/say.py warning "Selected model ${AI_MODEL} could not complete its review after the same-model retry; keeping the selected preset/model unchanged and handing acceptance to a context-aware tool-enabled sub-agent. No other local model was tried."
+            HANDOFF_REASON="selected local model review stalled after its same-model retry"
+            python tools/map_orchestration.py review-handoff-request \
+              --orchestration map_orchestration_response.json --plan map_response.json \
+              --results subagent_results.json --context map_context.txt --system system_prompt.txt \
+              --model "$AI_MODEL" --failure-reason "$HANDOFF_REASON" \
+              --duration "$DURATION_SECONDS" --cast "$CAST_NAMES" \
+              --output map_review_handoff_request.json
+            HANDOFF_STATUS=0
+            python tools/gemini_subagent.py --request map_review_handoff_request.json \
+              --output map_review_handoff_results.json --stdout || HANDOFF_STATUS=$?
+            if [ "$HANDOFF_STATUS" -ne 0 ]; then
+              python tools/say.py error "The external review handoff could not complete; the selected local model was not changed and no unaudited map will be shipped."
+              exit 1
+            fi
+            if ! python tools/map_orchestration.py accept-handoff \
+                --orchestration map_orchestration_response.json \
+                --results map_review_handoff_results.json --plan map_response.json \
+                --local-model "$AI_MODEL" --failure-reason "$HANDOFF_REASON"; then
+              python tools/say.py error "The external reviewer did not return an accepted, tool-audited plan; stopping without a local map rewrite or a repair loop."
+              exit 1
+            fi
+          else
+            if ! python tools/map_orchestration.py accept --orchestration map_orchestration_response.json \
+                --review map_review_response.json --plan map_response.json --model "$AI_MODEL"; then
+              python tools/say.py error "The selected model did not accept both sub-agent results; stopping without a local map rewrite or a repair loop."
+              exit 1
+            fi
           fi
           touch map_subagent_review.done
           validation_status=0
@@ -1343,7 +1366,7 @@ jobs:
         if: always()
         run: |
           mkdir -p dist
-          for file in story_creation_tasks.json story_creation_results.json story_proofread_template.json story_subagent_tasks.json story_subagent_results.json subagent_tasks.json subagent_results.json map_subagent_review.done; do
+          for file in story_creation_tasks.json story_creation_results.json story_proofread_template.json story_subagent_tasks.json story_subagent_results.json subagent_tasks.json subagent_results.json map_orchestration_response.json map_review_request.json map_review_response.json map_review_handoff_request.json map_review_handoff_results.json map_response.json map_subagent_review.done; do
             if [ -s "$file" ]; then cp -f "$file" dist/; fi
           done
           ls -lh dist/*.json 2>/dev/null | head -n 20 || true
@@ -1365,6 +1388,12 @@ jobs:
             dist/narration_created_draft.txt
             dist/subagent_tasks.json
             dist/subagent_results.json
+            dist/map_orchestration_response.json
+            dist/map_review_request.json
+            dist/map_review_response.json
+            dist/map_review_handoff_request.json
+            dist/map_review_handoff_results.json
+            dist/map_response.json
           if-no-files-found: ignore
           retention-days: 14
 
