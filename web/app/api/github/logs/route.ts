@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 // Logs + artifacts proxy — keeps GITHUB_TOKEN server-side.
-// The UI polls this while a workflow is running so colours, plan next/previous
-// badges and the AI's thinking appear live.
+// The UI polls this while a workflow is running so colors, safe public progress,
+// plan badges, sub-agent answers, and tool activity appear live.
 // Now also supports ?logs=1 to return the live job-log tail through GitHub.
 
 const REPO = "Nishgamerrz/Ai-rant";

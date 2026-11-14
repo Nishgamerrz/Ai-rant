@@ -27,7 +27,8 @@ type ActivityEvent = {
   characters?: number;
   prompt?: string;
   prompt_messages?: Array<{ role?: string; content?: string }>;
-  thinking?: string;
+  public_rationale?: string;
+  public_status?: string;
   input?: string;
   context?: string;
   original_instruction?: string;
@@ -114,9 +115,12 @@ function eventTitle(event: ActivityEvent) {
     return `${providerName(event.provider, event.model)} ${state}`;
   }
   if (type === "topic_cleanup") return `${label} · ${event.status === "cleaned" ? "cleaned" : "kept as typed"}`;
+  if (type === "narration_finalized") return `Narration source · ${event.status || "complete"}`;
+  if (type === "subagent_tool") return `Sub-agent tool · ${event.public_status || event.status || "activity"}`;
+  if (type === "subagent_progress") return `Subagent task ${event.task_id || event.id || ""} · ${event.status || "working"}`;
   if (type === "subagent_task") return `Subagent task ${event.task_id || event.id || ""} · ${event.status || "started"}`;
   if (type === "subagent_result") return `Subagent task ${event.task_id || event.id || ""} · ${event.status || (event.ok ? "complete" : "failed")}`;
-  if (type === "model_progress") return `${label} · ${event.channel === "thinking" ? "thinking" : "answer"} stream`;
+  if (type === "model_progress") return `${label} · ${event.channel === "thinking" ? "private processing active" : "answer progress"}`;
   if (type === "model_response") return `${label} · completed`;
   if (type === "model_error") return `${label} · failed`;
   if (type === "subagent_guidance") return `${label} · file rules supplied`;
@@ -223,7 +227,7 @@ export function AiActivityTimeline({ runId, liveLog, runStatus }: {
             const attempts = Array.isArray(event.provider_attempts) ? event.provider_attempts : [];
             const fileEdits = Array.isArray(event.file_edits) ? event.file_edits : [];
             const hasDetails = Boolean(event.instruction || event.input || event.context || event.prompt
-              || event.preview || output || event.thinking || event.reason || event.error || fileEdits.length || attempts.length
+              || event.preview || output || event.public_rationale || event.public_status || event.reason || event.error || fileEdits.length || attempts.length
               || promptMessages.length || event.tool_calls?.length || event.tool_results?.length);
             return (
               <article key={key} className="p-3.5 hover:bg-zinc-800/15">
@@ -250,9 +254,9 @@ export function AiActivityTimeline({ runId, liveLog, runStatus }: {
                       {event.seconds !== undefined && <span className="text-[10px] text-zinc-500">{event.seconds}s</span>}
                       {event.timestamp && <time className="text-[10px] text-zinc-600">{new Date(event.timestamp).toLocaleTimeString()}</time>}
                     </div>
-                    {(event.preview || event.reason || event.error) && (
+                    {(event.preview || event.public_status || event.reason || event.error) && (
                       <div className={`mt-1.5 text-xs leading-relaxed break-words ${event.reason || event.error ? "text-amber-200" : "text-zinc-400"}`}>
-                        {event.preview || event.reason || event.error}
+                        {event.preview || event.public_status || event.reason || event.error}
                         {event.fallback_to && <span className="text-amber-300"> · fallback: {fallbackName(event)}</span>}
                         {event.characters !== undefined && <span className="ml-2 text-[10px] text-zinc-600">{event.characters.toLocaleString()} chars</span>}
                       </div>
@@ -273,8 +277,11 @@ export function AiActivityTimeline({ runId, liveLog, runStatus }: {
                         {message.content || ""}
                       </TextSection>
                     ))}
-                    {output && <TextSection title={event.type === "topic_cleanup" ? "Provider response" : "Complete AI response"}>{output}</TextSection>}
-                    {event.thinking && <TextSection title="Model-authored thinking">{event.thinking}</TextSection>}
+                    {output && <TextSection title={event.type === "topic_cleanup" ? "Provider response"
+                      : event.type === "narration_finalized" ? "Final narration used downstream"
+                        : "Complete AI response"}>{output}</TextSection>}
+                    {event.public_rationale && <TextSection title="Public rationale">{event.public_rationale}</TextSection>}
+                    {event.public_status && <TextSection title="Safe sub-agent progress">{event.public_status}</TextSection>}
                     {event.cleaned_text && event.cleaned_text !== output && (
                       <TextSection title="Cleaned prompt passed to the workflow">{event.cleaned_text}</TextSection>
                     )}

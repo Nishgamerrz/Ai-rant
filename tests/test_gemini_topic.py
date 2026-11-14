@@ -246,15 +246,17 @@ class ApiTests(unittest.TestCase):
 
 
 class CommandLineTests(unittest.TestCase):
-    def _run(self, tmp, env):
+    def _run(self, tmp, env, *, stdout=False):
+        command = [sys.executable, str(ROOT / "tools" / "gemini_topic.py"),
+                   "--output", "refined.json", "--github-output", "gh_output"]
+        if stdout:
+            command.append("--stdout")
         return subprocess.run(
-            [sys.executable, str(ROOT / "tools" / "gemini_topic.py"),
-             "--output", "refined.json", "--github-output", "gh_output"],
-            cwd=tmp, capture_output=True, text=True,
+            command, cwd=tmp, capture_output=True, text=True,
             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **env},
         )
 
-    def test_stdout_contains_only_the_plain_cleaned_prompt(self):
+    def test_stdout_shows_the_cleaned_prompt_without_provider_chatter(self):
         attempt = {"provider": "bazaarlink", "model": "auto:free",
                    "status": "answered", "seconds": 0.3}
         entry = {"ok": True, "skipped": False, "text": GOOD, "candidate": GOOD,
@@ -268,7 +270,8 @@ class CommandLineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             output_path = Path(tmp) / "refined.json"
             env = {"RAW_STORY_TOPIC": "a stdent finds a lost wallett",
-                   "RAW_WORLD_THEME": "", "BAZAAR_LINK_API": "bazaar-test-secret"}
+                   "RAW_WORLD_THEME": "", "BAZAAR_LINK_API": "bazaar-test-secret",
+                   "AI_COLOR": "0"}
             with patch.dict(os.environ, env), patch(
                     "gemini_topic.refine", side_effect=fake_refine), patch(
                     "sys.argv", ["gemini_topic.py", "--output", str(output_path), "--stdout"]):
@@ -277,7 +280,8 @@ class CommandLineTests(unittest.TestCase):
                     self.assertEqual(topic_main(), 0)
 
             text = captured.getvalue()
-            self.assertEqual(text, GOOD + "\n")
+            self.assertEqual(text, "[prompt cleanup] Corrected the story prompt for spelling, grammar and punctuation.\n"
+                             "[effective story prompt]\n" + GOOD + "\n")
             for forbidden in ("[ai-log]", "[bazaar", "[gemini", "provider answered",
                               "falling back", "stale-gemini-model", "bazaar-test-secret"):
                 self.assertNotIn(forbidden, text)
@@ -310,7 +314,7 @@ class CommandLineTests(unittest.TestCase):
             output_path = Path(tmp) / "refined.json"
             env = {"RAW_STORY_TOPIC": "a stdent finds a lost wallett",
                    "RAW_WORLD_THEME": "", "BAZAAR_LINK_API": "bazaar-test-secret",
-                   "GEMINI_API_KEY": "gemini-test-secret"}
+                   "GEMINI_API_KEY": "gemini-test-secret", "AI_COLOR": "0"}
             with patch.dict(os.environ, env), patch(
                     "gemini_topic.refine", side_effect=fake_refine), patch(
                     "sys.argv", ["gemini_topic.py", "--output", str(output_path), "--stdout"]):
@@ -319,7 +323,8 @@ class CommandLineTests(unittest.TestCase):
                     self.assertEqual(topic_main(), 0)
 
             text = captured.getvalue()
-            self.assertEqual(text, GOOD + "\n")
+            self.assertEqual(text, "[prompt cleanup] Corrected the story prompt for spelling, grammar and punctuation.\n"
+                             "[effective story prompt]\n" + GOOD + "\n")
             for forbidden in ("[ai-log]", "provider", "fallback", "HTTP 429",
                               "bazaar-test-secret", "gemini-test-secret"):
                 self.assertNotIn(forbidden, text)
@@ -341,6 +346,41 @@ class CommandLineTests(unittest.TestCase):
             self.assertEqual(story_event["status"], "skipped")
             self.assertEqual(story_event["input"], "a stdent finds a wallett")
             self.assertEqual(story_event["reason"], "no API key")
+
+    def test_stdout_explains_when_no_correction_is_available_and_shows_used_text(self):
+        raw = "a stdent finds a lost wallett"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._run(tmp, {"RAW_STORY_TOPIC": raw, "RAW_WORLD_THEME": ""},
+                               stdout=True)
+            self.assertEqual(result.returncode, 0, msg=result.stderr[-800:])
+            self.assertIn("No text provider is configured for the story prompt", result.stdout)
+            self.assertIn("[effective story prompt]", result.stdout)
+            self.assertIn(raw, result.stdout)
+            self.assertNotIn("[ai-log]", result.stdout)
+            self.assertNotIn("API key", result.stdout)
+
+    def test_stdout_shows_effective_text_but_hides_rejected_provider_output(self):
+        raw = "a stdent finds a lost wallett"
+        private_candidate = '{"answer":"Corrected prompt", "thought":"private reasoning"}'
+        entry = {"ok": False, "skipped": False, "text": raw,
+                 "candidate": private_candidate,
+                 "reason": "the reply was formatted like an explanation"}
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "refined.json"
+            env = {"RAW_STORY_TOPIC": raw, "RAW_WORLD_THEME": "", "AI_COLOR": "0"}
+            with patch.dict(os.environ, env), patch(
+                    "gemini_topic.refine", return_value=entry), patch(
+                    "sys.argv", ["gemini_topic.py", "--output", str(output_path), "--stdout"]):
+                captured = io.StringIO()
+                with redirect_stdout(captured):
+                    self.assertEqual(topic_main(), 0)
+            text = captured.getvalue()
+            self.assertIn("No safe correction was produced", text)
+            self.assertIn("[effective story prompt]", text)
+            self.assertIn(raw, text)
+            self.assertNotIn(private_candidate, text)
+            self.assertNotIn("private reasoning", text)
+            self.assertNotIn("[ai-log]", text)
 
     def test_multiline_text_uses_the_heredoc_output_form(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -411,8 +451,14 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertIn("--stdout || true", topic_block)
         self.assertNotIn("say.py tool \"Cleaning the typed story prompt", topic_block)
         self.assertNotIn("No cleaned prompt was produced", topic_block)
-        self.assertIn("--output story_subagent_results.json --stdout || true", self.workflow)
-        self.assertIn("--output narration_edit_results.json --stdout || true", self.workflow)
+        self.assertIn("--request story_creation_tasks.json", self.workflow)
+        self.assertIn("--output story_creation_results.json --stdout", self.workflow)
+        self.assertIn("--request story_subagent_tasks.json", self.workflow)
+        self.assertIn("--output story_subagent_results.json --stdout", self.workflow)
+        self.assertIn("prepare_narration.py --subagent story_subagent_results.json", self.workflow)
+        self.assertIn("narration_delegation.py prepare-proofread", self.workflow)
+        self.assertNotIn("2>/dev/null", self.workflow[self.workflow.index("- name: Write a believable real-life story"):self.workflow.index("- name: Orchestrate and review the delegated map")])
+        self.assertNotIn("narration_edit_results.json", self.workflow)
         self.assertIn("--request subagent_tasks.json --output subagent_results.json --stdout",
                       self.workflow)
         viewer = (ROOT / "web/components/LogViewer.tsx").read_text(encoding="utf-8")

@@ -30,8 +30,9 @@ class OpeningLineTests(unittest.TestCase):
     def test_the_line_is_tied_to_the_first_caption(self):
         self.assertIn("That line is the first caption on screen", WORKFLOW)
 
-    def test_it_survives_the_repair_rounds(self):
-        self.assertIn("preserving the hook, choice, and ending", WORKFLOW)
+    def test_the_proofread_preserves_the_story_and_ending(self):
+        self.assertIn("preserving the premise and events", WORKFLOW)
+        self.assertIn("The creation helper's complete story becomes the proofreading input", WORKFLOW)
 
     def test_the_default_topic_is_one_in_a_world_where_line(self):
         start = WORKFLOW.index("      story_topic:")
@@ -40,9 +41,27 @@ class OpeningLineTests(unittest.TestCase):
         self.assertNotIn("gravity", block)
         self.assertIn('"In a world where ..." works best', WORKFLOW)
 
-    def test_the_sub_agent_is_offered_for_the_hard_parts(self):
-        self.assertIn("handwriting a tricky sentence", WORKFLOW)
-        self.assertIn("checking whether a name sounds like a real person", WORKFLOW)
+    def test_the_subagent_creates_and_proofreads_the_complete_draft(self):
+        self.assertIn("YOU MUST INVOLVE THE TEXT SUB-AGENT IN BOTH NARRATION CREATION AND PROOFREADING", WORKFLOW)
+        self.assertIn('kind "write", topic "narration"', WORKFLOW)
+        self.assertIn('kind "edit" and topic "narration"', WORKFLOW)
+        self.assertIn("proofread grammar, spelling, punctuation, dialogue", WORKFLOW)
+        self.assertIn("return the complete corrected narration only", WORKFLOW)
+        self.assertIn("Both helper outputs must visibly stream", WORKFLOW)
+        self.assertIn("the proofread helper's corrected result is the exact narration source", WORKFLOW)
+        self.assertIn("without another model rewrite", WORKFLOW)
+        self.assertIn("prepare_narration.py --subagent story_subagent_results.json", WORKFLOW)
+        self.assertIn("--task-id t2", WORKFLOW)
+
+    def test_prompt_has_no_legacy_single_proofreader_task_or_local_final_rewrite(self):
+        start = WORKFLOW.index("- name: Write a believable real-life story")
+        end = WORKFLOW.index("- name: Orchestrate and review the delegated map", start)
+        story_step = WORKFLOW[start:end]
+        self.assertIn("Draft naturally, but do not treat your own draft as the final narration", story_step)
+        self.assertNotIn("GRAMMAR CHECK: proofread the complete narration", story_step)
+        self.assertNotIn('"id":"t1","kind":"edit"', story_step)
+        self.assertNotIn("Gemini is given the narration file rules", story_step)
+        self.assertIn("the proofread helper's corrected result is the exact narration source", story_step)
 
 
 if __name__ == "__main__":

@@ -141,13 +141,15 @@ class BlueprintRepairTests(unittest.TestCase):
         self.assertIn("the AI blueprint contained no props", source)
 
 
-class SubAgentInvitationTests(unittest.TestCase):
-    def test_the_prompts_invite_one_or_two_uses_at_any_time(self):
-        # Only the story prompt keeps the open invitation; the map prompt replaced
-        # it with the REQUIRED map/camera/models tasks (and dropped the duplicate).
-        self.assertEqual(WORKFLOW.count(
-            "YOU CAN USE IT ONE OR TWO TIMES, OR AS MANY TIMES AS YOU LIKE, AT ANY POINT"), 1)
-        self.assertIn("There is no quota and no rule that you must ask", WORKFLOW)
+class NarrationSubAgentRequirementTests(unittest.TestCase):
+    def test_the_story_prompt_requires_ai_authored_creation_and_proofreading(self):
+        self.assertIn("YOU MUST INVOLVE THE TEXT SUB-AGENT IN BOTH NARRATION CREATION AND PROOFREADING", WORKFLOW)
+        self.assertIn('kind "write", topic "narration"', WORKFLOW)
+        self.assertIn('kind "edit" and topic "narration"', WORKFLOW)
+        self.assertIn("In your first response, author exactly two distinct tasks", WORKFLOW)
+        self.assertIn("narration_delegation.py extract", WORKFLOW)
+        self.assertIn("narration_delegation.py prepare-proofread", WORKFLOW)
+        self.assertIn("The selected model must author one complete narration-creation call", WORKFLOW)
 
     def test_the_map_subagent_task_requests_the_complete_blueprint_keys(self):
         start = WORKFLOW.index("- name: Orchestrate and review the delegated map")

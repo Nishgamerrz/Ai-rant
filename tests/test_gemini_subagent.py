@@ -5,10 +5,12 @@ The workflow supplies ``BAZAAR_LINK_API`` first, then ``GEMINI_API_KEY`` and
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import select
 import subprocess
+from contextlib import redirect_stdout
 import sys
 import tempfile
 import time
@@ -66,6 +68,11 @@ class _StubGemini(BaseHTTPRequestHandler):
 
 
 class RequestTests(unittest.TestCase):
+    def test_helper_prompts_request_public_status_not_hidden_reasoning(self):
+        self.assertIn("Never reveal private chain-of-thought", gemini_subagent.SYSTEM_RULES)
+        self.assertIn("brief user-facing progress", gemini_subagent.AGENT_TOOL_USAGE_GUIDANCE)
+        self.assertNotIn("thought", gemini_subagent.AGENT_TOOL_USAGE_GUIDANCE)
+
     def test_accepts_an_envelope_or_a_bare_list(self):
         envelope = normalize_request({"context": "ctx", "tasks": [
             {"kind": "answer", "instruction": "Name a teacher"}]})
@@ -129,20 +136,35 @@ class RequestTests(unittest.TestCase):
         plain = parse_agent_turn("No tool call was authored.")
         self.assertEqual(plain["tool_calls"], [])
 
-    def test_agent_live_stream_extracts_only_the_authored_answer_field(self):
+    def test_agent_live_stream_shows_safe_status_and_answer_not_reasoning_or_tool_json(self):
         visible = []
         streamer = gemini_subagent._AgentAnswerStreamer(
-            lambda channel, text: visible.append(text) if channel == "answer" else None)
-        encoded = json.dumps({"thought": "private", "tool_calls": [
-            {"tool": "read_file", "arguments": {"path": "hidden.txt"}}],
-            "answer": "The answer is user-facing.\nSecond line."})
+            lambda channel, text: visible.append((channel, text)))
+        encoded = json.dumps({"status": "I am checking the image layout before replying.",
+                              "thought": "private chain-of-thought",
+                              "tool_calls": [{"tool": "read_file",
+                                              "arguments": {"path": "hidden.txt"}}],
+                              "answer": "The answer is user-facing. Second line."})
         cut = encoded.index("Second")
-        for chunk in ("```json\n" + encoded[:cut], encoded[cut:] + "\n```"):
+        for chunk in (encoded[:cut], encoded[cut:]):
             streamer("answer", chunk)
 
-        self.assertEqual("".join(visible), "The answer is user-facing.\nSecond line.")
-        self.assertNotIn("private", "".join(visible))
-        self.assertNotIn("tool_calls", "".join(visible))
+        status = "".join(text for channel, text in visible if channel == "progress")
+        answer = "".join(text for channel, text in visible if channel == "answer")
+        self.assertEqual(status, "I am checking the image layout before replying.")
+        self.assertEqual(answer, "The answer is user-facing. Second line.")
+        combined = json.dumps(visible)
+        self.assertNotIn("private chain-of-thought", combined)
+        self.assertNotIn("tool_calls", combined)
+
+    def test_agent_private_progress_status_is_rejected(self):
+        visible = []
+        streamer = gemini_subagent._AgentAnswerStreamer(
+            lambda channel, text: visible.append((channel, text)))
+        streamer("answer", json.dumps({
+            "status": "My private reasoning is still hidden.",
+            "answer": "Safe public answer.", "tool_calls": []}))
+        self.assertEqual(visible, [("answer", "Safe public answer.")])
 
     def test_gemini_stream_drops_parts_marked_as_internal_thought(self):
         events = [
@@ -167,15 +189,21 @@ class RequestTests(unittest.TestCase):
             first = json.dumps({"answer": "I will inspect the supplied reference.",
                                 "tool_calls": [{"tool": "read_file", "path": "reference.txt"}]})
             final = json.dumps({"answer": "The reference has bold dark brows.", "tool_calls": []})
+            tool_events = []
             with patch("gemini_subagent.call_any", side_effect=[(first, "gemini"), (final, "groq")]) as mocked:
                 result = run_tool_agent(
                     {"kind": "agent", "instruction": "Inspect the supplied reference", "input": "reference.txt"},
                     "", model="gemini-2.5-flash", api_key="key", groq_key="key",
-                    groq_model_name="", root=root, timeout=1)
+                    groq_model_name="", root=root, timeout=1,
+                    on_tool_event=lambda status, event: tool_events.append((status, event)))
             self.assertEqual(mocked.call_count, 2)
             self.assertEqual(result["text"], "The reference has bold dark brows.")
             self.assertEqual([call["tool"] for call in result["tool_calls"]], ["read_file"])
             self.assertEqual(result["tool_results"][0]["result"]["content"], "bold dark brows")
+            self.assertEqual([status for status, _ in tool_events], ["started", "complete"])
+            self.assertEqual(tool_events[0][1]["tool"], "read_file")
+            self.assertNotIn("bold dark brows", json.dumps(tool_events),
+                             "live tool results omit raw file contents")
 
     def test_subagent_reprompts_until_it_authors_the_supplied_image_inspection(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -434,20 +462,51 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertIn("Text provider order: BazaarLink auto:free, Gemini, then Groq.",
                       self.workflow)
 
-    def test_local_ai_can_delegate_in_the_story_and_the_plan(self):
-        self.assertIn("YOU HAVE A GEMINI SUB-AGENT", self.workflow)
+    def test_local_ai_delegates_narration_creation_proofreading_and_map_creation(self):
+        self.assertIn("YOU MUST INVOLVE THE TEXT SUB-AGENT IN BOTH NARRATION CREATION AND PROOFREADING", self.workflow)
         self.assertIn("subagent_tasks", self.workflow)
         self.assertGreaterEqual(self.workflow.count("tools/gemini_subagent.py"), 2)
 
-    def test_answers_are_fed_back_and_help_rounds_are_capped(self):
-        self.assertIn("Answers the Gemini sub-agent returned for the tasks you delegated", self.workflow)
+    def test_bazaarlink_auto_free_is_primary_for_every_plan_subagent_call(self):
+        markers = (
+            "- name: Fix the spelling in the typed prompt",
+            "- name: Write a believable real-life story",
+            "- name: Orchestrate and review the delegated map",
+        )
+        for marker in markers:
+            start = self.workflow.index(marker)
+            end = self.workflow.find("\n      - name:", start + len(marker))
+            step = self.workflow[start:end if end >= 0 else len(self.workflow)]
+            with self.subTest(step=marker):
+                self.assertIn("BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}", step)
+                self.assertIn("BAZAARLINK_API_KEY: ${{ secrets.BAZAAR_LINK_API }}", step)
+        agent_workflow = (ROOT / ".github" / "workflows" / "agent.yml").read_text(encoding="utf-8")
+        agent_step = agent_workflow[agent_workflow.index("- name: Run NishAgent"):]
+        self.assertIn("BAZAAR_LINK_API: ${{ secrets.BAZAAR_LINK_API }}", agent_step)
+        self.assertIn("BAZAARLINK_API_KEY: ${{ secrets.BAZAAR_LINK_API }}", agent_step)
+        helper = (ROOT / "tools" / "gemini_subagent.py").read_text(encoding="utf-8")
+        self.assertIn("provider order is intentionally fixed: BazaarLink -> Gemini -> Groq", helper)
+
+    def test_subagent_proofread_is_the_final_narration_source(self):
+        self.assertIn("the proofread helper's corrected result is the exact narration source", self.workflow)
+        self.assertIn("prepare_narration.py --subagent story_subagent_results.json", self.workflow)
+        self.assertIn('--task-id t2', self.workflow)
+        self.assertIn("The creation helper's complete story becomes the proofreading input", self.workflow)
+        self.assertIn("This exact corrected text is now the narration source used downstream", self.workflow)
+        story_step = self.workflow[self.workflow.index("- name: Write a believable real-life story"):
+                                   self.workflow.index("- name: Orchestrate and review the delegated map")]
+        self.assertNotIn("story + sub-agent answers", story_step)
+        self.assertNotIn("STORY_ANSWERS", story_step)
+        self.assertNotIn("narration repair", story_step)
         self.assertIn("for helper_round in 1 2 3 4; do", self.workflow)
         self.assertIn('if [ "$HELP_SIG" = "$PREVIOUS_HELP" ]; then', self.workflow)
 
-    def test_local_ai_is_told_to_use_it_at_least_once_or_twice(self):
-        self.assertIn("YOU SHOULD ACTUALLY USE IT", self.workflow)
-        self.assertIn("USE IT AT LEAST ONCE OR TWICE", self.workflow)
-        self.assertIn("put the task(s) in your first response", self.workflow)
+    def test_local_ai_is_required_to_author_creation_and_proofread_subagent_tasks(self):
+        self.assertIn("YOU MUST INVOLVE THE TEXT SUB-AGENT IN BOTH NARRATION CREATION AND PROOFREADING", self.workflow)
+        self.assertIn('kind "write", topic "narration"', self.workflow)
+        self.assertIn('kind "edit" and topic "narration"', self.workflow)
+        self.assertIn("In your first response, author exactly two distinct tasks", self.workflow)
+        self.assertIn("never skip either task", self.workflow)
 
     def test_full_subagent_replies_and_provider_attempts_are_recorded(self):
         helper = (ROOT / "tools" / "gemini_subagent.py").read_text(encoding="utf-8")
@@ -459,11 +518,15 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertIn("GITHUB_STEP_SUMMARY", helper)
         self.assertIn("redact_secrets(entry['text'])", helper)
 
-    def test_gemini_can_edit_the_narration_to_length(self):
-        self.assertIn("narration_edit_tasks.json", self.workflow)
-        self.assertIn("'kind': 'edit'", self.workflow)
-        self.assertIn("'apply_to': 'dist/narration.txt'", self.workflow)
-        self.assertIn("edited the narration to the right length", self.workflow)
+    def test_the_proofread_result_is_not_overwritten_by_a_later_local_rewrite(self):
+        start = self.workflow.index("- name: Write a believable real-life story")
+        end = self.workflow.index("- name: Orchestrate and review the delegated map", start)
+        story_step = self.workflow[start:end]
+        self.assertIn("prepare_narration.py --subagent story_subagent_results.json", story_step)
+        self.assertIn("stopping without substituting an unproofread draft", story_step)
+        self.assertNotIn("narration_edit_tasks.json", story_step)
+        self.assertNotIn("narration_repair_request.json", story_step)
+        self.assertNotIn("--truncate", story_step)
 
     def test_plan_schema_allows_delegation(self):
         from plan_schema import build_schema
@@ -560,80 +623,80 @@ class WorkflowWiringTests(unittest.TestCase):
     def setUp(self):
         self.workflow = WORKFLOW.read_text(encoding="utf-8")
 
-    def test_the_delegation_block_can_actually_run(self):
-        # It used os.environ without importing os, so the task file was never
-        # written and every delegated task was silently dropped.
-        start = self.workflow.index("python - <<'PYD' || true")
-        block = self.workflow[start:self.workflow.index("\n          PYD", start)]
-        self.assertIn("import os", block)
-        self.assertIn("story_subagent_tasks.json", block)
+    def test_both_model_authored_tasks_are_validated_and_chained(self):
+        delegation = (ROOT / "tools" / "narration_delegation.py").read_text(encoding="utf-8")
+        self.assertIn("exactly two narration sub-agent tasks", delegation)
+        self.assertIn("Create and proofread the narration", delegation)
+        self.assertIn("task[\"input\"] = created", delegation)
+        self.assertIn("story_creation_tasks.json", self.workflow)
+        self.assertIn("story_proofread_template.json", self.workflow)
+        self.assertIn("story_subagent_tasks.json", self.workflow)
 
-    def test_the_gemini_edit_cannot_overwrite_a_good_draft(self):
-        self.assertIn("'apply_to': 'dist/narration_gemini.txt'", self.workflow)
-        # dist/narration.txt is only replaced after the word-count gate passes.
-        gate = self.workflow.index("Gemini edit result")
-        move = self.workflow.index("mv dist/narration_gemini.txt dist/narration.txt")
-        self.assertLess(gate, move)
+    def test_the_helper_proofread_is_written_to_the_canonical_narration_file(self):
+        self.assertIn("prepare_narration.py --subagent story_subagent_results.json", self.workflow)
+        self.assertIn("--task-id t2", self.workflow)
+        self.assertIn("dist/narration.txt", self.workflow)
+        self.assertNotIn("dist/narration_gemini.txt", self.workflow)
 
 
-class SubAgentIsOptionalTests(unittest.TestCase):
-    """The sub-agent is a helper the AI can reach for, not a chore per run."""
+class NarrationSubAgentRequiredTests(unittest.TestCase):
+    """Narration is created with the sub-agent and then proofread by it."""
 
     def setUp(self):
         self.workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.delegation = (ROOT / "tools" / "narration_delegation.py").read_text(encoding="utf-8")
 
-    def test_the_narration_prompt_is_an_offer_not_an_order(self):
-        self.assertIn("YOU HAVE A GEMINI SUB-AGENT AND YOU CAN USE IT ONE OR TWO TIMES", self.workflow)
-        self.assertIn("There is no quota and no rule that you must ask", self.workflow)
-        self.assertIn('if you can write the story yourself, just write it and return '
-                      '"subagent_tasks":[]', self.workflow)
+    def test_the_first_local_response_requires_distinct_creation_and_proofread_tasks(self):
+        self.assertIn("YOU MUST INVOLVE THE TEXT SUB-AGENT IN BOTH NARRATION CREATION AND PROOFREADING",
+                      self.workflow)
+        self.assertIn("In your first response, author exactly two distinct tasks", self.workflow)
+        self.assertIn('kind "write", topic "narration"', self.workflow)
+        self.assertIn('kind "edit" and topic "narration"', self.workflow)
+        self.assertIn("return the complete corrected narration only", self.workflow)
+        self.assertIn("the proofread helper's corrected result is the exact narration source", self.workflow)
 
-    def test_it_says_when_asking_helps(self):
-        self.assertIn("beyond you or you are unsure", self.workflow)
-        self.assertIn("cutting a draft down to the exact word count", self.workflow)
-        self.assertIn("expanding one that came out short", self.workflow)
+    def test_the_structured_schema_requires_both_tasks_and_public_rationale(self):
+        self.assertIn("minItems:2,maxItems:2", self.workflow)
+        self.assertIn('required:["narration","public_rationale","subagent_tasks"]', self.workflow)
+        self.assertIn('id:{type:"string",enum:["t1","t2"]}', self.workflow)
+        self.assertIn('kind:{type:"string",enum:["write","edit"]}', self.workflow)
+        self.assertIn('topic:{type:"string",enum:["narration"]}', self.workflow)
+        self.assertIn("_validate_public_rationale", self.delegation)
 
-    def test_no_mandate_is_left_in_either_prompt(self):
-        self.assertNotIn("NEVER RETURN AN EMPTY", self.workflow)
-        self.assertNotIn("YOU MUST USE THE GEMINI SUB-AGENT", self.workflow)
+    def test_creation_result_is_chained_verbatim_into_the_ai_authored_proofread(self):
+        markers = (
+            "narration_delegation.py extract",
+            "gemini_subagent.py --request story_creation_tasks.json",
+            "narration_delegation.py prepare-proofread",
+            "gemini_subagent.py --request story_subagent_tasks.json",
+            "prepare_narration.py --subagent story_subagent_results.json",
+        )
+        positions = [self.workflow.index(marker) for marker in markers]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("story_proofread_template.json", self.workflow)
+        self.assertIn("--creation-result story_creation_results.json", self.workflow)
+        self.assertIn("--created-draft dist/narration_created_draft.txt", self.workflow)
+        self.assertIn('task["input"] = created', self.delegation)
+        self.assertIn("--task-id t2", self.workflow)
+        self.assertIn("dist/narration.txt", self.workflow)
 
-    def test_the_schema_does_not_force_a_task_list(self):
-        self.assertEqual(self.workflow.count('required:["narration","subagent_tasks"]'), 0)
+    def test_both_live_helper_calls_are_mandatory_and_fail_closed(self):
+        self.assertGreaterEqual(self.workflow.count("--stdout; then"), 2)
+        self.assertIn("Streaming the AI-authored narration creation from the sub-agent.", self.workflow)
+        self.assertIn("Streaming the AI-authored narration grammar and continuity proofread.", self.workflow)
+        self.assertIn("stopping instead of silently using the local draft", self.workflow)
+        self.assertIn("no proofreading request or downstream narration was substituted", self.workflow)
+        self.assertIn("stopping instead of accepting an unproofread draft", self.workflow)
+        self.assertNotIn("--output story_subagent_results.json --stdout 2>/dev/null", self.workflow)
 
-    def test_a_model_that_asks_for_nothing_gets_no_invented_task(self):
-        start = self.workflow.index("python - <<'PYD' || true")
-        block = self.workflow[start:self.workflow.index("\n          PYD", start)]
-        script = "\n".join(line[10:] for line in block.splitlines()[1:])
-        with tempfile.TemporaryDirectory() as tmp:
-            work = Path(tmp)
-            (work / "narration_response.json").write_text(json.dumps({
-                "message": {"content": json.dumps({"narration": "Max slept in.",
-                                                   "subagent_tasks": []})},
-            }), encoding="utf-8")
-            result = subprocess.run([sys.executable, "-"], input=script, text=True,
-                                    capture_output=True, cwd=work,
-                                    env={**os.environ, "DURATION_SECONDS": "133"})
-            self.assertEqual(result.returncode, 0, result.stderr)
-            written = json.loads((work / "story_subagent_tasks.json").read_text(encoding="utf-8"))
-            self.assertEqual(written["tasks"], [])
-            self.assertIn("did not need the sub-agent", result.stdout)
-
-    def test_a_model_that_asks_for_help_is_obeyed(self):
-        start = self.workflow.index("python - <<'PYD' || true")
-        block = self.workflow[start:self.workflow.index("\n          PYD", start)]
-        script = "\n".join(line[10:] for line in block.splitlines()[1:])
-        with tempfile.TemporaryDirectory() as tmp:
-            work = Path(tmp)
-            (work / "narration_response.json").write_text(json.dumps({
-                "message": {"content": json.dumps({
-                    "narration": "Max slept in.",
-                    "subagent_tasks": [{"id": "t1", "kind": "name",
-                                        "instruction": "Does Max sound real?"}]})},
-            }), encoding="utf-8")
-            subprocess.run([sys.executable, "-"], input=script, text=True, capture_output=True,
-                           cwd=work, env={**os.environ, "DURATION_SECONDS": "133"})
-            written = json.loads((work / "story_subagent_tasks.json").read_text(encoding="utf-8"))
-            self.assertEqual([task["id"] for task in written["tasks"]], ["t1"])
+    def test_creation_and_proofread_traces_are_available_to_the_dashboard(self):
+        copy_step = self.workflow[self.workflow.index("- name: Copy subagent traces for UI"):
+                                  self.workflow.index("- name: Upload structured AI activity", self.workflow.index("- name: Copy subagent traces for UI"))]
+        self.assertIn("story_creation_tasks.json", copy_step)
+        self.assertIn("story_creation_results.json", copy_step)
+        self.assertIn("story_subagent_tasks.json", copy_step)
+        self.assertIn("story_subagent_results.json", copy_step)
+        self.assertIn("dist/ai_activity.jsonl", self.workflow)
 
 
 _QUOTA_MARKER_ENV = "GEMINI_QUOTA_MARKER"
@@ -1051,9 +1114,9 @@ class BazaarLinkFallbackTests(unittest.TestCase):
             self.assertEqual(result["results"][0]["text"], "BAZAAR ANSWER")
             self.assertEqual(result["results"][0]["provider"], "bazaarlink")
             console = proc.stdout + proc.stderr
-            self.assertIn("Sub-agent: working.", console)
+            self.assertIn("[subagent progress] task0", strip_ansi(console))
             self.assertIn("BAZAAR ANSWER", console)
-            self.assertIn("Sub-agent step done.", console)
+            self.assertIn("Answer task complete", strip_ansi(console))
             self.assertNotIn("[ai-log]", console)
             self.assertNotIn("[bazaar", console)
             self.assertNotIn("provider answered", console)
@@ -1067,7 +1130,7 @@ class BazaarLinkFallbackTests(unittest.TestCase):
 
 
 class LiveSubagentConsoleTests(unittest.TestCase):
-    def test_answer_stream_is_live_colored_clean_and_secret_safe(self):
+    def test_narration_creation_stream_is_live_colored_clean_and_secret_safe(self):
         first_answer = "The answer is genuinely streaming to the console. "
         release = threading.Event()
         first_chunk_sent = threading.Event()
@@ -1112,8 +1175,9 @@ class LiveSubagentConsoleTests(unittest.TestCase):
             root = Path(tmp)
             request = root / "request.json"
             output = root / "results.json"
-            request.write_text(json.dumps({"tasks": [{"id": "live", "kind": "answer",
-                                                        "instruction": "Answer live."}]}),
+            request.write_text(json.dumps({"tasks": [{"id": "live", "kind": "write",
+                                                        "topic": "narration",
+                                                        "instruction": "Create a complete narration from the supplied idea."}]}),
                                encoding="utf-8")
             env = {**os.environ, "BAZAAR_LINK_API": "bazaar-secret-value",
                    "PYTHONPATH": str(ROOT), "AI_COLOR": "1"}
@@ -1144,24 +1208,29 @@ class LiveSubagentConsoleTests(unittest.TestCase):
                 return needle in captured
 
             try:
-                self.assertTrue(read_until(b"Sub-agent: working.", 3),
-                                "the brief progress state should be flushed immediately")
+                self.assertTrue(read_until(b"[subagent progress] live", 3),
+                                "task-specific safe progress should be flushed immediately")
                 self.assertTrue(first_chunk_sent.wait(3), "the stub should start its SSE response")
                 self.assertTrue(read_until(b"The answer is", 3),
                                 "answer text should arrive before the provider finishes")
                 self.assertIsNone(proc.poll(), "the first answer text must stream while the response is open")
             finally:
                 release.set()
+                try:
+                    remaining, stderr = proc.communicate(timeout=8)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    remaining, stderr = proc.communicate(timeout=8)
 
-            remaining, stderr = proc.communicate(timeout=8)
             captured.extend(remaining)
             console = captured.decode("utf-8", "replace") + stderr.decode("utf-8", "replace")
             plain_console = strip_ansi(console)
             self.assertEqual(proc.returncode, 0, msg=console[-1000:])
             self.assertIn("The answer is genuinely streaming to the console.", plain_console)
             self.assertIn("[REDACTED]", plain_console)
-            self.assertIn("Sub-agent step done.", plain_console)
-            self.assertIn("\033[36m", console)
+            self.assertIn("[subagent answer] live", plain_console)
+            self.assertIn("Narration story creation complete", plain_console)
+            self.assertIn("\033[35m", console)
             for forbidden in ("private internal thought", "reasoning_content", "choices",
                               "provider_reset", "[ai-log]", "[bazaar", "provider answered",
                               "bazaar-secret-value"):
@@ -1173,6 +1242,147 @@ class LiveSubagentConsoleTests(unittest.TestCase):
             self.assertTrue(StreamingHandler.calls[0]["payload"]["stream"])
             self.assertEqual(StreamingHandler.calls[0]["authorization"],
                              "Bearer bazaar-secret-value")
+
+    def test_safe_heartbeat_is_visible_during_a_silent_subagent_provider_wait(self):
+        provider_started = threading.Event()
+        release_provider = threading.Event()
+        captured = io.StringIO()
+        result_box = []
+
+        def slow_provider(*args, **kwargs):
+            provider_started.set()
+            release_provider.wait(3)
+            callback = kwargs.get("on_text_chunk")
+            if callback:
+                callback("answer", "The complete public result is ready.")
+            return "The complete public result is ready.", "bazaarlink"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = {"id": "silent", "kind": "edit", "topic": "narration",
+                    "instruction": "Proofread this story.", "input": "A story."}
+            with patch.dict(os.environ, {"SUBAGENT_PROGRESS_INTERVAL_SECONDS": "0.05"}), \
+                    patch("gemini_subagent.call_any", side_effect=slow_provider):
+                worker = threading.Thread(target=lambda: result_box.append(run_tasks(
+                    {"tasks": [task]}, api_key="", model="test-model", root=root,
+                    bazaar_key="configured-test-key", groq_key="", quiet_console=True,
+                    on_text_chunk=lambda channel, text: None)))
+                with redirect_stdout(captured):
+                    worker.start()
+                    try:
+                        self.assertTrue(provider_started.wait(2), "the stub provider should enter its silent wait")
+                        deadline = time.monotonic() + 2
+                        while ("Still preparing the narration grammar proofread" not in captured.getvalue()
+                               and time.monotonic() < deadline):
+                            time.sleep(0.01)
+                        self.assertIn("[subagent progress] silent", captured.getvalue())
+                        self.assertIn("Still preparing the narration grammar proofread", captured.getvalue())
+                        self.assertNotIn("private chain-of-thought", captured.getvalue())
+                    finally:
+                        release_provider.set()
+                        worker.join(timeout=4)
+            self.assertFalse(worker.is_alive(), "the progress reporter should stop after the provider returns")
+            self.assertTrue(result_box and result_box[0]["results"][0]["ok"])
+
+    def test_narration_proofread_is_visibly_streamed_as_the_helper_result(self):
+        corrected = "Maya stopped when she noticed the lost wallet, then returned it."
+        release = threading.Event()
+        first_chunk_sent = threading.Event()
+
+        class ProofreadHandler(BaseHTTPRequestHandler):
+            calls = []
+
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                payload = json.loads(self.rfile.read(length))
+                type(self).calls.append(payload)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+
+                def send(content, finish=None):
+                    event = {"choices": [{"delta": {"content": content}}]}
+                    if finish:
+                        event["choices"][0]["finish_reason"] = finish
+                    self.wfile.write(("data: " + json.dumps(event) + "\n\n").encode())
+                    self.wfile.flush()
+
+                send("Maya stopped when she noticed the lost wallet, ")
+                first_chunk_sent.set()
+                release.wait(8)
+                send("then returned it.")
+                send("", "stop")
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+
+        server = HTTPServer(("127.0.0.1", 0), ProofreadHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        endpoint = f"http://127.0.0.1:{server.server_port}/api/v1/chat/completions"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request = root / "tasks.json"
+            output = root / "results.json"
+            request.write_text(json.dumps({"context": "Proofread the narration.", "tasks": [{
+                "id": "t1", "kind": "edit", "topic": "narration",
+                "instruction": "Correct grammar and return the complete narration only.",
+                "input": "Maya stop when she noticed the lost wallet, then return it.",
+            }]}), encoding="utf-8")
+            env = {**os.environ, "BAZAAR_LINK_API": "proofread-secret-value",
+                   "PYTHONPATH": str(ROOT), "AI_COLOR": "0"}
+            env.pop("GEMINI_API_KEY", None)
+            env.pop("GROQ_API_KEY", None)
+            env.pop("GITHUB_STEP_SUMMARY", None)
+            proc = subprocess.Popen(
+                [sys.executable, str(ROOT / "tools" / "gemini_subagent.py"),
+                 "--request", str(request), "--output", str(output), "--stdout",
+                 "--bazaar-url", endpoint],
+                cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=env, bufsize=0)
+            captured = bytearray()
+
+            def read_until(needle: bytes, timeout: float) -> bool:
+                deadline = time.monotonic() + timeout
+                while needle not in captured and time.monotonic() < deadline:
+                    ready, _, _ = select.select([proc.stdout], [], [],
+                                                max(0.0, deadline - time.monotonic()))
+                    if not ready:
+                        break
+                    chunk = os.read(proc.stdout.fileno(), 4096)
+                    if not chunk:
+                        break
+                    captured.extend(chunk)
+                return needle in captured
+
+            try:
+                self.assertTrue(read_until(b"[subagent progress] t1", 3))
+                self.assertTrue(first_chunk_sent.wait(3))
+                self.assertTrue(read_until(b"Maya stopped", 3),
+                                "the corrected narration must stream before the provider finishes")
+                self.assertIsNone(proc.poll())
+            finally:
+                release.set()
+                try:
+                    remaining, stderr = proc.communicate(timeout=8)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    remaining, stderr = proc.communicate(timeout=8)
+
+            captured.extend(remaining)
+            console = captured.decode("utf-8", "replace") + stderr.decode("utf-8", "replace")
+            self.assertEqual(proc.returncode, 0, msg=console[-1000:])
+            self.assertIn(corrected, strip_ansi(console))
+            self.assertIn("Narration proofread complete; the corrected text above is the exact narration source passed downstream.",
+                          strip_ansi(console))
+            self.assertNotIn("proofread-secret-value", console)
+            self.assertNotIn("[ai-log]", console)
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["results"][0]["text"], corrected)
+            self.assertTrue(ProofreadHandler.calls[0]["stream"])
 
     def test_agent_answer_stream_discards_a_failed_provider_tail_before_fallback(self):
         primary_answer = "The primary provider's answer began before it disconnected."

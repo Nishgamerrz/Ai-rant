@@ -224,10 +224,11 @@ class StudioExperienceTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
         # The creative temperature is 10x the original presets (clamped to the
         # highest value the models can still use coherently).
-        # Narration and repair budgets scale with the story length. Map orchestration
-        # and review are deliberately small because the text sub-agent builds the map.
+        # The story draft uses a duration-scaled budget and delegates the final
+        # grammar correction; map orchestration/review stay compact.
         self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:$ctx, num_predict:$tokens}}' > narration_request.json", workflow)
-        self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:$ctx, num_predict:$tokens}, messages:", workflow)
+        self.assertIn('public_rationale:{type:"string",maxLength:320}', workflow)
+        self.assertIn("prepare_narration.py --subagent story_subagent_results.json", workflow)
         self.assertIn("options:{temperature:0.7,top_p:0.95,num_ctx:$ctx,num_predict:$tokens}}'", workflow)
         self.assertIn('"num_predict": 420', (ROOT / "tools/map_orchestration.py").read_text(encoding="utf-8"))
         self.assertIn("options:{temperature:2.0, top_p:0.99, num_ctx:$ctx, num_predict:900}}' > creation_summary_request.json", workflow)
@@ -276,7 +277,8 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn("smart_11b) AI_TIMEOUT=9000", workflow)
         self.assertIn("hard) AI_TIMEOUT=5400", workflow)
         self.assertIn('echo "AI_TIMEOUT=$AI_TIMEOUT" >> "$GITHUB_ENV"', workflow)
-        self.assertEqual(workflow.count('--timeout "${AI_TIMEOUT:-900}"'), 3)
+        self.assertEqual(workflow.count('--timeout "${AI_TIMEOUT:-900}"'), 1)
+        self.assertNotIn("narration repair", workflow)
         self.assertIn("--max-seconds 600", workflow)
         self.assertIn("--max-seconds 300", workflow)
         self.assertNotIn("NARRATION_MAX", workflow)
@@ -285,7 +287,7 @@ class StudioExperienceTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
         self.assertIn("tools/ollama_stream.py", workflow)
         self.assertNotIn("curl --fail --silent --show-error --max-time 600", workflow)
-        self.assertGreaterEqual(workflow.count("python tools/ollama_stream.py"), 5)
+        self.assertGreaterEqual(workflow.count("python tools/ollama_stream.py"), 4)
         self.assertIn("tools/ai_web_search.py", workflow)
         self.assertIn('search_queries', workflow)
         self.assertIn("map_orchestration.py queries", workflow)

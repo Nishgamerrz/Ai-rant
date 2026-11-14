@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Write safe, structured AI activity records for the Roblox Short dashboard.
 
-The JSONL artifact keeps complete prompts, answers, sub-agent instructions and
-file edits. Console emission is optional: callers that need a live structured
-feed can request a compact metadata/preview line, while human-facing workflow
-steps should keep it disabled so it does not pollute the Actions log. Provider
-credentials and common token formats are redacted from both copies; raw provider
-HTTP request/response bodies are never accepted here.
+The JSONL artifact keeps complete prompts, public answers, sub-agent instructions
+and file edits, but strips fields containing private reasoning. Console emission
+is optional: callers that need a live structured feed can request a compact
+metadata/preview line, while human-facing workflow steps should keep it disabled
+so it does not pollute the Actions log. Provider credentials and common token
+formats are redacted from both copies; raw provider HTTP bodies are never accepted.
 """
 from __future__ import annotations
 
@@ -22,6 +22,10 @@ DEFAULT_ACTIVITY_PATH = Path("dist/ai_activity.jsonl")
 _PRIVATE_FIELDS = {
     "prompt", "messages", "prompt_messages", "input", "output", "text", "response", "thinking", "instruction",
     "context", "file_edits", "tool_calls", "tool_results", "content", "raw",
+}
+_PRIVATE_REASONING_KEYS = {
+    "thinking", "thought", "thoughts", "reasoning", "reasoning_content",
+    "chain_of_thought", "private_reasoning", "private_thoughts", "scratchpad", "cot",
 }
 _TOKEN_PATTERNS = (
     re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]{12,}=?"),
@@ -120,6 +124,8 @@ def _sanitize(value: Any) -> Any:
         for key, item in value.items():
             key_text = str(key)
             normalized_key = key_text.lower().replace("-", "_")
+            if normalized_key in _PRIVATE_REASONING_KEYS:
+                continue
             sensitive = (normalized_key in _SENSITIVE_KEY_NAMES
                          or normalized_key.endswith(("_api", "_api_key", "_token", "_secret",
                                                       "_password", "_private_key", "_authorization",

@@ -34,6 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ai_activity import append_activity, redact_secrets, sanitize_data  # noqa: E402
+from console_style import paint  # noqa: E402
 
 from gemini_subagent import (  # noqa: E402
     API_KEY_ENV,
@@ -283,7 +284,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, help="write the cleaned prompts here as JSON")
     parser.add_argument("--github-output", help="path of $GITHUB_OUTPUT")
     parser.add_argument("--stdout", action="store_true",
-                        help="print only accepted cleaned prompt text")
+                        help="show whether each prompt was corrected and print the exact text used")
     parser.add_argument("--url", help="override the Gemini endpoint (tests)")
     parser.add_argument("--timeout", type=float, default=60.0)
     args = parser.parse_args()
@@ -349,8 +350,23 @@ def main() -> int:
             "cleaned_text": entry.get("text", raw),
             "reason": entry.get("reason", ""),
         }, path=activity_path, emit=False)
-        if args.stdout and entry.get("ok"):
-            print(redact_secrets(entry.get("text", "")), flush=True)
+        if args.stdout:
+            if entry.get("ok"):
+                status_line = f"[prompt cleanup] Corrected the {label} for spelling, grammar and punctuation."
+                status_kind = "success"
+            elif entry.get("skipped") and entry.get("reason") == "no API key":
+                status_line = (f"[prompt cleanup] No text provider is configured for the {label}; "
+                               "retaining the original wording.")
+                status_kind = "warning"
+            else:
+                status_line = (f"[prompt cleanup] No safe correction was produced for the {label}; "
+                               "retaining the original wording.")
+                status_kind = "warning"
+            print(paint(status_line, status_kind), flush=True)
+            final_text = redact_secrets(entry.get("text", raw)).strip()
+            if final_text:
+                print(paint(f"[effective {label}]", "label"), flush=True)
+                print(paint(final_text, "answer"), flush=True)
 
     values = {"story_topic": story["text"], "world_theme": theme["text"]}
     _write_outputs(args.github_output, values)

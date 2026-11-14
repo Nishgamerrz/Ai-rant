@@ -16,12 +16,48 @@ import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from ollama_stream import MAX_PREDICT_CEILING, next_token_budget  # noqa: E402
+from ollama_stream import (MAX_PREDICT_CEILING, next_token_budget,
+                           public_output_parts)  # noqa: E402
+
+
+class PublicOutputTests(unittest.TestCase):
+    def test_only_allowlisted_public_fields_are_extracted_and_credentials_redacted(self):
+        response = json.dumps({
+            "public_rationale": "A small honest choice gives the ending meaning. bazaar-secret-value",
+            "narration": "Maya returned the wallet to its owner.",
+            "thinking": "private reasoning must not be shown",
+            "chain_of_thought": "private chain-of-thought",
+            "provider_debug": "raw provider JSON",
+        })
+        with patch.dict(os.environ, {"BAZAAR_LINK_API": "bazaar-secret-value"}):
+            parts = public_output_parts(response)
+        self.assertEqual([part[0] for part in parts], ["public rationale", "narration"])
+        combined = " ".join(part[2] for part in parts)
+        self.assertIn("[REDACTED]", combined)
+        for forbidden in ("bazaar-secret-value", "private reasoning", "private chain-of-thought",
+                          "raw provider JSON"):
+            self.assertNotIn(forbidden, combined)
+
+    def test_public_status_is_shown_but_thought_fields_are_never_public(self):
+        response = json.dumps({
+            "public_status": "I am checking the story hook and delegation requirements.",
+            "thought": "private chain-of-thought must not be exposed",
+            "answer": "The helper will create the camera plan.",
+        })
+        parts = public_output_parts(response)
+        self.assertEqual([part[0] for part in parts], ["public status", "answer"])
+        self.assertIn("checking the story hook", parts[0][2])
+        self.assertNotIn("private chain-of-thought", json.dumps(parts))
+
+    def test_unparsed_structured_output_is_not_downgraded_to_public_prose(self):
+        malformed = '{"public_rationale":"safe", "narration":"Maya returned it"'
+        self.assertEqual(public_output_parts(malformed), [])
 
 
 class TokenBudgetTests(unittest.TestCase):
@@ -33,16 +69,18 @@ class TokenBudgetTests(unittest.TestCase):
     def test_workflow_scales_the_budget_with_the_story_length(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
         self.assertIn("NARRATION_TOKENS=$((1200 + DURATION_SECONDS * 8))", workflow)
-        self.assertIn("REPAIR_TOKENS=$((1400 + DURATION_SECONDS * 8))", workflow)
+        self.assertNotIn("REPAIR_TOKENS", workflow)
         self.assertIn("num_predict:$tokens}}' > narration_request.json", workflow)
-        self.assertIn("num_predict:$tokens}, messages:", workflow)
+        self.assertNotIn("story + sub-agent answers", workflow)
         # Every request keeps the model loaded, which removes minute-long reloads.
         self.assertIn('keep_alive:"60m"', workflow)
         self.assertIn("num_ctx:$ctx", workflow)
 
-    def test_workflow_asks_for_brief_reasoning(self):
+    def test_workflow_uses_private_reasoning_only_for_a_safe_public_rationale(self):
         workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
-        self.assertIn("THINK BRIEFLY", workflow)
+        self.assertIn("THINK BRIEFLY and PRIVATELY", workflow)
+        self.assertIn("PUBLIC RATIONALE", workflow)
+        self.assertIn("private chain-of-thought", workflow)
 
 
 class _CutOffThenComplete(BaseHTTPRequestHandler):
@@ -144,8 +182,9 @@ class _PieceByPiece(BaseHTTPRequestHandler):
         events = [
             {"message": {"thinking": "Th"}, "done": False},
             {"message": {"thinking": "inking about the beats."}, "done": False},
-            {"message": {"content": '{"narration":'}, "done": False},
-            {"message": {"content": '"Maya found it."}'}, "done": False},
+            {"message": {"content": '{"public_rationale":"A small choice '}, "done": False},
+            {"message": {"content": 'turns the hook into a hopeful ending.","narration":"Maya '}, "done": False},
+            {"message": {"content": 'found it."}'}, "done": False},
             {"done": True, "done_reason": "stop", "eval_count": 42},
         ]
         for event in events:
@@ -153,7 +192,7 @@ class _PieceByPiece(BaseHTTPRequestHandler):
 
 
 class LiveStreamingTests(unittest.TestCase):
-    def test_every_piece_is_printed_as_it_arrives(self):
+    def test_private_thoughts_and_raw_json_are_hidden_but_public_fields_are_shown(self):
         import tempfile
 
         server = HTTPServer(("127.0.0.1", 0), _PieceByPiece)
@@ -186,35 +225,36 @@ class LiveStreamingTests(unittest.TestCase):
             stderr = result.stderr
             activity = [json.loads(line) for line in activity_path.read_text(encoding="utf-8").splitlines()]
 
-        # The console streams the model's thinking in its framed color, then
-        # streams the answer verbatim in a separate color as it arrives.
-        self.assertIn("\u250c\u2500 [world plan] thinking", stdout)
-        self.assertIn("Thinking about the beats.", stdout)
-        self.assertNotIn("private text is hidden.", stdout)
-        self.assertIn("\u2514", stdout)
-        self.assertIn('[world plan] answer \u25b8 {"narration":"Maya found it."}', stdout)
+        # Internal reasoning and provider JSON are withheld; a public rationale and
+        # the validated narration field are still presented with distinct colors.
+        self.assertIn("[world plan] reasoning is active; private model thoughts are hidden.", stdout)
+        self.assertIn("[world plan] preparing the structured result; raw JSON is hidden.", stdout)
+        self.assertIn("[world plan] public rationale \u25b8 A small choice turns the hook into a hopeful ending.", stdout)
+        self.assertIn("[world plan] narration \u25b8 Maya found it.", stdout)
+        self.assertNotIn("Thinking about the beats.", stdout)
+        self.assertNotIn('{"public_rationale"', stdout)
         self.assertIn("[world plan] \u2713 done", stdout)
         self.assertNotIn("reasoning chars", stdout)
-        # The actual Actions non-TTY path gets basic ANSI colors for both live
-        # thinking and answer text; structured telemetry stays in the JSONL artifact.
         self.assertIn("\u001b[37m", stdout)
         self.assertIn("\u001b[36m", stdout)
         self.assertNotIn("[ai-log]", stdout + stderr)
-        self.assertTrue(any(event.get("type") == "model_response" for event in activity))
-        # Structured progress remains available in JSONL without being mirrored
-        # into the Actions log alongside the live, human-readable stream.
+        model_event = next(event for event in activity if event.get("type") == "model_response")
+        self.assertEqual(model_event["public_rationale"],
+                         "A small choice turns the hook into a hopeful ending.")
+        self.assertIn("Maya found it.", model_event["output"])
+        self.assertNotIn('{"public_rationale"', model_event["output"])
+        self.assertNotIn("Thinking about the beats.", json.dumps(model_event))
         artifact_progress = [event for event in activity if event.get("type") == "model_progress"]
         self.assertEqual({event.get("channel") for event in artifact_progress}, {"thinking", "answer"})
         thinking_previews = [event["preview"] for event in artifact_progress
                              if event["channel"] == "thinking"]
         answer_previews = [event["preview"] for event in artifact_progress
                            if event["channel"] == "answer"]
-        self.assertIn("Thinking about the beats.", thinking_previews[-1])
-        self.assertIn("Maya found it.", answer_previews[-1])
-        # No "reappearing" summary lines that reprint a truncated tail.
-        self.assertNotIn("thinking\u2026", stdout)
-        self.assertNotIn("writing\u2026", stdout)
-        self.assertNotIn("reasoning preview", stdout)
+        self.assertEqual(thinking_previews[-1], "Private reasoning is hidden; phase progress only.")
+        self.assertEqual(answer_previews[-1],
+                         "Structured response is being prepared; fields are not shown until validation.")
+        self.assertNotIn("Thinking about the beats.", json.dumps(artifact_progress))
+        self.assertNotIn('{"public_rationale"', json.dumps(artifact_progress))
         self.assertNotIn("\u2026", stdout)
 
 
@@ -244,7 +284,7 @@ class RuntimeSpeedTests(unittest.TestCase):
 
     def test_budgets_are_compact(self):
         self.assertIn("NARRATION_TOKENS=$((1200 + DURATION_SECONDS * 8))", self.workflow)
-        self.assertIn("REPAIR_TOKENS=$((1400 + DURATION_SECONDS * 8))", self.workflow)
+        self.assertNotIn("REPAIR_TOKENS", self.workflow)
         # The selected model emits only a compact orchestration envelope; the
         # delegated sub-agent writes the map and camera JSON.
         self.assertIn("MAP_ORCHESTRATION_TOKENS=1200", self.workflow)
@@ -275,17 +315,22 @@ class RuntimeSpeedTests(unittest.TestCase):
         self.assertNotIn("for helper_round", map_step)
         self.assertNotIn("for delegation_retry", map_step)
         self.assertNotIn("map_repair_request.json", map_step)
-        # The narration still has its own bounded correction path.
-        self.assertIn("for attempt in 1 2 3; do", self.workflow)
+        # The completed proofread is the canonical source; no later local rewrite can replace it.
+        story = self.workflow[self.workflow.index("- name: Write a believable real-life story"):start]
+        self.assertIn("prepare_narration.py --subagent story_subagent_results.json", story)
+        self.assertNotIn("narration repair", story)
+        self.assertNotIn("--truncate", story)
 
-    def test_planning_asks_for_brief_reasoning(self):
-        self.assertIn("THINK BRIEFLY: settle the hook", self.workflow)
-        self.assertIn("Think briefly about the story and delegate", self.workflow)
+    def test_planning_requests_a_public_rationale_not_private_reasoning(self):
+        self.assertIn("THINK BRIEFLY and PRIVATELY", self.workflow)
+        self.assertIn("PUBLIC RATIONALE", self.workflow)
+        self.assertIn("In your first response, author exactly two distinct tasks", self.workflow)
+        self.assertIn("private chain-of-thought", self.workflow)
         self.assertNotIn("re-read your own blueprint three times", self.workflow)
 
     def test_thinking_stays_on_in_every_retry(self):
         helper = (ROOT / "tools" / "ollama_stream.py").read_text(encoding="utf-8")
-        # The only think-off path left is a model with no reasoning channel at all.
+        # Keep internal reasoning enabled, but show only safe summaries in public output.
         self.assertEqual(helper.count('"think": False'), 1)
         self.assertIn("no thinking channel", helper)
         self.assertIn("thinking still on", helper)
@@ -579,14 +624,13 @@ class ThinkingBoxTests(unittest.TestCase):
         console.write("a" * 200)
         self.assertEqual("".join(recorder.writes).count("\n"), 0)
 
-    def test_the_stream_displays_thinking_in_its_frame(self):
+    def test_the_stream_hides_private_thoughts_and_raw_json(self):
         helper = (ROOT / "tools" / "ollama_stream.py").read_text(encoding="utf-8")
-        self.assertIn('console.open_box(f"[{label}] thinking")', helper)
-        self.assertIn("console.write(piece_thinking)", helper)
-        self.assertNotIn("private text is hidden", helper)
-        self.assertIn('console.use("answer")', helper)
-        # Leaving the thinking frame must close it before the answer starts.
-        self.assertIn('if self._box and kind != "thinking":', helper)
+        self.assertIn("private model thoughts are hidden", helper)
+        self.assertIn("public_output_parts(answer)", helper)
+        self.assertIn("preparing the structured result; raw JSON is hidden", helper)
+        self.assertNotIn("console.write(piece_thinking)", helper)
+        self.assertNotIn("console.write(piece_content)", helper)
 
 
 class _ModelCatalogHandler(BaseHTTPRequestHandler):
@@ -715,7 +759,9 @@ class StallWatchdogTests(unittest.TestCase):
         self.assertEqual(models, ["qwen3:14b"], "the selected model keeps the call while it emits content")
         self.assertEqual(output["model"], "qwen3:14b")
         self.assertIn("slow-but-progressing", output["response"])
-        self.assertIn("Reasoning continues", output["thinking"])
+        self.assertEqual(output["thinking"], "")
+        self.assertNotIn("Reasoning continues", result.stdout)
+        self.assertNotIn("Reasoning continues", json.dumps(output))
 
     def test_hard_deadline_stops_continuous_output_without_switching_models(self):
         result, output, models = self._run_cli(_SlowProgressingPrimary,
@@ -781,10 +827,11 @@ class TypingCommandLineTests(unittest.TestCase):
         self.assertIn("AI_TYPE_BUDGET: '120'", self.workflow)
         self.assertIn("AI_HEARTBEAT: '60'", self.workflow)
 
-    def test_it_announces_itself_before_waiting(self):
+    def test_it_announces_safe_progress_before_waiting(self):
         helper = (ROOT / "tools" / "ollama_stream.py").read_text(encoding="utf-8")
-        self.assertIn("streaming live", helper)
-        self.assertIn("letter by letter", helper)
+        self.assertIn("streaming safe progress", helper)
+        self.assertIn("private reasoning and raw JSON are hidden", helper)
+        self.assertIn("Validated public rationale and result fields appear when ready", helper)
 
 class ColourTests(unittest.TestCase):
     """Every kind of AI line gets its own colour, and typing never snaps."""
@@ -868,7 +915,9 @@ class ColourTests(unittest.TestCase):
     def test_live_subagent_answer_stream_uses_its_own_colour(self):
         helper = (ROOT / "tools" / "gemini_subagent.py").read_text(encoding="utf-8")
         self.assertIn("from console_style import paint", helper)
-        self.assertIn('sys.stdout.write(paint(text, "answer", stream=sys.stdout))', helper)
+        self.assertIn('sys.stdout.write(paint(text, "tool", stream=sys.stdout))', helper)
+        self.assertIn("[subagent progress]", helper)
+        self.assertIn("[subagent tool]", helper)
         self.assertNotIn('paint(f"{tag} full response for', helper)
 
 

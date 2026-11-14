@@ -37,14 +37,17 @@ from __future__ import annotations
 
 import argparse
 import base64
+import codecs
 import json
 import os
+import select
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -52,6 +55,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from console_style import paint  # noqa: E402
+from ai_activity import redact_secrets, sanitize_data  # noqa: E402
 from agent_tools import TOOL_GUIDE, TOOL_NAMES, execute_tool  # noqa: E402
 
 WORKSPACE = ROOT / "dist" / "agent_workspace"
@@ -87,13 +91,14 @@ Available tools — return them as JSON exactly like this (inside ```json):
     {"tool": "create_image", "prompt": "a cute robot in a bedroom, soft lighting", "path": "robot.png"},
     {"tool": "subagent", "instruction": "write a clean function that...", "input": "optional context", "topic": "code"}
   ],
-  "thought": "what you are doing and why",
+  "public_status": "one concise user-facing progress summary; never hidden reasoning",
   "answer": "your user-facing reply for this round (shown in the chat)"
 }
 ```
 
 Rules:
-- The SUB-AGENT IS MANDATORY AT THE START. Your FIRST JSON must itself author a useful `subagent` call with a non-empty instruction for the hardest subtask. The runner will reject and re-ask if you omit it; it will never invent or inject a delegation call. The helper is Gemini with a Groq fallback that tries llama-3.3-70b-versatile first, then openai/gpt-oss-120b if the first model is retired, rate-limited, or still cuts off after the 16k retry; other configured models are last-resort fallbacks. It returns provider, seconds, whether it edited a file, and FULL text. Set `use_tools: true` when the helper needs to search, inspect, or edit a visual reference.
+- Never reveal private chain-of-thought, hidden reasoning, or scratch work in `public_status` or `answer`. Use `public_status` only for a short audience-facing progress summary; the private Ollama reasoning channel is never displayed or saved.
+- The SUB-AGENT IS MANDATORY AT THE START. Your FIRST JSON must itself author a useful `subagent` call with a non-empty instruction for the hardest subtask. The runner will reject and re-ask if you omit it; it will never invent or inject a delegation call. The helper tries BazaarLink `auto:free` first when configured, then Gemini, then Groq. It returns provider, seconds, whether it edited a file, and FULL text. Set `use_tools: true` when the helper needs to search, inspect, or edit a visual reference.
   Keep each subagent instruction under 300 chars and focused: do NOT ask for an entire 20-page document with 50+ illustrations in one call — ask for a 1-page outline or a single section first, then expand in later rounds. The helper is capped at ~8k tokens (Groq now 8192→16384, Gemini 8192→16384) and will retry once if cut, but still keep requests focused.
 - `path` is always relative to the workspace root (dist/agent_workspace). Do not use absolute paths or .. .
 - `create_file` creates or overwrites; directories are made as needed.
@@ -234,9 +239,51 @@ def do_create_image(prompt: str, path: str) -> dict:
     img.save(target, "PNG")
     return {"ok": True, "path": str(target.relative_to(WORKSPACE)), "prompt": prompt, "size": [W, H]}
 
+def _run_live_subprocess(command: list[str], *, cwd: str, timeout: float) -> tuple[int, str, bool]:
+    """Forward a child process's flushed public stdout to the live Actions log."""
+    proc = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, bufsize=0)
+    if proc.stdout is None:
+        proc.kill()
+        proc.wait()
+        return 1, "", False
+    chunks: list[str] = []
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    deadline = time.monotonic() + timeout
+
+    def forward(raw: bytes, *, final: bool = False) -> None:
+        text = decoder.decode(raw, final=final)
+        if text:
+            chunks.append(text)
+            sys.stdout.write(text)
+            sys.stdout.flush()
+
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            readable, _, _ = select.select([proc.stdout], [], [], min(remaining, 1.0))
+            if not readable:
+                continue
+            raw = os.read(proc.stdout.fileno(), 4096)
+            if not raw:
+                forward(b"", final=True)
+                break
+            forward(raw)
+        return proc.wait(timeout=max(0.01, deadline - time.monotonic())), "".join(chunks), False
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return proc.returncode or 124, "".join(chunks), True
+    finally:
+        proc.stdout.close()
+
+
 def do_subagent(instruction: str, inp: str, topic: str, use_tools: bool = False) -> dict:
-    # Call gemini_subagent.py for one task. Tool-enabled work runs in the same
-    # workspace as the parent so image references and edits are immediately visible.
+    # The helper inherits the run's provider credentials, tries BazaarLink auto:free
+    # first, and streams only secret-redacted public status/answer text to this log.
+    # Tool-enabled work uses the same workspace so image references and edits are visible.
     import tempfile, json as _json
     req = {"context": "nish agent task", "tasks": [{"id": "a1", "kind": "agent" if use_tools else ("code" if topic == "code" else "answer"), "instruction": instruction, "input": inp or "", "topic": topic or "code"}]}
     with tempfile.TemporaryDirectory() as td:
@@ -244,20 +291,26 @@ def do_subagent(instruction: str, inp: str, topic: str, use_tools: bool = False)
         op = Path(td) / "out.json"
         rp.write_text(_json.dumps(req), encoding="utf-8")
         cmd = [sys.executable, str(ROOT / "tools" / "gemini_subagent.py"), "--request", str(rp), "--output", str(op), "--stdout"]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900, cwd=str(WORKSPACE))
-        out = proc.stdout + proc.stderr
+        try:
+            returncode, _child_output, timed_out = _run_live_subprocess(cmd, cwd=str(WORKSPACE), timeout=900)
+        except OSError as exc:
+            return {"ok": False, "error": f"sub-agent runner failed ({type(exc).__name__})"}
+        if timed_out:
+            return {"ok": False, "error": "sub-agent timed out after 900 seconds"}
         if op.is_file():
             try:
                 data = _json.loads(op.read_text(encoding="utf-8"))
                 r = (data.get("results") or [{}])[0]
-                return {"ok": bool(r.get("ok")), "text": (r.get("text") or "")[:16000],
-                        "model": data.get("model"), "provider": r.get("provider"),
-                        "providers": r.get("providers", []), "tool_rounds": r.get("tool_rounds", 0),
-                        "tool_calls": r.get("tool_calls", []), "tool_results": r.get("tool_results", []),
-                        "raw": out[:4000]}
+                return sanitize_data({"ok": bool(r.get("ok")) and returncode == 0,
+                                      "text": (r.get("text") or "")[:16000],
+                                      "model": data.get("model"), "provider": r.get("provider"),
+                                      "providers": data.get("providers", []),
+                                      "tool_rounds": r.get("tool_rounds", 0),
+                                      "tool_calls": r.get("tool_calls", []),
+                                      "tool_results": r.get("tool_results", [])})
             except Exception as exc:
-                return {"ok": False, "error": str(exc), "raw": out[:2000]}
-        return {"ok": False, "error": "no output", "raw": out[:2000]}
+                return {"ok": False, "error": f"could not read sub-agent result ({type(exc).__name__})"}
+        return {"ok": False, "error": "sub-agent returned no result file"}
 
 def _shared_tool(name: str):
     return lambda call: execute_tool(name, call, WORKSPACE)
@@ -326,11 +379,67 @@ def load_chat() -> list[dict]:
 
 def save_chat(history: list[dict]) -> None:
     CHAT_LOG.parent.mkdir(parents=True, exist_ok=True)
-    CHAT_LOG.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Keep the UI artifact public and compact; the in-memory history passed to
+    # the selected model remains untouched and can still contain needed results.
+    safe_history = sanitize_data(history)
+    if isinstance(safe_history, list):
+        for turn in safe_history:
+            if not isinstance(turn, dict):
+                continue
+            if turn.get("role") == "tool":
+                tool = str(turn.get("tool") or "")
+                output = turn.get("output")
+                if isinstance(output, dict) and tool in {"run_cmd", "read_file"}:
+                    turn["output"] = _safe_tool_log_output(tool, output)
+            if turn.get("role") == "assistant" and isinstance(turn.get("tool_calls"), list):
+                turn["tool_calls"] = [
+                    {**_safe_tool_log_input(str(call.get("tool") or call.get("name") or ""), call),
+                     "tool": call.get("tool") or call.get("name") or "tool"}
+                    if isinstance(call, dict) else call
+                    for call in turn["tool_calls"]
+                ]
+    CHAT_LOG.write_text(json.dumps(safe_history, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def log_tool(tool: str, inp: dict, out: dict) -> None:
+def _safe_tool_log_input(tool: str, value: dict) -> dict:
+    safe = sanitize_data(value if isinstance(value, dict) else {})
+    if not isinstance(safe, dict):
+        return {}
+    arguments = safe.get("arguments")
+    if isinstance(arguments, dict):
+        safe["arguments"] = _safe_tool_log_input(tool, arguments)
+    if tool == "run_cmd":
+        for key in ("cmd", "command", "script"):
+            safe.pop(key, None)
+    elif tool == "create_file":
+        safe.pop("content", None)
+    elif tool == "edit_file":
+        safe.pop("old_text", None)
+        safe.pop("new_text", None)
+    return safe
+
+
+def _safe_tool_log_output(tool: str, value: dict) -> dict:
+    safe = sanitize_data(value if isinstance(value, dict) else {})
+    if not isinstance(safe, dict):
+        return {"note": "Tool output omitted from the activity artifact."}
+    if tool == "run_cmd":
+        public = {key: safe[key] for key in ("ok", "code") if key in safe}
+        public["note"] = "Shell command and output are hidden from the activity artifact."
+        return public
+    if tool == "read_file":
+        public = {key: safe[key] for key in ("ok", "path", "bytes", "error") if key in safe}
+        public["note"] = "File contents are available in the workspace and omitted from tool logs."
+        return public
+    return safe
+
+
+def log_tool(tool: str, inp: dict, out: dict, *, event_id: str = "") -> None:
     TOOLS_LOG.parent.mkdir(parents=True, exist_ok=True)
-    rec = {"time": datetime.now(timezone.utc).isoformat(), "tool": tool, "input": inp, "output": out}
+    rec = {"time": datetime.now(timezone.utc).isoformat(), "tool": tool,
+           "input": _safe_tool_log_input(tool, inp),
+           "output": _safe_tool_log_output(tool, out)}
+    if event_id:
+        rec["event_id"] = event_id
     with TOOLS_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
@@ -353,7 +462,7 @@ def run_one_round(model: str, prompt: str, history: list[dict], label: str, enab
         "stream": False,
         "keep_alive": "60m",
         "options": {"temperature": 0.9, "num_predict": 8192, "num_ctx": 16384},
-        "format": {"type": "object", "properties": {"thought": {"type": "string"}, "answer": {"type": "string"}, "tool_calls": {"type": "array", "items": {"type": "object"}}}, "required": ["answer"]},
+        "format": {"type": "object", "properties": {"public_status": {"type": "string", "maxLength": 320}, "answer": {"type": "string"}, "tool_calls": {"type": "array", "items": {"type": "object"}}}, "required": ["public_status", "answer"], "additionalProperties": False},
     }
     # For local models that don't respect format strictly, we allow freeform too — parse fallback handles it.
     import tempfile, json as _json
@@ -380,21 +489,19 @@ def run_one_round(model: str, prompt: str, history: list[dict], label: str, enab
             parsed = _json.loads(text) if text.strip().startswith("{") else None
         except Exception:
             parsed = None
-        if parsed and isinstance(parsed, dict):
-            # re-serialize for parse_tool_calls helper
-            text_for_parse = _json.dumps(parsed)
-        else:
-            text_for_parse = text
+        if not isinstance(parsed, dict):
             parsed = parse_tool_calls(text) or {}
-            if not parsed:
-                # treat whole answer as final
-                parsed = {"answer": text, "thought": data.get("thinking") or "", "tool_calls": []}
-        # also try to extract tool_calls from parsed if present
+        # Only fields that ollama_stream has allowlisted and redacted may reach
+        # the chat artifact; raw JSON and any model-authored thought field stay private.
+        public_fields = {
+            str(item.get("label") or ""): str(item.get("text") or "")
+            for item in (data.get("public_output") or []) if isinstance(item, dict)
+        }
+        answer = public_fields.get("answer", "")
+        public_status = public_fields.get("public status", "")
         tool_calls = parsed.get("tool_calls") or []
-        answer = parsed.get("answer") or text
-        thought = parsed.get("thought") or data.get("thinking") or ""
-        # attach thinking for logging
-        return answer, {"thought": thought, "answer": answer, "tool_calls": tool_calls, "raw": text}
+        return answer, {"public_status": public_status, "answer": answer,
+                        "tool_calls": tool_calls}
 
 def _chat_key_bytes() -> bytes:
     token = os.environ.get("AGENT_CHAT_KEY", "").strip()
@@ -504,9 +611,10 @@ def stage_reference_image(item: dict) -> str:
 
 def save_preview(history: list[dict]) -> None:
     try:
+        save_chat(history)
         preview = ROOT / "dist" / "preview"
         preview.mkdir(parents=True, exist_ok=True)
-        (preview / "agent_chat.json").write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+        (preview / "agent_chat.json").write_text(CHAT_LOG.read_text(encoding="utf-8"), encoding="utf-8")
         if TOOLS_LOG.is_file():
             (preview / "agent_tools.jsonl").write_text(TOOLS_LOG.read_text(encoding="utf-8"), encoding="utf-8")
     except Exception:
@@ -530,7 +638,46 @@ def normalize_agent_tool_call(call: dict, tool: str = "") -> dict:
     return normalized
 
 
+def _tool_live_input_summary(tool: str, call: dict) -> str:
+    if tool == "run_cmd":
+        return "shell command details hidden"
+    if tool == "subagent":
+        return f"delegated task · {str(call.get('topic') or 'general')[:60]}"
+    fields = []
+    for key in ("path", "query", "topic", "output", "url"):
+        value = call.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        if key == "url":
+            value = urllib.parse.urlsplit(value).hostname or "reference URL"
+        safe = redact_secrets(" ".join(value.split()))[:120]
+        if safe:
+            fields.append(f"{key}={safe}")
+    return ", ".join(fields) or "authored request"
+
+
+def _tool_live_result_summary(tool: str, output: dict) -> str:
+    safe = sanitize_data(output if isinstance(output, dict) else {})
+    if not isinstance(safe, dict):
+        return "completed"
+    if tool == "run_cmd":
+        code = safe.get("code")
+        return (f"exit code {code}; shell output hidden" if code is not None
+                else "shell output hidden")
+    if safe.get("ok") is False:
+        error = redact_secrets(str(safe.get("error") or "tool reported failure"))
+        return "failed" + (f" · {error[:160]}" if error else "")
+    fields = []
+    for key in ("path", "bytes", "count", "dimensions", "format", "duration_seconds"):
+        if key in safe and safe[key] not in (None, ""):
+            fields.append(f"{key}={safe[key]}")
+    if safe.get("summary"):
+        fields.append(redact_secrets(str(safe["summary"]))[:160])
+    return ", ".join(fields) or "completed"
+
+
 def execute_agent_tools(tool_calls: list[dict], label: str) -> list[dict]:
+    del label  # Tool events carry their own concise, user-facing labels.
     results: list[dict] = []
     for authored_call in (tool_calls or [])[:6]:
         if not isinstance(authored_call, dict):
@@ -545,18 +692,35 @@ def execute_agent_tools(tool_calls: list[dict], label: str) -> list[dict]:
         if tool in ("image", "generate_image"):
             tool = "create_image"
         call = normalize_agent_tool_call(authored_call, tool)
+        safe_call = sanitize_data(authored_call)
+        if not isinstance(safe_call, dict):
+            safe_call = {}
+        description = _tool_live_input_summary(tool, call)
+        event_id = uuid.uuid4().hex[:12]
+        print(paint(f"[tool {tool}] started · {description} · event={event_id}", "tool"), flush=True)
         if tool not in TOOLS:
             out = {"ok": False, "error": f"unknown tool {tool}"}
-            print(paint(f"[tool {tool}] unknown", "error"), flush=True)
         else:
-            print(paint(f"[tool {tool}] {json.dumps(call, ensure_ascii=False)[:240]}", "tool"), flush=True)
             try:
                 out = TOOLS[tool](call)
             except Exception as exc:
                 out = {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:1200]}
-            print(paint(f"[tool {tool}] -> {json.dumps(out, ensure_ascii=False)[:2200]}", "plan"), flush=True)
-        log_tool(tool, authored_call, out)
-        results.append({"tool": tool, "input": authored_call, "output": out})
+        safe_out = sanitize_data(out)
+        if not isinstance(safe_out, dict):
+            safe_out = {"ok": False, "error": "tool returned an unsupported result"}
+        if safe_out.get("ok") is False:
+            state, color = "failed", "error"
+            detail = _tool_live_result_summary(tool, safe_out)
+        elif safe_out.get("ok") is True:
+            state, color = "succeeded", "success"
+            detail = _tool_live_result_summary(tool, safe_out)
+        else:
+            state, color = "finished", "success"
+            detail = _tool_live_result_summary(tool, safe_out)
+        print(paint(f"[tool {tool}] {state} · {detail} · event={event_id}", color), flush=True)
+        log_tool(tool, safe_call, safe_out, event_id=event_id)
+        results.append({"tool": tool, "input": safe_call, "output": safe_out,
+                        "event_id": event_id})
     return results
 
 
@@ -599,7 +763,7 @@ def main() -> None:
         if parsed is None:
             print(paint(f"[{label}] no parsed result, stopping", "error"), flush=True)
             break
-        thought = parsed.get("thought") or ""
+        public_status = parsed.get("public_status") or ""
         tool_calls = parsed.get("tool_calls") or []
         # The local AI must author its required delegation; no workflow-side injection.
         authored_subagent = False
@@ -622,11 +786,14 @@ def main() -> None:
             continue
         if authored_subagent:
             delegation_satisfied = True
-        # log thinking in coloured box (ollama_stream already did)
-        print(paint(f"[agent thought] {thought[:220]}", "thinking"), flush=True)
-        print(paint(f"[agent] {answer[:400]}", "answer"), flush=True)
+        if public_status:
+            print(paint(f"[agent progress] {public_status}", "plan"), flush=True)
+        if answer:
+            print(paint(f"[agent] {answer[:400]}", "answer"), flush=True)
 
-        history.append({"role": "assistant", "content": answer, "thought": thought, "tool_calls": tool_calls, "round": rnd, "time": datetime.now(timezone.utc).isoformat()})
+        history.append({"role": "assistant", "content": answer,
+                        "public_status": public_status, "tool_calls": tool_calls,
+                        "round": rnd, "time": datetime.now(timezone.utc).isoformat()})
         save_chat(history)
 
         if not tool_calls:
@@ -695,7 +862,7 @@ def main() -> None:
                 print(paint(f"[live chat] model call failed: {type(exc).__name__}: {exc}", "error"), flush=True)
                 return False
             parsed2 = parsed2 or {}
-            thought2 = parsed2.get("thought") or ""
+            public_status2 = parsed2.get("public_status") or ""
             tool_calls2 = parsed2.get("tool_calls") or []
             answer2 = parsed2.get("answer") or answer2 or ""
             if reference_path and not reference_calls_released:
@@ -738,10 +905,12 @@ def main() -> None:
                 # Execute only the calls authored by the local model across its retry response(s).
                 tool_calls2 = staged_reference_calls
                 reference_calls_released = True
-            print(paint(f"[agent thought] {thought2[:260]}", "thinking"), flush=True)
-            print(paint(f"[agent] {answer2[:500]}", "answer"), flush=True)
-            history.append({"role": "assistant", "content": answer2, "thought": thought2,
-                            "tool_calls": tool_calls2,
+            if public_status2:
+                print(paint(f"[agent progress] {public_status2}", "plan"), flush=True)
+            if answer2:
+                print(paint(f"[agent] {answer2[:500]}", "answer"), flush=True)
+            history.append({"role": "assistant", "content": answer2,
+                            "public_status": public_status2, "tool_calls": tool_calls2,
                             "time": datetime.now(timezone.utc).isoformat()})
             save_chat(history)
             if not tool_calls2:

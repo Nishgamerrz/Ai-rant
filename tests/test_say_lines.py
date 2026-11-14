@@ -64,7 +64,8 @@ class WorkflowNarrationTests(unittest.TestCase):
                       '${DURATION_SECONDS}s story:', WORKFLOW)
 
     def test_map_failures_and_optional_research_use_distinct_status_colours(self):
-        self.assertIn('python tools/say.py success "Narration passed the', WORKFLOW)
+        self.assertIn("Sub-agent proofread accepted", (ROOT / "tools" / "prepare_narration.py").read_text(encoding="utf-8"))
+        self.assertIn("prepare_narration.py --subagent story_subagent_results.json", WORKFLOW)
         self.assertIn('python tools/say.py error "The accepted delegated blueprint failed strict map validation',
                       WORKFLOW)
         self.assertIn('python tools/say.py tool "The local director requested one focused research pass',
@@ -83,17 +84,19 @@ class WorkflowNarrationTests(unittest.TestCase):
                 self.assertNotIn(">", line.replace("->", ""), line)
                 self.assertNotIn(">>", line, line)
 
-    def test_live_subagent_answers_are_coloured_but_topic_prompts_are_plain(self):
+    def test_live_subagent_and_topic_cleanup_output_are_coloured(self):
         helper = (ROOT / "tools" / "console_style.py").read_text(encoding="utf-8")
         self.assertIn('"plan"', helper)
         search = (ROOT / "tools" / "ai_web_search.py").read_text(encoding="utf-8")
         self.assertIn("paint(", search)
 
         subagent = (ROOT / "tools" / "gemini_subagent.py").read_text(encoding="utf-8")
-        self.assertIn('paint(text, "answer", stream=sys.stdout)', subagent)
+        self.assertIn('paint(text, "tool", stream=sys.stdout)', subagent)
+        self.assertIn("subagent progress", subagent)
         topic = (ROOT / "tools" / "gemini_topic.py").read_text(encoding="utf-8")
-        self.assertNotIn("paint(", topic)
-        self.assertIn('print(redact_secrets(entry.get("text", "")), flush=True)', topic)
+        self.assertIn("paint(status_line, status_kind)", topic)
+        self.assertIn('paint(final_text, "answer")', topic)
+        self.assertNotIn('print(redact_secrets(entry.get("text", "")), flush=True)', topic)
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ def task(task_id: str, topic: str, instruction: str) -> dict:
 
 def orchestration() -> dict:
     return {
+        "public_rationale": "A bright market and shared search make the friends' hopeful ending easy to read.",
         "design_brief": "A warm, sunlit market where a lost parcel brings two friends together.",
         "model_anchor_names": ["Parcel Lantern"],
         "search_queries": [],
@@ -83,9 +84,25 @@ class OrchestrationSchemaTests(unittest.TestCase):
                          ["t1", "t2"])
         self.assertEqual(schema["properties"]["model_anchor_names"]["minItems"], 1)
         self.assertEqual(set(schema["required"]),
-                         {"design_brief", "model_anchor_names", "search_queries", "subagent_tasks"})
+                         {"public_rationale", "design_brief", "model_anchor_names",
+                          "search_queries", "subagent_tasks"})
         self.assertNotIn("props", schema["properties"], "the local model must not emit the map")
         self.assertNotIn("camera_shots", schema["properties"])
+        self.assertEqual(schema["properties"]["public_rationale"]["maxLength"], 320)
+
+    def test_first_response_requires_a_safe_public_rationale(self) -> None:
+        invalid_rationales = (None, {"thought": "private"}, "x" * 321,
+                              "My private reasoning is to make the room dark.",
+                              '{"public_rationale":"not prose"}')
+        for rationale in invalid_rationales:
+            with self.subTest(rationale=str(rationale)[:32]):
+                bad = orchestration()
+                if rationale is None:
+                    bad.pop("public_rationale")
+                else:
+                    bad["public_rationale"] = rationale
+                with self.assertRaisesRegex(ValueError, "public rationale"):
+                    map_orchestration._validated_tasks(bad)
 
     def test_first_response_validator_requires_map_and_models_topics(self) -> None:
         response = {"message": {"content": json.dumps(orchestration())}}
@@ -120,6 +137,8 @@ class OrchestrationSchemaTests(unittest.TestCase):
             request = map_orchestration.build_subagent_request(response_file, context_file, output_file)
             self.assertEqual(request["tasks"], original["subagent_tasks"])
             self.assertIn(original["design_brief"], request["context"])
+            self.assertIn(original["public_rationale"], request["context"])
+            self.assertIn("public rationale", request["context"])
             self.assertIn("Parcel Lantern", request["context"])
             self.assertIn("Story and interior-room constraints", request["context"])
 
@@ -340,7 +359,7 @@ class WorkflowTests(unittest.TestCase):
     def test_local_model_only_orchestrates_and_does_not_author_map_or_camera_json(self) -> None:
         prompt = self.map_prompt()
         self.assertIn("director and orchestrator, not the map artist", prompt)
-        self.assertIn("Do NOT write props, coordinates, camera shots, face beats", prompt)
+        self.assertIn("Do NOT reveal hidden reasoning or write props, coordinates, camera shots, face beats", prompt)
         self.assertIn("two task calls that you author now", prompt)
         self.assertIn("actual sub-agent calls", prompt)
         self.assertNotIn("Design the complete coherent world blueprint", prompt)

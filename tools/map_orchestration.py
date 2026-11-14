@@ -19,10 +19,16 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from console_style import paint  # noqa: E402
+from ai_activity import redact_secrets  # noqa: E402
 from map_delegation import MAP_CAMERA_TOPICS, extract_plan, missing_required_topics  # noqa: E402
 
 TASK_IDS = ("t1", "t2")
 VALID_TIMES = {"dawn", "day", "sunset", "night"}
+_PRIVATE_RATIONALE_MARKERS = (
+    "chain of thought", "chain-of-thought", "private reasoning", "hidden reasoning",
+    "internal monologue", "scratchpad", "let me think step by step",
+    "here is my reasoning", "here's my reasoning", "my thought process",
+)
 
 
 def orchestration_schema() -> dict:
@@ -43,6 +49,7 @@ def orchestration_schema() -> dict:
     return {
         "type": "object",
         "properties": {
+            "public_rationale": {"type": "string", "maxLength": 320},
             "design_brief": {"type": "string", "maxLength": 700},
             "model_anchor_names": {
                 "type": "array",
@@ -59,8 +66,8 @@ def orchestration_schema() -> dict:
                 "type": "array", "items": task, "minItems": 2, "maxItems": 2,
             },
         },
-        "required": ["design_brief", "model_anchor_names", "search_queries",
-                     "subagent_tasks"],
+        "required": ["public_rationale", "design_brief", "model_anchor_names",
+                     "search_queries", "subagent_tasks"],
         "additionalProperties": False,
     }
 
@@ -96,6 +103,15 @@ def _orchestration(value: Any) -> dict:
 
 
 def _validated_tasks(plan: dict) -> list[dict]:
+    raw_rationale = plan.get("public_rationale")
+    if not isinstance(raw_rationale, str):
+        raise ValueError("the first response must include a concise public rationale (max 320 chars)")
+    rationale = redact_secrets(" ".join(raw_rationale.split())).strip()
+    lowered = rationale.casefold()
+    if (not rationale or len(rationale) > 320 or rationale.startswith(("{", "["))
+            or any(marker in lowered for marker in _PRIVATE_RATIONALE_MARKERS)):
+        raise ValueError("the first response must include a concise safe public rationale (max 320 chars)")
+    plan["public_rationale"] = rationale
     tasks = plan.get("subagent_tasks")
     if not isinstance(tasks, list) or len(tasks) != 2:
         raise ValueError("the first response must author exactly two sub-agent calls")
@@ -175,6 +191,9 @@ def build_subagent_request(response_path: Path, context_path: Path, output_path:
     brief = str(plan.get("design_brief") or "").strip()
     names = [str(name).strip() for name in plan["model_anchor_names"]]
     extras = []
+    rationale = str(plan.get("public_rationale") or "").strip()
+    if rationale:
+        extras.append("Selected local director's public rationale:\n" + rationale)
     if brief:
         extras.append("Selected local director's concise brief:\n" + brief)
     extras.append("Model-anchor names assigned to the AI-authored models task: "
