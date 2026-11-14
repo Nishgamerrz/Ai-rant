@@ -121,7 +121,7 @@ class _TaskProgressReporter:
     """Stream safe task state and bounded heartbeats while a helper is responding."""
 
     def __init__(self, task: dict, *, activity_path: Path, quiet_console: bool,
-                 bazaar_configured: bool):
+                 bazaar_configured: bool, activity_id: str = ""):
         self.task = task
         self.activity_path = activity_path
         self.quiet_console = quiet_console
@@ -129,8 +129,11 @@ class _TaskProgressReporter:
         self.task_id = redact_secrets(str(task.get("id") or "task"))[:40]
         self.topic = str(task.get("topic") or "")[:40]
         self.bazaar_configured = bazaar_configured
+        self.activity_id = str(activity_id or "")[:32]
         self.stop_event = threading.Event()
         self.answer_started = threading.Event()
+        self._answer_state_lock = threading.Lock()
+        self._last_answer_activity = 0.0
         self.thread: threading.Thread | None = None
         try:
             interval = float(os.environ.get("SUBAGENT_PROGRESS_INTERVAL_SECONDS", ""))
@@ -145,13 +148,14 @@ class _TaskProgressReporter:
         append_activity({
             "type": "subagent_progress", "stage": "subagent",
             "tag": "[subagent progress]", "task_id": self.task_id,
+            "activity_id": self.activity_id,
             "kind": self.task.get("kind", "task"), "topic": self.topic,
             "status": status, "public_status": safe,
         }, path=self.activity_path, emit=False)
         if self.quiet_console:
             with _LIVE_OUTPUT_LOCK:
                 print(paint(f"[subagent progress] {self.task_id} · {safe}",
-                            "tool", stream=sys.stdout), flush=True)
+                            "subagent", stream=sys.stdout), flush=True)
 
     def start(self) -> None:
         route = (" BazaarLink auto:free is the primary helper route when configured."
@@ -174,19 +178,28 @@ class _TaskProgressReporter:
         args = safe_event.get("arguments") if isinstance(safe_event.get("arguments"), dict) else {}
         result = safe_event.get("result") if isinstance(safe_event.get("result"), dict) else {}
         if status == "started":
-            detail = ", ".join(f"{key}={value}" for key, value in args.items())
+            # Show the operation and a few safe, useful selectors, never tool
+            # prompts, file contents, shell source, or private reasoning fields.
+            visible_keys = ("query", "name", "kind", "path", "format", "output",
+                            "width", "height", "samples", "duration", "topic")
+            detail = ", ".join(f"{key}={args[key]}" for key in visible_keys if key in args)
             message = f"{tool} started" + (f" ({detail[:180]})" if detail else "")
         else:
             outcome = "succeeded" if result.get("ok") else "finished"
-            fields = [f"{key}={result[key]}" for key in ("path", "bytes", "summary", "note", "error")
+            fields = [f"{key}={result[key]}" for key in
+                      ("path", "bytes", "asset_id", "dimensions_source_units",
+                       "estimated_dimensions_studs", "anchor", "summary", "note", "error")
                       if key in result]
-            message = f"{tool} {outcome}" + (f" ({', '.join(fields)[:180]})" if fields else "")
+            if tool == "search_roblox_meshes" and isinstance(result.get("results"), list):
+                fields.insert(0, f"results={len(result['results'])}")
+            message = f"{tool} {outcome}" + (f" ({', '.join(fields)[:260]})" if fields else "")
         public_status = _safe_public_status(message)
         if not public_status:
             return
         append_activity({
             "type": "subagent_tool", "stage": "subagent",
             "tag": "[subagent tool]", "task_id": self.task_id,
+            "activity_id": self.activity_id,
             "topic": self.topic, "status": status,
             "public_status": public_status,
             "tool_calls": [safe_event] if status == "started" else [],
@@ -200,21 +213,105 @@ class _TaskProgressReporter:
 
     def answer_started_now(self) -> None:
         self.answer_started.set()
+        self.answer_activity_now()
+
+    def answer_activity_now(self) -> None:
+        with self._answer_state_lock:
+            self._last_answer_activity = time.monotonic()
 
     def answer_reset(self) -> None:
         self.answer_started.clear()
+        with self._answer_state_lock:
+            self._last_answer_activity = 0.0
 
     def _heartbeat(self) -> None:
         while not self.stop_event.wait(self.interval):
             if self.answer_started.is_set():
-                continue
-            self.emit("working", f"Still preparing the {self.description}; "
-                      "the public answer has not started streaming yet.")
+                with self._answer_state_lock:
+                    idle = time.monotonic() - self._last_answer_activity
+                if idle < self.interval:
+                    continue
+                self.answer_activity_now()
+                self.emit("working", f"The public {self.description} answer is still in progress; "
+                          "waiting for its next safe result segment.")
+            else:
+                self.emit("working", f"Still preparing the {self.description}; "
+                          "the public answer has not started streaming yet.")
 
     def stop(self) -> None:
         self.stop_event.set()
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=1.0)
+
+
+class _LiveAnswerConsole:
+    """Frame public helper text into flushed log lines for Actions' line reader.
+
+    GitHub's runner records subprocess output a line at a time. A plain
+    ``sys.stdout.write(text); flush()`` therefore still looks stalled whenever
+    the helper is writing one long paragraph without a newline. Bounded,
+    JSON-escaped text frames keep each safe answer segment independently visible
+    while preserving the original completion for downstream consumers.
+    """
+
+    MAX_FRAME_CHARS = 180
+    FLUSH_INTERVAL_SECONDS = 0.35
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._buffer = ""
+        self._task_id = ""
+        self._last_flush = time.monotonic()
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._flush_idle,
+                                        name="subagent-live-answer-flush", daemon=True)
+        self._thread.start()
+
+    def _emit(self, text: str) -> None:
+        if not text:
+            return
+        encoded = json.dumps(text, ensure_ascii=False, separators=(",", ":"))
+        line = f"[subagent answer chunk] {self._task_id} · {encoded}"
+        try:
+            with _LIVE_OUTPUT_LOCK:
+                print(paint(line, "subagent", stream=sys.stdout), flush=True)
+        except (OSError, ValueError):
+            pass
+        self._last_flush = time.monotonic()
+
+    def _flush_locked(self) -> None:
+        if self._buffer:
+            chunk, self._buffer = self._buffer, ""
+            self._emit(chunk)
+
+    def write(self, task_id: str, text: str) -> None:
+        if not text:
+            return
+        with self._lock:
+            task_id = redact_secrets(str(task_id or "task"))[:40]
+            if self._task_id and task_id != self._task_id:
+                self._flush_locked()
+            self._task_id = task_id
+            self._buffer += str(text)
+            while len(self._buffer) >= self.MAX_FRAME_CHARS:
+                chunk = self._buffer[:self.MAX_FRAME_CHARS]
+                self._buffer = self._buffer[self.MAX_FRAME_CHARS:]
+                self._emit(chunk)
+            if "\n" in self._buffer or "\r" in self._buffer:
+                self._flush_locked()
+
+    def _flush_idle(self) -> None:
+        while not self._stop_event.wait(self.FLUSH_INTERVAL_SECONDS):
+            with self._lock:
+                if self._buffer and time.monotonic() - self._last_flush >= self.FLUSH_INTERVAL_SECONDS:
+                    self._flush_locked()
+
+    def close(self) -> None:
+        self._stop_event.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+        with self._lock:
+            self._flush_locked()
 
 
 # "write" is a free-form letter to Gemini: the planning model may send it any
@@ -245,7 +342,9 @@ AGENT_TOOL_USAGE_GUIDANCE = (
     "\\\"path\\\":\\\"reference.png\\\"}]}. The runner will only execute calls "
     "present in your response; it will never invent or inject delegation or asset-search "
     "calls. After tool results arrive, continue until finished, then return an empty "
-    "tool_calls array and a concise final answer. Keep each round's call list to six or "
+    "tool_calls array and a concise final answer. If the task requires exact JSON or another "
+    "structured format, put that complete deliverable inside the final answer string unchanged. "
+    "Keep each round's call list to six or "
     "fewer tools."
 )
 
@@ -350,6 +449,8 @@ def _clean_task(task, index: int) -> dict | None:
     topic = str(task.get("topic") or "").strip().lower()
     if topic:
         cleaned["topic"] = topic[:60]
+    if task.get("use_tools") is True:
+        cleaned["use_tools"] = True
     apply_to = task.get("apply_to")
     if kind == "edit" and isinstance(apply_to, str) and apply_to.strip():
         cleaned["apply_to"] = apply_to.strip()
@@ -1494,7 +1595,11 @@ def _public_tool_calls(agent_run: dict) -> list[dict]:
 def _public_tool_results(agent_run: dict) -> list[dict]:
     public = []
     allowed = ("ok", "path", "bytes", "error", "analysis", "text", "summary", "note",
-               "dimensions", "format", "duration_seconds", "valid", "warnings", "files",
+               "dimensions", "dimensions_source_units", "estimated_dimensions_studs", "bounds",
+               "bounds_frame", "units", "studs_per_unit", "vertices_measured", "source_dimensions",
+               "source_units_per_stud", "scale_applied", "room_size", "anchor", "asset_id",
+               "asset_type", "creator", "source", "creator_store_api_status", "creator_store_errors",
+               "creator_store_search_url", "format", "duration_seconds", "valid", "warnings", "files",
                "matches", "results", "similarity_percent", "changed_pixel_fraction")
     for call in agent_run.get("tool_results", []):
         tool = str(call.get("tool") or "")
@@ -1516,7 +1621,8 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
               groq_key: str = "", groq_model_name: str = "",
               groq_url: str | None = None,
               quiet_console: bool = False,
-              on_text_chunk: Callable[[str, str], None] | None = None) -> dict:
+              on_text_chunk: Callable[[str, str], None] | None = None,
+              on_live_answer: Callable[[str, str], None] | None = None) -> dict:
     root = (root or Path.cwd()).resolve()
     request = normalize_request(request)
     if bazaar_key is None:
@@ -1540,7 +1646,7 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
         stream_state = {"emitted": False, "answer_header": False}
         progress = _TaskProgressReporter(
             task, activity_path=activity_path, quiet_console=quiet_console,
-            bazaar_configured=bool(bazaar_key))
+            bazaar_configured=bool(bazaar_key), activity_id=activity_id)
 
         def emit_answer_chunk(safe_chunk: str) -> None:
             if not safe_chunk:
@@ -1552,6 +1658,12 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
                                 "label", stream=sys.stdout), flush=True)
                 stream_state["answer_header"] = True
             stream_state["emitted"] = True
+            progress.answer_activity_now()
+            if quiet_console and on_live_answer:
+                try:
+                    on_live_answer(progress.task_id, safe_chunk)
+                except (OSError, ValueError):
+                    pass
             _notify_text_chunk(on_text_chunk, "answer", safe_chunk)
 
         def relay_safe_answer(channel: str, chunk: str) -> None:
@@ -1650,7 +1762,7 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
         started = time.monotonic()
         agent_run: dict = {}
         try:
-            if task["kind"] == "agent":
+            if task["kind"] == "agent" or task.get("use_tools") is True:
                 agent_run = run_tool_agent(
                     task, request.get("context", ""), model=model,
                     api_key=api_key, groq_key=groq_key,
@@ -1708,6 +1820,8 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
             entry["tool_results"] = _public_tool_results(agent_run)
             if agent_run.get("round_limit_reached"):
                 entry["round_limit_reached"] = True
+                entry["ok"] = False
+                entry["error"] = "The tool-enabled helper reached its round limit without returning a final answer."
             if agent_run.get("required_image_inspection_missing"):
                 entry["ok"] = False
                 missing = agent_run["required_image_inspection_missing"]
@@ -1796,23 +1910,29 @@ def main() -> None:
                                            "results": []}) + "\n", encoding="utf-8")
         return
 
-    def print_live_answer(channel: str, text: str) -> None:
-        if args.stdout and channel == "answer" and text:
-            # Sub-agent output is magenta, distinct from the local model's cyan answer.
-            with _LIVE_OUTPUT_LOCK:
-                sys.stdout.write(paint(text, "tool", stream=sys.stdout))
-                sys.stdout.flush()
+    def observe_live_answer(_channel: str, _text: str) -> None:
+        # A callback enables provider SSE; the separate line-framed console
+        # writer below owns the user-visible stream so Actions never buffers a
+        # long, unterminated line.
+        return None
 
-    result = run_tasks(request, api_key=os.environ.get(API_KEY_ENV, "").strip(),
-                       model=args.model, root=Path.cwd(),
-                       bazaar_key=bazaar_link_api_key_from_env(),
-                       bazaar_url=args.bazaar_url or None,
-                       url=args.url or None, timeout=args.timeout,
-                       groq_key=os.environ.get(GROQ_KEY_ENV, "").strip(),
-                       groq_model_name=args.groq_model,
-                       groq_url=args.groq_url or None,
-                       quiet_console=args.stdout,
-                       on_text_chunk=print_live_answer if args.stdout else None)
+    live_answer_console = _LiveAnswerConsole() if args.stdout else None
+    try:
+        result = run_tasks(request, api_key=os.environ.get(API_KEY_ENV, "").strip(),
+                           model=args.model, root=Path.cwd(),
+                           bazaar_key=bazaar_link_api_key_from_env(),
+                           bazaar_url=args.bazaar_url or None,
+                           url=args.url or None, timeout=args.timeout,
+                           groq_key=os.environ.get(GROQ_KEY_ENV, "").strip(),
+                           groq_model_name=args.groq_model,
+                           groq_url=args.groq_url or None,
+                           quiet_console=args.stdout,
+                           on_text_chunk=observe_live_answer if args.stdout else None,
+                           on_live_answer=(live_answer_console.write
+                                           if live_answer_console else None))
+    finally:
+        if live_answer_console:
+            live_answer_console.close()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n",
                           encoding="utf-8")

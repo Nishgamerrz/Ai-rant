@@ -91,7 +91,10 @@ class WorkflowNarrationTests(unittest.TestCase):
         self.assertIn("paint(", search)
 
         subagent = (ROOT / "tools" / "gemini_subagent.py").read_text(encoding="utf-8")
-        self.assertIn('paint(text, "tool", stream=sys.stdout)', subagent)
+        self.assertIn('print(paint(line, "subagent", stream=sys.stdout), flush=True)', subagent)
+        self.assertIn('"tool", stream=sys.stdout), flush=True)', subagent)
+        self.assertIn('"subagent": "\\033[95m"', helper)
+        self.assertIn('"tool": "\\033[35m"', helper)
         self.assertIn("subagent progress", subagent)
         topic = (ROOT / "tools" / "gemini_topic.py").read_text(encoding="utf-8")
         self.assertIn("paint(status_line, status_kind)", topic)

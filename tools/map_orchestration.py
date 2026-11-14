@@ -42,6 +42,8 @@ def orchestration_schema() -> dict:
                       "enum": ["map", "cameras", "faces", "models"]},
             "instruction": {"type": "string", "minLength": 20, "maxLength": 1200},
             "input": {"type": "string", "maxLength": 3000},
+            "use_tools": {"type": "boolean",
+                           "description": "Optional; true gives the helper access to model-authored shared tools."},
         },
         "required": ["id", "kind", "topic", "instruction"],
         "additionalProperties": False,
@@ -129,6 +131,8 @@ def _validated_tasks(plan: dict) -> list[dict]:
         ids.add(task_id)
         if str(task.get("kind") or "").strip().lower() != "write":
             raise ValueError("map and models sub-agent calls must use kind 'write'")
+        if "use_tools" in task and not isinstance(task["use_tools"], bool):
+            raise ValueError(f"sub-agent call {task_id} use_tools must be a JSON boolean")
         if not str(task.get("instruction") or "").strip():
             raise ValueError(f"sub-agent call {task_id} has no instruction")
         if task.get("apply_to"):

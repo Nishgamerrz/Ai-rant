@@ -316,7 +316,7 @@ def _shared_tool(name: str):
     return lambda call: execute_tool(name, call, WORKSPACE)
 
 
-# The same twenty-five tools are available to the parent and, when requested, to
+# The same shared tools are available to the parent and, when requested, to
 # the Gemini/Groq sub-agent. The model must author a tool call in its response; this
 # map contains executors only and never injects a call on the model's behalf.
 TOOLS = {name: _shared_tool(name) for name in TOOL_NAMES}

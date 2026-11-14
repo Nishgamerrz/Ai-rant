@@ -36,6 +36,26 @@ from gemini_subagent import (  # noqa: E402
 
 WORKFLOW = ROOT / ".github" / "workflows" / "main.yml"
 
+
+def _live_answer_from_console(console: str, task_id: str) -> str:
+    chunks = []
+    for line in strip_ansi(console).splitlines():
+        marker = "[subagent answer chunk] "
+        if marker not in line:
+            continue
+        frame = line.split(marker, 1)[1]
+        task, separator, encoded = frame.partition("·")
+        if not separator or task.strip() != task_id:
+            continue
+        try:
+            chunk = json.loads(encoded.strip())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(chunk, str):
+            chunks.append(chunk)
+    return "".join(chunks)
+
+
 # The suite must not care what the run has already written into dist/: a real
 # 429 in an earlier workflow step leaves dist/gemini_quota_exhausted behind, and
 # every stub-API test here would then short-circuit before reaching its server.
@@ -75,9 +95,10 @@ class RequestTests(unittest.TestCase):
 
     def test_accepts_an_envelope_or_a_bare_list(self):
         envelope = normalize_request({"context": "ctx", "tasks": [
-            {"kind": "answer", "instruction": "Name a teacher"}]})
+            {"kind": "write", "instruction": "Design a house anchor", "use_tools": True}]})
         self.assertEqual(envelope["context"], "ctx")
-        self.assertEqual(envelope["tasks"][0]["kind"], "answer")
+        self.assertEqual(envelope["tasks"][0]["kind"], "write")
+        self.assertIs(envelope["tasks"][0]["use_tools"], True)
 
         bare = normalize_request([{"kind": "verify", "instruction": "Check this"}])
         self.assertEqual(bare["context"], "")
@@ -129,6 +150,33 @@ class RequestTests(unittest.TestCase):
         self.assertIn("After tool results arrive", system_prompt)
         self.assertIn("Task:\nReview this plan", user_prompt)
         self.assertNotIn("AVAILABLE TOOLS", user_prompt)
+
+    def test_measured_mesh_dimensions_are_in_the_next_model_round(self):
+        mesh = {
+            "ok": True,
+            "dimensions_source_units": [12.0, 8.0, 6.0],
+            "units": "source mesh coordinate units; not assumed to be Roblox studs",
+        }
+        first = json.dumps({"status": "Measuring the permitted house mesh.", "answer": "",
+                            "tool_calls": [{"tool": "inspect_mesh_dimensions",
+                                            "arguments": {"path": "house.obj"}}]})
+        final = json.dumps({"answer": "Use a 12 by 8 by 6 source-unit anchor.",
+                            "tool_calls": []})
+        with tempfile.TemporaryDirectory() as tmp:
+            with (patch("gemini_subagent.call_any",
+                        side_effect=[(first, "gemini"), (final, "gemini")]) as provider,
+                  patch("gemini_subagent.execute_tool", return_value=mesh)):
+                result = run_tool_agent(
+                    {"kind": "agent", "instruction": "Measure the house mesh and choose its map size."},
+                    "Use measured bounds to inform placement.", model="gemini-2.5-flash",
+                    api_key="test-key", groq_key="", groq_model_name="",
+                    root=Path(tmp), timeout=2)
+        self.assertEqual(result["text"], "Use a 12 by 8 by 6 source-unit anchor.")
+        self.assertEqual(provider.call_count, 2)
+        next_prompt = provider.call_args_list[1].args[0]
+        self.assertIn("dimensions_source_units", next_prompt)
+        self.assertIn("[12.0, 8.0, 6.0]", next_prompt)
+        self.assertEqual(result["tool_results"][0]["result"], mesh)
 
     def test_agent_json_parser_does_not_fabricate_missing_calls(self):
         parsed = parse_agent_turn('```json\\n{"answer":"ok","tool_calls":[{"tool":"inspect_image","path":"face.jpg"}]}\\n```')
@@ -363,6 +411,43 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(safe_target("dist/narration.txt", root),
                              (root / "dist" / "narration.txt").resolve())
 
+    def test_mesh_dimensions_and_placement_are_preserved_in_safe_tool_activity(self):
+        mesh_result = {
+            "ok": True,
+            "dimensions_source_units": [12.0, 7.5, 8.0],
+            "estimated_dimensions_studs": [24.0, 15.0, 16.0],
+            "bounds": {"min": [-6, 0, -4], "max": [6, 7.5, 4]},
+            "units": "source mesh coordinate units; not assumed to be Roblox studs",
+            "private_reasoning": "this must not appear",
+        }
+        public = gemini_subagent._public_tool_results({"tool_results": [{
+            "tool": "inspect_mesh_dimensions", "round": 1, "result": mesh_result,
+        }]})
+        self.assertEqual(public[0]["result"]["dimensions_source_units"], [12.0, 7.5, 8.0])
+        self.assertEqual(public[0]["result"]["estimated_dimensions_studs"], [24.0, 15.0, 16.0])
+        self.assertNotIn("private_reasoning", public[0]["result"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            reporter = gemini_subagent._TaskProgressReporter(
+                {"id": "mesh-task", "topic": "models", "kind": "write"},
+                activity_path=Path(tmp) / "activity.jsonl", quiet_console=True,
+                bazaar_configured=False)
+            environment = {"AI_COLOR": os.environ.get("AI_COLOR")}
+            os.environ["AI_COLOR"] = "1"
+            self.addCleanup(lambda: os.environ.pop("AI_COLOR", None)
+                            if environment["AI_COLOR"] is None
+                            else os.environ.__setitem__("AI_COLOR", environment["AI_COLOR"]))
+            output = io.StringIO()
+            with patch("gemini_subagent.append_activity"), redirect_stdout(output):
+                reporter.tool_event("complete", {
+                    "tool": "inspect_mesh_dimensions", "arguments": {"path": "house.obj"},
+                    "result": mesh_result,
+                })
+            self.assertIn("dimensions_source_units", output.getvalue())
+            self.assertIn("\x1b[35m", output.getvalue())
+            self.assertNotIn("\x1b[95m", output.getvalue())
+            self.assertNotIn("private reasoning", output.getvalue())
+
 
 class StubApiTests(unittest.TestCase):
     def setUp(self):
@@ -373,6 +458,43 @@ class StubApiTests(unittest.TestCase):
         self.addCleanup(self.server.server_close)
         self.url = f"http://127.0.0.1:{self.server.server_port}/v1beta/models/x:generateContent"
         self.handler = handler
+
+    def test_models_write_task_can_author_tool_access_and_preserve_mesh_measurements(self):
+        mesh = {"ok": True, "dimensions_source_units": [14.0, 8.0, 10.0],
+                "units": "source mesh coordinate units; not assumed to be Roblox studs"}
+        agent_result = {
+            "text": json.dumps({"props": []}), "provider": "gemini",
+            "providers": ["gemini"], "rounds": 2,
+            "tool_calls": [{"tool": "inspect_mesh_dimensions", "arguments": {"path": "house.obj"}}],
+            "tool_results": [{"tool": "inspect_mesh_dimensions", "arguments": {"path": "house.obj"},
+                              "result": mesh, "round": 1}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("gemini_subagent.run_tool_agent", return_value=agent_result) as helper:
+                run = run_tasks({"tasks": [{
+                    "id": "t2", "kind": "write", "topic": "models", "use_tools": True,
+                    "instruction": "Return one measured, room-fitted house anchor as JSON.",
+                }]}, api_key="test-key", model="gemini-2.5-flash", root=Path(tmp),
+                    url=self.url, quiet_console=True)
+        self.assertIs(helper.call_args.args[0]["use_tools"], True)
+        self.assertEqual(run["results"][0]["tool_results"][0]["result"]["dimensions_source_units"],
+                         [14.0, 8.0, 10.0])
+
+    def test_tool_enabled_task_fails_if_helper_never_returns_a_final_answer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("gemini_subagent.run_tool_agent", return_value={
+                "text": "Partial response", "provider": "gemini", "providers": ["gemini"],
+                "rounds": gemini_subagent.MAX_AGENT_TOOL_ROUNDS,
+                "tool_calls": [], "tool_results": [], "round_limit_reached": True,
+            }):
+                result = run_tasks({"tasks": [{
+                    "id": "t2", "kind": "write", "topic": "models", "use_tools": True,
+                    "instruction": "Return complete model anchors as JSON.",
+                }]}, api_key="test-key", model="gemini-2.5-flash", root=Path(tmp),
+                    url=self.url, quiet_console=True)
+        self.assertFalse(result["results"][0]["ok"])
+        self.assertEqual(result["results"][0]["status"], "failed")
+        self.assertIn("round limit", result["results"][0]["error"])
 
     def test_edit_is_applied_and_answer_is_returned(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1207,12 +1329,32 @@ class LiveSubagentConsoleTests(unittest.TestCase):
                     captured.extend(chunk)
                 return needle in captured
 
+            def read_until_complete_answer_frame(timeout: float) -> bool:
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    complete_lines = captured.split(b"\n")[:-1]
+                    if any(b"[subagent answer chunk] live \xc2\xb7" in line
+                           for line in complete_lines):
+                        return True
+                    ready, _, _ = select.select([proc.stdout], [], [],
+                                                max(0.0, deadline - time.monotonic()))
+                    if not ready:
+                        break
+                    chunk = os.read(proc.stdout.fileno(), 4096)
+                    if not chunk:
+                        break
+                    captured.extend(chunk)
+                return False
+
             try:
                 self.assertTrue(read_until(b"[subagent progress] live", 3),
                                 "task-specific safe progress should be flushed immediately")
                 self.assertTrue(first_chunk_sent.wait(3), "the stub should start its SSE response")
                 self.assertTrue(read_until(b"The answer is", 3),
                                 "answer text should arrive before the provider finishes")
+                self.assertTrue(read_until_complete_answer_frame(2),
+                                "a full answer frame must end with a newline before the provider completes, "
+                                "matching the GitHub Actions runner's line-oriented log reader")
                 self.assertIsNone(proc.poll(), "the first answer text must stream while the response is open")
             finally:
                 release.set()
@@ -1226,11 +1368,13 @@ class LiveSubagentConsoleTests(unittest.TestCase):
             console = captured.decode("utf-8", "replace") + stderr.decode("utf-8", "replace")
             plain_console = strip_ansi(console)
             self.assertEqual(proc.returncode, 0, msg=console[-1000:])
-            self.assertIn("The answer is genuinely streaming to the console.", plain_console)
-            self.assertIn("[REDACTED]", plain_console)
+            streamed_answer = _live_answer_from_console(console, "live")
+            self.assertTrue(streamed_answer.startswith(first_answer))
+            self.assertIn("[REDACTED]", streamed_answer)
+            self.assertIn("[subagent answer chunk] live", plain_console)
             self.assertIn("[subagent answer] live", plain_console)
             self.assertIn("Narration story creation complete", plain_console)
-            self.assertIn("\033[35m", console)
+            self.assertIn("\033[95m", console)
             for forbidden in ("private internal thought", "reasoning_content", "choices",
                               "provider_reset", "[ai-log]", "[bazaar", "provider answered",
                               "bazaar-secret-value"):
@@ -1376,7 +1520,7 @@ class LiveSubagentConsoleTests(unittest.TestCase):
             captured.extend(remaining)
             console = captured.decode("utf-8", "replace") + stderr.decode("utf-8", "replace")
             self.assertEqual(proc.returncode, 0, msg=console[-1000:])
-            self.assertIn(corrected, strip_ansi(console))
+            self.assertEqual(_live_answer_from_console(console, "t1").rstrip("\n"), corrected)
             self.assertIn("Narration proofread complete; the corrected text above is the exact narration source passed downstream.",
                           strip_ansi(console))
             self.assertNotIn("proofread-secret-value", console)

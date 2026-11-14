@@ -847,8 +847,9 @@ class ColourTests(unittest.TestCase):
         self.assertNotEqual(ansi("thinking"), ansi("answer"))
         self.assertNotEqual(ansi("answer"), ansi("error"))
         self.assertNotEqual(ansi("success"), ansi("warning"))
+        self.assertNotEqual(ansi("tool"), ansi("subagent"))
         for kind in ("thinking", "answer", "label", "notice", "success",
-                     "warning", "error", "tool", "plan", "thought"):
+                     "warning", "error", "tool", "subagent", "plan", "thought"):
             self.assertTrue(ansi(kind), f"{kind} has no colour")
 
     def test_no_colour_when_switched_off_or_piped(self):
@@ -915,7 +916,8 @@ class ColourTests(unittest.TestCase):
     def test_live_subagent_answer_stream_uses_its_own_colour(self):
         helper = (ROOT / "tools" / "gemini_subagent.py").read_text(encoding="utf-8")
         self.assertIn("from console_style import paint", helper)
-        self.assertIn('sys.stdout.write(paint(text, "tool", stream=sys.stdout))', helper)
+        self.assertIn('print(paint(line, "subagent", stream=sys.stdout), flush=True)', helper)
+        self.assertIn('"tool", stream=sys.stdout), flush=True)', helper)
         self.assertIn("[subagent progress]", helper)
         self.assertIn("[subagent tool]", helper)
         self.assertNotIn('paint(f"{tag} full response for', helper)

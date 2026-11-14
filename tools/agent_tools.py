@@ -12,9 +12,11 @@ import base64
 import io
 import ipaddress
 import json
+import math
 import os
 import shutil
 import socket
+import struct
 import subprocess
 import urllib.error
 import urllib.parse
@@ -27,11 +29,13 @@ MAX_TEXT_BYTES = 24_000
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_IMAGE_EDGE = 1536
 MAX_ZIP_BYTES = 100 * 1024 * 1024
+MAX_MESH_BYTES = 25 * 1024 * 1024
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
-# Twenty-five callable tools, shared by the local agent and the sub-agent.
+# Twenty-nine callable tools, shared by the local agent and the sub-agent.
 TOOL_NAMES = (
-    "search_web", "search_assets", "find_model_reference",
+    "search_web", "search_assets", "find_model_reference", "search_roblox_meshes",
+    "fetch_mesh_reference", "inspect_mesh_dimensions", "plan_mesh_placement",
     "create_file", "read_file", "list_files", "search_files", "edit_file",
     "run_cmd", "fetch_image", "inspect_image", "resize_image", "crop_image",
     "convert_image", "compare_images", "make_contact_sheet", "generate_image",
@@ -47,6 +51,24 @@ AVAILABLE TOOLS (you must write every requested call yourself in a JSON
 - search_assets(query): search for visual/model assets and references; use it for
   props such as a light bulb, bed, lamp, or house. Returns source links, not fake IDs.
 - find_model_reference(name, kind): find Roblox/catalog/model references for a named prop.
+- search_roblox_meshes(query, limit=8): search Roblox's public Creator Store API for Model
+  and MeshPart listings, then fall back to web references if that API is unavailable. It
+  returns actual IDs only when Roblox supplies them; listings are not licensing guarantees.
+- fetch_mesh_reference(url, path): download one direct public HTTPS OBJ/STL/ASCII-PLY/glTF/GLB
+  file into the workspace with SSRF, redirect, file-type and 25 MiB checks. Creator Store
+  listing pages are not mesh files; glTF buffers must be embedded in the file.
+- inspect_mesh_dimensions(path, studs_per_unit=null): measure supported local mesh bounds
+  and report its coordinate-space size; units are not called studs unless you specify the
+  scale. Supports OBJ, STL, ASCII PLY, glTF and GLB accessors with bounds.
+- plan_mesh_placement(name, dimensions, position, room_size, studs_per_unit, model=""):
+  requires an explicit conversion from source units to studs, then returns a grid-aligned,
+  room-fitted map anchor plus its actual fitted dimensions for the plan;
+  optionally choose a supported generated map model such as "house" or "tree".
+  For a measured reference, call search_roblox_meshes, then fetch_mesh_reference,
+  inspect_mesh_dimensions and plan_mesh_placement; use the returned anchor's exact size
+  and position. Search snippets do not establish dimensions or Roblox-stud units. This is
+  a blueprint/reference placement; the short builder renders editable Part/model anchors,
+  not an imported external mesh.
 - create_file(path, content), read_file(path), list_files(path), search_files(query, path).
 - edit_file(path, old_text, new_text): succeeds only when old_text occurs once.
 - run_cmd(cmd): short sandbox command; credentials are stripped from its environment.
@@ -147,6 +169,90 @@ def find_model_reference(name: str, kind: str = "Roblox model", **_: Any) -> dic
     result["kind"] = kind
     result["note"] = "Reference search only: verify licensing and the source before using an asset."
     return result
+
+
+def search_roblox_meshes(query: str, limit: int = 8, **_: Any) -> dict:
+    """Search the official public Creator Store first, then web references."""
+    query = " ".join(str(query or "").split()).strip()[:240]
+    if not query:
+        return {"ok": False, "error": "query is required"}
+    limit = max(1, min(12, int(limit)))
+    results: list[dict] = []
+    seen: set[str] = set()
+    categories = ("Model", "MeshPart")
+    store_errors: list[str] = []
+    store_succeeded = False
+    for category in categories:
+        try:
+            payload = _creator_store_search(query, category)
+            store_succeeded = True
+        except Exception as exc:  # A store outage must not suppress the public web fallback.
+            store_errors.append(f"{category}: {type(exc).__name__}")
+            continue
+        rows = payload.get("creatorStoreAssets") or payload.get("data") or []
+        for entry in rows if isinstance(rows, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            asset = entry.get("asset") if isinstance(entry.get("asset"), dict) else entry
+            asset_id = str(asset.get("id") or asset.get("assetId") or "").strip()
+            if not asset_id.isdigit() or asset_id in seen:
+                continue
+            seen.add(asset_id)
+            creator = entry.get("creator") if isinstance(entry.get("creator"), dict) else {}
+            results.append({
+                "title": str(asset.get("name") or entry.get("name") or "Roblox asset")[:160],
+                "asset_id": asset_id,
+                "asset_type": category,
+                "creator": str(creator.get("name") or creator.get("displayName") or "")[:100],
+                "url": f"https://create.roblox.com/store/asset/{asset_id}",
+                "snippet": str(asset.get("description") or entry.get("description") or "")[:420],
+                "source": "Roblox Creator Store API",
+            })
+            if len(results) >= limit:
+                break
+        if len(results) >= limit:
+            break
+
+    source = "Roblox Creator Store API"
+    if not results:
+        # Public text search is a fallback for documentation and other source
+        # links; its pages are not presented as verified Roblox assets.
+        searches = (
+            f"site:create.roblox.com/store/asset {query} model mesh",
+            f"Roblox Studio Toolbox {query} mesh model",
+            f"Roblox Creator Store {query} 3D model dimensions",
+        )
+        for term in searches:
+            for item in _search(term):
+                url = str(item.get("url") or "").strip()
+                if not url.startswith("https://") or url in seen:
+                    continue
+                seen.add(url)
+                results.append({
+                    "title": str(item.get("title") or "")[:160],
+                    "url": url[:500],
+                    "snippet": str(item.get("snippet") or "")[:420],
+                    "source": "public web reference",
+                })
+                if len(results) >= limit:
+                    break
+            if len(results) >= limit:
+                break
+        source = "public web reference search"
+
+    return {
+        "ok": True,
+        "query": query,
+        "source": source,
+        "creator_store_api_status": "available" if store_succeeded else "unavailable",
+        "creator_store_errors": store_errors[:2],
+        "creator_store_search_url": "https://create.roblox.com/store/asset?" + urllib.parse.urlencode({"query": query}),
+        "results": results,
+        "note": ("Search results are references only. The Creator Store search does not supply "
+                 "verified mesh dimensions or Roblox-stud units, and discovery does not verify "
+                 "permissions or licensing. Download a permitted, supported mesh file and inspect "
+                 "its bounds before planning placement."),
+    }
 
 
 def create_file(root: Path, path: str, content: str = "", **_: Any) -> dict:
@@ -272,7 +378,7 @@ def run_cmd(root: Path, cmd: str, timeout: int = 30, **_: Any) -> dict:
 def _public_https(url: str) -> urllib.parse.SplitResult:
     parsed = urllib.parse.urlsplit(str(url or "").strip())
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-        raise ValueError("only public HTTPS image URLs without embedded credentials are accepted")
+        raise ValueError("only public HTTPS URLs without embedded credentials are accepted")
     if parsed.port not in (None, 443):
         raise ValueError("non-standard HTTPS ports are refused")
     host = parsed.hostname.rstrip(".").lower()
@@ -325,6 +431,413 @@ def _download(url: str, limit: int = MAX_IMAGE_BYTES) -> tuple[bytes, str, str]:
                 raise ValueError(f"URL did not return an image (Content-Type: {content_type or 'unknown'})")
             return data, content_type, current
     raise ValueError("too many redirects while downloading image")
+
+
+def _download_mesh(url: str, limit: int = MAX_MESH_BYTES) -> tuple[bytes, str, str]:
+    """Download one bounded mesh file, revalidating every public HTTPS redirect."""
+    opener = urllib.request.build_opener(_NoRedirect)
+    current = str(url or "").strip()
+    for _ in range(6):
+        _public_https(current)
+        request = urllib.request.Request(current, headers={"User-Agent": "Ai-rant-agent/1.0"})
+        try:
+            response = opener.open(request, timeout=25)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (301, 302, 303, 307, 308):
+                current = urllib.parse.urljoin(current, exc.headers.get("Location") or "")
+                continue
+            raise ValueError(f"mesh download returned HTTP {exc.code}") from exc
+        with response:
+            length = int(response.headers.get("Content-Length") or 0)
+            if length > limit:
+                raise ValueError("mesh exceeds the 25 MiB download limit")
+            data = response.read(limit + 1)
+            if len(data) > limit:
+                raise ValueError("mesh exceeds the 25 MiB download limit")
+            content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].lower()
+            return data, content_type, current
+    raise ValueError("too many redirects while downloading mesh")
+
+
+def _creator_store_search(query: str, category: str) -> dict:
+    """Use Roblox's public Creator Store Toolbox search API without credentials.
+
+    The GET query parameters and creatorStoreAssets response shape follow the
+    official Roblox Creator Hub OpenAPI document:
+    https://github.com/Roblox/creator-docs/blob/main/content/en-us/reference/cloud/toolbox-service/v1.json
+    """
+    url = "https://apis.roblox.com/toolbox-service/v2/assets:search?" + urllib.parse.urlencode({
+        "searchCategoryType": category,
+        "query": query[:240],
+    })
+    opener = urllib.request.build_opener(_NoRedirect)
+    current = url
+    for _ in range(6):
+        _public_https(current)
+        request = urllib.request.Request(current, headers={
+            "Accept": "application/json",
+            "User-Agent": "Ai-rant-agent/1.0",
+        })
+        try:
+            response = opener.open(request, timeout=15)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (301, 302, 303, 307, 308):
+                current = urllib.parse.urljoin(current, exc.headers.get("Location") or "")
+                continue
+            raise ValueError(f"Creator Store search returned HTTP {exc.code}") from exc
+        with response:
+            length = int(response.headers.get("Content-Length") or 0)
+            if length > 2 * 1024 * 1024:
+                raise ValueError("Creator Store search response exceeds the 2 MiB limit")
+            raw = response.read(2 * 1024 * 1024 + 1)
+            if len(raw) > 2 * 1024 * 1024:
+                raise ValueError("Creator Store search response exceeds the 2 MiB limit")
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise ValueError("Creator Store search returned invalid JSON") from exc
+            if not isinstance(payload, dict):
+                raise ValueError("Creator Store search response must be an object")
+            return payload
+    raise ValueError("too many redirects while searching Creator Store")
+
+
+def _mesh_points_from_obj(raw: bytes) -> list[tuple[float, float, float]]:
+    points = []
+    for line in raw.decode("utf-8", "replace").splitlines():
+        parts = line.strip().split()
+        if len(parts) < 4 or parts[0] != "v":
+            continue
+        try:
+            point = tuple(float(value) for value in parts[1:4])
+        except ValueError:
+            continue
+        if all(math.isfinite(value) for value in point):
+            points.append(point)
+            if len(points) >= 1_000_000:
+                break
+    return points
+
+
+def _mesh_points_from_stl(raw: bytes) -> list[tuple[float, float, float]]:
+    if len(raw) >= 84:
+        count = struct.unpack_from("<I", raw, 80)[0]
+        if count and 84 + count * 50 == len(raw):
+            points = []
+            for triangle in range(count):
+                base = 84 + triangle * 50
+                for offset in (12, 24, 36):
+                    point = struct.unpack_from("<3f", raw, base + offset)
+                    if all(math.isfinite(value) for value in point):
+                        points.append(point)
+            return points
+    text = raw.decode("utf-8", "replace")
+    points = []
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 4 or parts[0].lower() != "vertex":
+            continue
+        try:
+            point = tuple(float(value) for value in parts[1:4])
+        except ValueError:
+            continue
+        if all(math.isfinite(value) for value in point):
+            points.append(point)
+            if len(points) >= 1_000_000:
+                break
+    return points
+
+
+def _gltf_document(raw: bytes, suffix: str) -> dict:
+    if suffix == ".gltf":
+        document = json.loads(raw.decode("utf-8", "replace"))
+        if (not isinstance(document, dict)
+                or str((document.get("asset") or {}).get("version") or "") != "2.0"):
+            raise ValueError("glTF must be a version 2.0 JSON object")
+        return document
+    if len(raw) < 20 or raw[:4] != b"glTF":
+        raise ValueError("GLB header is invalid")
+    version, declared_length = struct.unpack_from("<II", raw, 4)
+    if version != 2 or declared_length > len(raw):
+        raise ValueError("only valid glTF 2.0 binary files are supported")
+    cursor = 12
+    while cursor + 8 <= min(declared_length, len(raw)):
+        length, kind = struct.unpack_from("<II", raw, cursor)
+        cursor += 8
+        chunk = raw[cursor:cursor + length]
+        cursor += length
+        if len(chunk) != length:
+            break
+        if kind == 0x4E4F534A:
+            document = json.loads(chunk.rstrip(b"\x00 \t\r\n").decode("utf-8", "replace"))
+            if (isinstance(document, dict)
+                    and str((document.get("asset") or {}).get("version") or "") == "2.0"):
+                return document
+    raise ValueError("GLB file has no valid JSON metadata chunk")
+
+
+def _mesh_bounds_from_gltf(document: dict) -> tuple[list[float], list[float]] | None:
+    accessors = document.get("accessors") or []
+    lows: list[float] = []
+    highs: list[float] = []
+    for mesh in document.get("meshes") or []:
+        for primitive in mesh.get("primitives") or []:
+            attributes = primitive.get("attributes") or {}
+            if "POSITION" not in attributes:
+                continue
+            try:
+                accessor = accessors[int(attributes["POSITION"])]
+                low, high = accessor["min"], accessor["max"]
+                if len(low) < 3 or len(high) < 3:
+                    continue
+                lows.append([float(value) for value in low[:3]])
+                highs.append([float(value) for value in high[:3]])
+            except (IndexError, KeyError, TypeError, ValueError):
+                continue
+    if not lows:
+        return None
+    low = [min(row[axis] for row in lows) for axis in range(3)]
+    high = [max(row[axis] for row in highs) for axis in range(3)]
+    if (not all(math.isfinite(value) for value in [*low, *high])
+            or any(low[axis] > high[axis] for axis in range(3))):
+        return None
+    return low, high
+
+
+def _mesh_points_from_ply(raw: bytes) -> list[tuple[float, float, float]]:
+    header_end = raw.find(b"end_header")
+    if header_end < 0:
+        return []
+    header = raw[:header_end].decode("ascii", "replace").splitlines()
+    if not any(line.strip() == "format ascii 1.0" for line in header):
+        return []
+    vertex_count = 0
+    in_vertices = False
+    names = []
+    for line in header:
+        parts = line.strip().split()
+        if parts[:2] == ["element", "vertex"] and len(parts) == 3:
+            vertex_count = min(1_000_000, int(parts[2]))
+            in_vertices = True
+        elif parts and parts[0] == "element":
+            in_vertices = False
+        elif in_vertices and parts[:1] == ["property"] and len(parts) >= 3:
+            names.append(parts[-1])
+    if vertex_count <= 0:
+        return []
+    try:
+        indices = [names.index(axis) for axis in ("x", "y", "z")]
+    except ValueError:
+        return []
+    body = raw[header_end + len(b"end_header"):].lstrip(b"\r\n")
+    points = []
+    for line in body.decode("ascii", "replace").splitlines()[:vertex_count]:
+        parts = line.split()
+        try:
+            point = tuple(float(parts[index]) for index in indices)
+        except (ValueError, IndexError):
+            continue
+        if all(math.isfinite(value) for value in point):
+            points.append(point)
+    return points
+
+
+def fetch_mesh_reference(root: Path, url: str, path: str = "references/mesh.obj", **_: Any) -> dict:
+    """Save a permitted, bounded public mesh reference for inspection."""
+    target = safe_path(root, path)
+    suffix = target.suffix.lower()
+    if suffix not in {".obj", ".stl", ".ply", ".gltf", ".glb"}:
+        return {"ok": False, "error": "mesh path must end in .obj, .stl, .ply, .gltf, or .glb"}
+    data, content_type, final_url = _download_mesh(url)
+    try:
+        if suffix == ".obj":
+            valid = bool(_mesh_points_from_obj(data))
+        elif suffix == ".stl":
+            valid = bool(_mesh_points_from_stl(data))
+        elif suffix == ".ply":
+            valid = bool(_mesh_points_from_ply(data))
+        else:
+            document = _gltf_document(data, suffix)
+            bounds = _mesh_bounds_from_gltf(document)
+            buffers = document.get("buffers") or []
+            has_external_buffer = (suffix == ".gltf" and any(
+                isinstance(buffer, dict) and buffer.get("uri")
+                and not str(buffer.get("uri")).startswith("data:")
+                for buffer in buffers))
+            valid = bounds is not None and not has_external_buffer
+    except (ValueError, json.JSONDecodeError, struct.error):
+        valid = False
+    if not valid:
+        return {"ok": False, "error": f"downloaded file is not a readable {suffix[1:]} mesh"}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    return {"ok": True, "path": target.relative_to(Path(root).resolve()).as_posix(),
+            "format": suffix[1:], "bytes": len(data), "content_type": content_type,
+            "source": final_url}
+
+
+def inspect_mesh_dimensions(root: Path, path: str,
+                            studs_per_unit: float | None = None, **_: Any) -> dict:
+    """Measure an OBJ/STL/ASCII-PLY/glTF/GLB axis-aligned mesh bounding box."""
+    target = safe_path(root, path)
+    if not target.is_file():
+        return {"ok": False, "error": f"mesh not found: {path}"}
+    if target.stat().st_size > MAX_MESH_BYTES:
+        return {"ok": False, "error": "mesh exceeds the 25 MiB inspection limit"}
+    suffix = target.suffix.lower()
+    raw = target.read_bytes()
+    if suffix == ".obj":
+        points = _mesh_points_from_obj(raw)
+    elif suffix == ".stl":
+        points = _mesh_points_from_stl(raw)
+    elif suffix == ".ply":
+        points = _mesh_points_from_ply(raw)
+    elif suffix in {".gltf", ".glb"}:
+        try:
+            bounds = _mesh_bounds_from_gltf(_gltf_document(raw, suffix))
+        except (ValueError, json.JSONDecodeError, struct.error):
+            bounds = None
+        if bounds is None:
+            return {"ok": False, "error": "glTF has no usable POSITION accessor min/max bounds"}
+        low, high = bounds
+        points = []
+    else:
+        return {"ok": False, "error": "supported mesh formats: OBJ, STL, ASCII PLY, glTF, and GLB"}
+    if suffix not in {".gltf", ".glb"}:
+        if not points:
+            return {"ok": False, "error": f"{suffix[1:].upper()} contains no readable vertices"}
+        low = [min(point[axis] for point in points) for axis in range(3)]
+        high = [max(point[axis] for point in points) for axis in range(3)]
+    dimensions = [round(high[axis] - low[axis], 4) for axis in range(3)]
+    result = {
+        "ok": True,
+        "path": target.relative_to(Path(root).resolve()).as_posix(),
+        "format": suffix[1:],
+        "vertices_measured": len(points) if points else None,
+        "bounds": {"min": [round(value, 4) for value in low],
+                   "max": [round(value, 4) for value in high]},
+        "dimensions_source_units": dimensions,
+        "units": "source mesh coordinate units; not assumed to be Roblox studs",
+        "bounds_frame": ("glTF POSITION accessor coordinates; node transforms are not applied"
+                         if suffix in {".gltf", ".glb"} else "file vertex coordinates"),
+    }
+    if studs_per_unit is not None:
+        if isinstance(studs_per_unit, bool):
+            return {"ok": False, "error": "studs_per_unit must be a number"}
+        try:
+            scale = float(studs_per_unit)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "studs_per_unit must be a number"}
+        if not math.isfinite(scale) or not 0 < scale <= 1000:
+            return {"ok": False, "error": "studs_per_unit must be greater than 0 and at most 1000"}
+        result["studs_per_unit"] = scale
+        result["estimated_dimensions_studs"] = [round(value * scale, 3) for value in dimensions]
+    return result
+
+
+def plan_mesh_placement(name: str, dimensions: list, position: list | None = None,
+                        room_size: list | None = None, studs_per_unit: float | None = None,
+                        margin: float = 1.0, color: list | None = None,
+                        model: str = "", **_: Any) -> dict:
+    """Fit measured mesh bounds into a room and return a normalized map anchor."""
+    def vector(value, field, default):
+        values = default if value is None else value
+        if (not isinstance(values, (list, tuple)) or len(values) != 3
+                or any(isinstance(item, bool) or not isinstance(item, (int, float))
+                       or not math.isfinite(float(item)) for item in values)):
+            raise ValueError(f"{field} must contain three finite numbers")
+        return [float(item) for item in values]
+
+    clean_name = " ".join(str(name or "").split())[:40]
+    if not clean_name:
+        return {"ok": False, "error": "name is required"}
+    if studs_per_unit is None:
+        return {"ok": False, "error": "studs_per_unit is required; mesh coordinate units are not assumed to be Roblox studs"}
+    try:
+        dims = vector(dimensions, "dimensions", [])
+        room = vector(room_size, "room_size", [34, 11, 34])
+        target_position = vector(position, "position", [0, 0, 0])
+        if isinstance(studs_per_unit, bool):
+            raise ValueError("studs_per_unit must be a number")
+        scale_units = float(studs_per_unit)
+        if isinstance(margin, bool):
+            raise ValueError("margin must be a number")
+        margin = float(margin)
+    except (TypeError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+    if any(value <= 0 or value > 1_000_000 for value in dims):
+        return {"ok": False, "error": "dimensions must be positive and at most 1,000,000 source units"}
+    if any(value <= 0 for value in room):
+        return {"ok": False, "error": "room dimensions must be positive"}
+    if room[0] > 500 or room[2] > 500 or room[1] > 250:
+        return {"ok": False, "error": "room dimensions exceed the 500 x 250 x 500 map-planning limits"}
+    if not math.isfinite(scale_units) or not 0 < scale_units <= 1000:
+        return {"ok": False, "error": "studs_per_unit must be greater than 0 and at most 1000"}
+    if not math.isfinite(margin) or margin < 0 or margin >= min(room[0] / 2, room[2] / 2, room[1]):
+        return {"ok": False, "error": "margin must leave usable room on every side"}
+
+    studs = [value * scale_units for value in dims]
+    if any(not math.isfinite(value) or value <= 0 for value in studs):
+        return {"ok": False, "error": "scaled mesh dimensions are outside the supported numeric range"}
+    available = [room[0] - 2 * margin, room[1] - margin, room[2] - 2 * margin]
+    if min(available) < 0.5:
+        return {"ok": False, "error": "room has less than 0.5 studs of usable space after margins"}
+    factor = min(1.0, *(available[index] / studs[index] for index in range(3)),
+                 *(64.0 / value for value in studs))
+    # Round down to the builder's half-stud grid so the fitted dimensions never
+    # grow past either the room clearance or the map builder's 64-stud limit.
+    size = [max(0.5, math.floor(value * factor * 2 + 1e-9) / 2) for value in studs]
+
+    def snap_within(value: float, low: float, high: float) -> float:
+        first = math.ceil(low * 2 - 1e-9) / 2
+        last = math.floor(high * 2 + 1e-9) / 2
+        if first > last:
+            raise ValueError("no half-stud grid position fits the requested room")
+        snapped = round(value * 2) / 2
+        return max(first, min(last, snapped))
+
+    try:
+        center = list(target_position)
+        if position is None:
+            center[1] = size[1] / 2
+        center[0] = snap_within(center[0], -room[0] / 2 + margin + size[0] / 2,
+                                room[0] / 2 - margin - size[0] / 2)
+        center[2] = snap_within(center[2], -room[2] / 2 + margin + size[2] / 2,
+                                room[2] / 2 - margin - size[2] / 2)
+        center[1] = snap_within(center[1], size[1] / 2,
+                                room[1] - margin - size[1] / 2)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    rgb = color if color is not None else [128, 145, 168]
+    if (not isinstance(rgb, (list, tuple)) or len(rgb) != 3
+            or any(isinstance(value, bool) or not isinstance(value, (int, float))
+                   or not math.isfinite(float(value)) for value in rgb)):
+        return {"ok": False, "error": "color must contain three finite RGB values"}
+    rgb = [max(0, min(255, round(float(value)))) for value in rgb]
+    anchor = {"name": clean_name, "shape": "Block", "material": "SmoothPlastic",
+              "position": center, "size": size, "color": rgb, "physics": "static"}
+    clean_model = " ".join(str(model or "").strip().casefold().replace("_", " ").split())
+    supported_models = {"building", "house", "shop", "tower", "school", "cafe", "station",
+                        "temple", "market", "hall", "library", "museum", "bakery",
+                        "restaurant", "clinic", "workshop", "cottage", "castle", "tree",
+                        "plant", "bench", "lamp", "stall", "fence", "rock", "statue", "vehicle"}
+    if clean_model:
+        if clean_model not in supported_models:
+            return {"ok": False, "error": "model must be a supported generated map model such as house, tree, or bench"}
+        anchor["model"] = clean_model
+    return {
+        "ok": True,
+        "anchor": anchor,
+        "source_dimensions": dims,
+        "source_units_per_stud": 1.0 / scale_units,
+        "scale_applied": round(factor, 5),
+        "room_size": room,
+        "note": ("Anchor dimensions are measured, grid-aligned, and fitted with the "
+                 "requested clearance. This is a map-plan reference only: the current "
+                 "short renderer uses editable Part/model anchor geometry and does not "
+                 "import the downloaded mesh into the MP4."),
+    }
 
 
 def _image_bytes(path: Path, *, max_edge: int = MAX_IMAGE_EDGE) -> tuple[bytes, str, tuple[int, int]]:
@@ -691,6 +1204,10 @@ _DISPATCH = {
     "search_web": search_web,
     "search_assets": search_assets,
     "find_model_reference": find_model_reference,
+    "search_roblox_meshes": search_roblox_meshes,
+    "fetch_mesh_reference": fetch_mesh_reference,
+    "inspect_mesh_dimensions": inspect_mesh_dimensions,
+    "plan_mesh_placement": plan_mesh_placement,
     "create_file": create_file,
     "read_file": read_file,
     "list_files": list_files,

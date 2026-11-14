@@ -82,6 +82,8 @@ class OrchestrationSchemaTests(unittest.TestCase):
                          ["write"])
         self.assertEqual(schema["properties"]["subagent_tasks"]["items"]["properties"]["id"]["enum"],
                          ["t1", "t2"])
+        self.assertEqual(schema["properties"]["subagent_tasks"]["items"]["properties"]["use_tools"]["type"],
+                         "boolean")
         self.assertEqual(schema["properties"]["model_anchor_names"]["minItems"], 1)
         self.assertEqual(set(schema["required"]),
                          {"public_rationale", "design_brief", "model_anchor_names",
@@ -124,8 +126,9 @@ class OrchestrationSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "models"):
             map_orchestration._validated_tasks(bad)
 
-    def test_task_instructions_are_forwarded_without_workflow_synthesis(self) -> None:
+    def test_task_instructions_and_tool_permission_are_forwarded_without_synthesis(self) -> None:
         original = orchestration()
+        original["subagent_tasks"][1]["use_tools"] = True
         response = {"message": {"content": json.dumps(original)}}
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -141,6 +144,13 @@ class OrchestrationSchemaTests(unittest.TestCase):
             self.assertIn("public rationale", request["context"])
             self.assertIn("Parcel Lantern", request["context"])
             self.assertIn("Story and interior-room constraints", request["context"])
+            self.assertIs(request["tasks"][1]["use_tools"], True)
+
+    def test_tool_access_must_be_an_ai_authored_json_boolean(self) -> None:
+        bad = orchestration()
+        bad["subagent_tasks"][1]["use_tools"] = "true"
+        with self.assertRaisesRegex(ValueError, "use_tools must be a JSON boolean"):
+            map_orchestration._validated_tasks(bad)
 
 
 class SubagentAssemblyTests(unittest.TestCase):
@@ -362,6 +372,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("Do NOT reveal hidden reasoning or write props, coordinates, camera shots, face beats", prompt)
         self.assertIn("two task calls that you author now", prompt)
         self.assertIn("actual sub-agent calls", prompt)
+        self.assertIn('author "use_tools":true on this models task', prompt)
+        self.assertIn("Creator Store listings do not provide verified dimensions", prompt)
         self.assertNotIn("Design the complete coherent world blueprint", prompt)
 
     def test_scene_mode_is_passed_through_prompt_context_and_final_builder(self) -> None:
