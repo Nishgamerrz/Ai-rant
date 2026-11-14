@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Stream Ollama output, show a colored thinking status and live answer, and save activity.
+"""Stream Ollama thinking and answers in color, and save structured activity.
 
 The workflow used to post a blocking request, so the Actions console sat silent
-for minutes while the model worked. This wrapper streams the response, keeps
-private reasoning text out of the human-facing console, shows the answer live,
-and writes the aggregated response plus structured activity artifacts.
+for minutes while the model worked. This wrapper streams the model's thinking
+in a framed pane and its answer in a separate color, then writes the aggregated
+response plus structured activity artifacts.
 """
 from __future__ import annotations
 
@@ -42,8 +42,7 @@ def looks_stuck(text: str) -> bool:
 
 CONSOLE_LOCK = threading.Lock()
 
-# A short, framed thinking-status note distinguishes private reasoning from the
-# answer without exposing internal reasoning text in the Actions console.
+# A framed thinking pane keeps streamed reasoning visually separate from the answer.
 BOX_WIDTH = 66
 BOX_LEFT = "\u2502 "
 BOX_TOP = "\u250c\u2500 "
@@ -64,9 +63,8 @@ class TypedConsole:
     character by character, each flush acting as a single write, makes the log
     build up letter by letter exactly as the model produces it.
 
-    The thinking status and answer use different colours (grey vs bright cyan)
-    so it is visible at a glance which channel is active without printing private
-    reasoning text.
+    The thinking pane and answer use different colours (grey vs bright cyan),
+    so both channels are visible at a glance without mixing them together.
 
     Pacing is bounded by a per-call budget: after that many seconds the remaining
     characters are written at full speed, so watching the AI type can never delay
@@ -508,9 +506,8 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                             beat.touch()
                         console.use("thinking")
                         console.open_box(f"[{label}] thinking")
-                        console.note("Reasoning is in progress; private text is hidden.",
-                                     kind="thinking")
                         thinking_open = True
+                    console.write(piece_thinking)
             if piece_content:
                 content.append(piece_content)
                 emit_activity_progress("answer")
@@ -645,14 +642,13 @@ def main() -> None:
     thinking_on = bool(request.get("think"))
     print(paint(f"[{args.label}] sending {model} request "
                 f"(temperature {request.get('options', {}).get('temperature', 'default')}, "
-                f"thinking {'on' if thinking_on else 'off'}); private reasoning is not printed.",
+                f"thinking {'on' if thinking_on else 'off'}); live thinking and answer are color-coded.",
                 "label"), flush=True)
     quiet_note = ("" if args.heartbeat_seconds <= 0 else
                   f" If it goes quiet you get at most {HEARTBEAT_NOTES} short notes, "
                   f"{int(args.heartbeat_seconds)}s apart; no repeated chatter.")
-    print(paint(f"[{args.label}] \u25b8 streaming live: a brief colored thinking status and the "
-                f"answer appear here letter by letter as it arrives; private reasoning stays "
-                f"out of the console.{quiet_note}", "notice"), flush=True)
+    print(paint(f"[{args.label}] \u25b8 streaming live: thinking appears in the framed gray pane; "
+                f"the answer appears in cyan as it arrives.{quiet_note}", "notice"), flush=True)
 
     deadline = time.monotonic() + args.max_seconds if args.max_seconds > 0 else None
     limits = {"stall_seconds": args.stall_seconds,

@@ -186,17 +186,17 @@ class LiveStreamingTests(unittest.TestCase):
             stderr = result.stderr
             activity = [json.loads(line) for line in activity_path.read_text(encoding="utf-8").splitlines()]
 
-        # The console shows a colored thinking status, never private reasoning
-        # text, then streams the answer verbatim as it arrives.
+        # The console streams the model's thinking in its framed color, then
+        # streams the answer verbatim in a separate color as it arrives.
         self.assertIn("\u250c\u2500 [world plan] thinking", stdout)
-        self.assertIn("Reasoning is in progress; private text is hidden.", stdout)
-        self.assertNotIn("Thinking about the beats.", stdout)
+        self.assertIn("Thinking about the beats.", stdout)
+        self.assertNotIn("private text is hidden.", stdout)
         self.assertIn("\u2514", stdout)
         self.assertIn('[world plan] answer \u25b8 {"narration":"Maya found it."}', stdout)
         self.assertIn("[world plan] \u2713 done", stdout)
         self.assertNotIn("reasoning chars", stdout)
-        # The actual Actions non-TTY path gets basic ANSI colors, while private
-        # reasoning and structured telemetry stay out of human-readable output.
+        # The actual Actions non-TTY path gets basic ANSI colors for both live
+        # thinking and answer text; structured telemetry stays in the JSONL artifact.
         self.assertIn("\u001b[37m", stdout)
         self.assertIn("\u001b[36m", stdout)
         self.assertNotIn("[ai-log]", stdout + stderr)
@@ -579,11 +579,11 @@ class ThinkingBoxTests(unittest.TestCase):
         console.write("a" * 200)
         self.assertEqual("".join(recorder.writes).count("\n"), 0)
 
-    def test_the_stream_shows_a_thinking_status_but_withholds_reasoning_text(self):
+    def test_the_stream_displays_thinking_in_its_frame(self):
         helper = (ROOT / "tools" / "ollama_stream.py").read_text(encoding="utf-8")
         self.assertIn('console.open_box(f"[{label}] thinking")', helper)
-        self.assertIn('console.note("Reasoning is in progress; private text is hidden."', helper)
-        self.assertNotIn("console.write(piece_thinking)", helper)
+        self.assertIn("console.write(piece_thinking)", helper)
+        self.assertNotIn("private text is hidden", helper)
         self.assertIn('console.use("answer")', helper)
         # Leaving the thinking frame must close it before the answer starts.
         self.assertIn('if self._box and kind != "thinking":', helper)
