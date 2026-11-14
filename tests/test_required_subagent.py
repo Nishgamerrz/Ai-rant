@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
@@ -288,6 +290,15 @@ class WorkflowTests(unittest.TestCase):
         prompt_start = self.step.index("cat > map_prompt.txt <<PROMPT")
         prompt_end = self.step.index("\n          PROMPT", prompt_start)
         return self.step[prompt_start:prompt_end]
+
+    def test_story_workflow_step_has_valid_bash_syntax(self) -> None:
+        workflow = yaml.safe_load(self.text)
+        steps = workflow["jobs"]["generate_roblox_short"]["steps"]
+        step = next(item for item in steps
+                    if item.get("name") == "Write a believable real-life story")
+        parsed = subprocess.run(["bash", "-n"], input=step["run"], text=True,
+                                capture_output=True, check=False)
+        self.assertEqual(parsed.returncode, 0, msg=parsed.stderr)
 
     def test_unquoted_map_heredoc_expands_story_and_scene_context(self) -> None:
         heredoc = self.map_prompt()

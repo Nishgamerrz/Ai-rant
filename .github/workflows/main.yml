@@ -859,8 +859,8 @@ jobs:
             python tools/ollama_stream.py --request narration_repair_request.json \
               --output narration_response.json --label "narration repair ${attempt}" \
               --timeout "${AI_TIMEOUT:-900}" \
-              --stall-seconds "${AI_STALL:-900}" \
-            done
+              --stall-seconds "${AI_STALL:-900}"
+          done
           test -s dist/narration.txt
 
       - name: Orchestrate and review the delegated map, camera, and model plan
