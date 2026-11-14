@@ -165,11 +165,12 @@ class NarrationSubAgentRequirementTests(unittest.TestCase):
 
 
 class DefaultTopicTests(unittest.TestCase):
-    def test_the_default_topic_is_not_the_gravity_one(self):
+    def test_the_default_topic_is_the_shared_bedroom_premise(self):
         start = WORKFLOW.index("      story_topic:")
         block = WORKFLOW[start:WORKFLOW.index("      character_usernames:", start)]
         self.assertNotIn("gravity", block)
-        self.assertIn("In a world where", block)
+        self.assertIn("default: 'In this world, the last person to fall asleep each night gets one wish, ", block)
+        self.assertIn("their shared bedroom.", block)
 
     def test_it_is_one_of_the_listed_ideas(self):
         topics = (ROOT / "STORY_TOPICS.md").read_text(encoding="utf-8")

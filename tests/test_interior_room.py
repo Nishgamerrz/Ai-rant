@@ -34,9 +34,9 @@ import build_story_map as build  # noqa: E402
 import realign_story_map as realign  # noqa: E402
 import scene_mode  # noqa: E402
 
-BEDROOM_TOPIC = ("In a world where the last person to fall asleep each night gets "
-                 "one wish, two brothers keep each other awake on purpose in a "
-                 "cramped bedroom")
+BEDROOM_TOPIC = ("In this world, the last person to fall asleep each night gets "
+                 "one wish, so two brothers keep each other awake on purpose in "
+                 "their cramped shared bedroom.")
 
 CAST = ["normal", "noob"]
 

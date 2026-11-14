@@ -21,7 +21,7 @@ export function NewChatModal({ open, onClose, onStart }: { open: boolean; onClos
   const [model, setModel] = useState<ModelId>("hard");
   const [prompt, setPrompt] = useState("");
   const [referenceImage, setReferenceImage] = useState<File | null>(null);
-  const [storyTopic, setStoryTopic] = useState("In a world where the last person to fall asleep each night gets one wish, two brothers keep each other awake on purpose");
+  const [storyTopic, setStoryTopic] = useState("In this world, the last person to fall asleep each night gets one wish, so two brothers keep each other awake on purpose in their shared bedroom.");
   const [usernames, setUsernames] = useState("normal,noob");
   const [duration, setDuration] = useState("120");
   const [mapDetail, setMapDetail] = useState("dense");

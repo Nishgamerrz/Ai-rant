@@ -16,7 +16,7 @@ Rules of thumb:
 1. In a world where gravity switches off for exactly ten minutes every morning, everyone plans their day around it except one boy who oversleeps.
 2. In a world where no one can lie after sunset, a boy has to tell his best friend the truth before the sun goes down.
 3. In a world where every promise turns into a small physical weight, one girl carries a promise she made years ago.
-4. In a world where the last person to fall asleep each night gets one wish, two brothers keep each other awake on purpose.
+4. In this world, the last person to fall asleep each night gets one wish, so two brothers keep each other awake on purpose in their shared bedroom.
 5. In a world where everyone hears the same song at 7 a.m., one boy is the only one who hears nothing.
 6. In a world where forgotten things reappear in a lost-and-found hall, a girl goes looking for a toy she threw away.
 7. In a world where your shadow acts out what you really want, a shy boy's shadow starts waving at the girl he likes.
