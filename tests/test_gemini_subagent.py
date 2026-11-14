@@ -897,6 +897,8 @@ class NarrationSubAgentRequiredTests(unittest.TestCase):
         self.assertIn("In your first response, author exactly two distinct tasks", self.workflow)
         self.assertIn('kind "write", topic "narration"', self.workflow)
         self.assertIn('kind "edit" and topic "narration"', self.workflow)
+        self.assertIn('set input exactly to "USE_FIRST_DRAFT"', self.workflow)
+        self.assertIn("replaces only that explicit marker with your complete first draft verbatim", self.workflow)
         self.assertIn("return the complete corrected narration only", self.workflow)
         self.assertIn("the proofread helper's corrected result is the exact narration source", self.workflow)
 
@@ -906,6 +908,7 @@ class NarrationSubAgentRequiredTests(unittest.TestCase):
         self.assertIn('id:{type:"string",enum:["t1","t2"]}', self.workflow)
         self.assertIn('kind:{type:"string",enum:["write","edit"]}', self.workflow)
         self.assertIn('topic:{type:"string",enum:["narration"]}', self.workflow)
+        self.assertIn("USE_FIRST_DRAFT", self.workflow)
         self.assertIn("_validate_public_rationale", self.delegation)
 
     def test_creation_result_is_chained_verbatim_into_the_ai_authored_proofread(self):
