@@ -48,6 +48,7 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import math
 import os
 import re
 import sys
@@ -67,7 +68,7 @@ from ai_activity import (SecretStreamRedactor, append_activity, redact_secrets,
 
 from gemini_workspace import guide as file_guide  # noqa: E402
 from gemini_workspace import topics_for  # noqa: E402
-from agent_tools import TOOL_GUIDE, execute_tool, safe_path  # noqa: E402
+from agent_tools import TOOL_GUIDE, TOOL_NAMES, execute_tool, safe_path  # noqa: E402
 
 BAZAAR_LINK_ENDPOINT = "https://bazaarlink.ai/api/v1/chat/completions"
 BAZAAR_LINK_KEY_ENV = "BAZAAR_LINK_API"
@@ -458,21 +459,47 @@ def _clean_task(task, index: int) -> dict | None:
 
 
 def normalize_request(raw) -> dict:
-    """Accept a request dict, a bare list of tasks, or an envelope with 'tasks'."""
+    """Accept a task list/envelope and preserve bounded runner-side tool policy."""
     if isinstance(raw, list):
-        tasks, context = raw, ""
+        tasks, context, raw_requirements = raw, "", {}
     elif isinstance(raw, dict):
         tasks = raw.get("tasks")
         if tasks is None:
             tasks = raw.get("subagent_tasks")
         context = str(raw.get("context") or "")
+        raw_requirements = raw.get("tool_requirements") or {}
     else:
         raise ValueError("sub-agent request must be an object or a list of tasks")
     if not isinstance(tasks, list):
         raise ValueError("sub-agent request needs a 'tasks' array")
     cleaned = [task for task in (_clean_task(item, index)
                                  for index, item in enumerate(tasks[:MAX_TASKS])) if task]
-    return {"context": context[:MAX_INPUT_CHARS], "tasks": cleaned}
+    requirements = {}
+    if isinstance(raw_requirements, dict):
+        allowed_tools = set(TOOL_NAMES)
+        for task_id, raw_policy in raw_requirements.items():
+            if not isinstance(raw_policy, dict):
+                continue
+            policy = {}
+            names = raw_policy.get("asset_search_names")
+            if isinstance(names, list):
+                clean_names = [" ".join(str(name).split())[:48] for name in names
+                               if isinstance(name, str) and str(name).strip()]
+                if clean_names:
+                    policy["asset_search_names"] = clean_names[:2]
+            tools = raw_policy.get("required_tools")
+            if isinstance(tools, list):
+                clean_tools = [str(tool).strip() for tool in tools
+                               if str(tool).strip() in allowed_tools]
+                if clean_tools:
+                    policy["required_tools"] = list(dict.fromkeys(clean_tools))[:6]
+            for key in ("inspect_fetched_meshes", "place_measured_meshes"):
+                if raw_policy.get(key) is True:
+                    policy[key] = True
+            if policy:
+                requirements[str(task_id)[:40]] = policy
+    return {"context": context[:MAX_INPUT_CHARS], "tasks": cleaned,
+            "tool_requirements": requirements}
 
 
 def build_prompt(task: dict, context: str = "", *, include_system_rules: bool = True,
@@ -800,17 +827,123 @@ def _required_image_paths(task: dict, root: Path) -> list[str]:
     return paths[:4]
 
 
+def _asset_query_matches(name: str, query: str) -> bool:
+    stop_words = {"a", "an", "the", "of", "for", "and", "to"}
+    tokens = [token for token in re.findall(r"[a-z0-9]+", str(name).casefold())
+              if token not in stop_words]
+    query_tokens = set(re.findall(r"[a-z0-9]+", str(query).casefold()))
+    return bool(tokens) and all(token in query_tokens for token in tokens)
+
+
+def _valid_mesh_dimensions(value) -> list[float] | None:
+    if (not isinstance(value, list) or len(value) != 3
+            or any(isinstance(number, bool) or not isinstance(number, (int, float))
+                   or not math.isfinite(float(number)) or float(number) <= 0
+                   for number in value)):
+        return None
+    return [float(number) for number in value]
+
+
+def _dimensions_match(left, right) -> bool:
+    first, second = _valid_mesh_dimensions(left), _valid_mesh_dimensions(right)
+    return bool(first and second and all(abs(a - b) <= 0.0001 for a, b in zip(first, second)))
+
+
+def _tool_requirements_missing(tool_calls: list[dict], tool_results: list[dict], *,
+                               asset_names: list[str] = (), required_tools: list[str] = (),
+                               inspect_fetched_meshes: bool = False,
+                               place_measured_meshes: bool = False) -> list[str]:
+    """Describe missing model-authored evidence calls/results; never synthesize them."""
+    missing = []
+    for name in asset_names:
+        completed = any(
+            row.get("tool") == "search_roblox_meshes"
+            and _asset_query_matches(name, (row.get("arguments") or {}).get("query", ""))
+            and isinstance(row.get("result"), dict) and row["result"].get("ok") is True
+            for row in tool_results
+        )
+        if not completed:
+            missing.append(f"search_roblox_meshes for {name}")
+    for required in required_tools:
+        completed = any(
+            row.get("tool") == required and isinstance(row.get("result"), dict)
+            and row["result"].get("ok") is True for row in tool_results)
+        if not completed:
+            missing.append(f"successful {required} call")
+    if inspect_fetched_meshes:
+        for fetch_index, row in enumerate(tool_results):
+            result = row.get("result") or {}
+            path = str(result.get("path") or "")
+            if row.get("tool") != "fetch_mesh_reference" or result.get("ok") is not True or not path:
+                continue
+            inspected_after = any(
+                later.get("tool") == "inspect_mesh_dimensions"
+                and str((later.get("arguments") or {}).get("path") or "") == path
+                for later in tool_results[fetch_index + 1:]
+            )
+            if not inspected_after:
+                missing.append(f"inspect_mesh_dimensions for downloaded mesh {path}")
+    if place_measured_meshes:
+        asset_names_normalized = {str(name).casefold() for name in asset_names}
+        for row in tool_results:
+            result = row.get("result") or {}
+            dimensions = _valid_mesh_dimensions(result.get("dimensions_source_units"))
+            if row.get("tool") != "inspect_mesh_dimensions" or result.get("ok") is not True or not dimensions:
+                continue
+            placed = False
+            for candidate in tool_results:
+                args = candidate.get("arguments") or {}
+                outcome = candidate.get("result") or {}
+                scale = args.get("studs_per_unit")
+                if (candidate.get("tool") == "plan_mesh_placement"
+                        and str(args.get("name") or "").casefold() in asset_names_normalized
+                        and _dimensions_match(args.get("dimensions"), dimensions)
+                        and isinstance(scale, (int, float)) and not isinstance(scale, bool)
+                        and math.isfinite(float(scale)) and float(scale) > 0
+                        and outcome.get("ok") is True
+                        and _dimensions_match(outcome.get("source_dimensions"), dimensions)):
+                    placed = True
+                    break
+            if not placed:
+                label = str(result.get("path") or "measured mesh")
+                missing.append(f"explicitly scaled plan_mesh_placement for {label}")
+    return list(dict.fromkeys(missing))
+
+
 def run_tool_agent(task: dict, context: str, *, model: str, api_key: str,
                    groq_key: str, groq_model_name: str, root: Path,
                    bazaar_key: str = "", bazaar_url: str | None = None,
                    url: str | None = None, groq_url: str | None = None,
                    timeout: float = 120.0,
+                   required_asset_names: list[str] | None = None,
+                   required_tools: list[str] | None = None,
+                   inspect_fetched_meshes: bool = False,
+                   place_measured_meshes: bool = False,
                    on_attempt: Callable[[dict], None] | None = None,
                    on_text_chunk: Callable[[str, str], None] | None = None,
                    on_tool_event: Callable[[str, dict], None] | None = None) -> dict:
     """Run a bounded tool loop, executing only calls the model authored."""
     required_images = _required_image_paths(task, root)
+    asset_names = [" ".join(str(name).split())[:48] for name in (required_asset_names or [])
+                   if isinstance(name, str) and str(name).strip()][:2]
+    required_tool_names = [str(name).strip() for name in (required_tools or [])
+                           if str(name).strip() in TOOL_NAMES][:6]
     agent_system_prompt = "\n\n".join((SYSTEM_RULES, TOOL_GUIDE, AGENT_TOOL_USAGE_GUIDANCE))
+    if asset_names:
+        agent_system_prompt += (
+            "\n\nMANDATORY MODEL-ASSET RESEARCH: author one search_roblox_meshes call "
+            "for each assigned exact anchor name: " + ", ".join(asset_names) + ". "
+            "Preserve only real IDs and URLs returned by the tool. If a supported mesh download "
+            "succeeds, author inspect_mesh_dimensions for its exact path. If dimensions are "
+            "measured, author plan_mesh_placement with those exact source dimensions and an "
+            "explicit studs_per_unit conversion, then use its returned position and size. "
+            "If no file/dimensions are available, state that rather than inventing them."
+        )
+    if required_tool_names:
+        agent_system_prompt += (
+            "\n\nMANDATORY REVIEW TOOLS: you must author and successfully execute these exact tools: "
+            + ", ".join(required_tool_names) + ". Do not claim a tool ran unless the tool result is in the history."
+        )
     base_prompt = build_prompt(task, context, include_system_rules=False,
                                include_tool_guidance=False)
     if required_images:
@@ -830,7 +963,9 @@ def run_tool_agent(task: dict, context: str, *, model: str, api_key: str,
     image_calls_ready = not bool(required_images)
     for round_index in range(1, MAX_AGENT_TOOL_ROUNDS + 1):
         if retry_instruction:
-            prompt = base_prompt + "\n\nRequired-image inspection retry: " + retry_instruction
+            prior = ("\n\nPrior model-authored calls and tool results:\n"
+                     + json.dumps(history, ensure_ascii=False)[:20000]) if history else ""
+            prompt = base_prompt + prior + "\n\nRequired tool-use retry: " + retry_instruction
         elif history:
             prompt = (base_prompt + "\n\nPrior model-authored calls and tool results:\n"
                       + json.dumps(history, ensure_ascii=False)[:20000]
@@ -897,6 +1032,19 @@ def run_tool_agent(task: dict, context: str, *, model: str, api_key: str,
         if not calls:
             if required_images and not image_calls_ready:
                 continue
+            missing_tools = _tool_requirements_missing(
+                authored_calls, tool_results, asset_names=asset_names,
+                required_tools=required_tool_names,
+                inspect_fetched_meshes=inspect_fetched_meshes,
+                place_measured_meshes=place_measured_meshes)
+            if missing_tools:
+                retry_instruction = (
+                    "The final answer was rejected because these required model-authored tool "
+                    "calls/results are still missing: " + "; ".join(missing_tools) + ". "
+                    "Write the missing calls yourself as JSON tool_calls, wait for their results, "
+                    "and then return the exact requested final answer. The runner will not invent calls."
+                )
+                continue
             return {"text": final_answer, "provider": provider,
                     "providers": providers, "rounds": round_index,
                     "tool_calls": authored_calls, "tool_results": tool_results}
@@ -928,6 +1076,19 @@ def run_tool_agent(task: dict, context: str, *, model: str, api_key: str,
                 except Exception:
                     pass
         history.append({"model_response": text[:10000], "tool_results": round_results})
+        missing_tools = _tool_requirements_missing(
+            authored_calls, tool_results, asset_names=asset_names,
+            required_tools=required_tool_names,
+            inspect_fetched_meshes=inspect_fetched_meshes,
+            place_measured_meshes=place_measured_meshes)
+        if missing_tools:
+            retry_instruction = (
+                "Required authored tool evidence is still incomplete: " + "; ".join(missing_tools)
+                + ". Use the tool results above, author the missing calls yourself, and do not "
+                "return a final answer until they succeed. Never substitute guessed IDs or dimensions."
+            )
+        else:
+            retry_instruction = ""
     if required_images and not image_calls_ready:
         missing = [path for path in required_images if path not in staged_image_calls]
         return {"text": "I could not complete the required model-authored image inspection call(s) for "
@@ -935,6 +1096,17 @@ def run_tool_agent(task: dict, context: str, *, model: str, api_key: str,
                 "provider": providers[-1] if providers else "", "providers": providers,
                 "rounds": MAX_AGENT_TOOL_ROUNDS, "tool_calls": authored_calls,
                 "tool_results": tool_results, "required_image_inspection_missing": missing}
+    missing_tools = _tool_requirements_missing(
+        authored_calls, tool_results, asset_names=asset_names,
+        required_tools=required_tool_names,
+        inspect_fetched_meshes=inspect_fetched_meshes,
+        place_measured_meshes=place_measured_meshes)
+    if missing_tools:
+        return {"text": final_answer or "The required tool-enabled task did not finish.",
+                "provider": providers[-1] if providers else "", "providers": providers,
+                "rounds": MAX_AGENT_TOOL_ROUNDS, "tool_calls": authored_calls,
+                "tool_results": tool_results,
+                "required_tool_requirements_missing": missing_tools}
     return {"text": final_answer or "Tool-agent round limit reached before a final response.",
             "provider": providers[-1] if providers else "", "providers": providers,
             "rounds": MAX_AGENT_TOOL_ROUNDS, "tool_calls": authored_calls,
@@ -1594,13 +1766,15 @@ def _public_tool_calls(agent_run: dict) -> list[dict]:
 
 def _public_tool_results(agent_run: dict) -> list[dict]:
     public = []
-    allowed = ("ok", "path", "bytes", "error", "analysis", "text", "summary", "note",
+    allowed = ("ok", "path", "bytes", "error", "analysis", "text", "summary", "note", "query",
                "dimensions", "dimensions_source_units", "estimated_dimensions_studs", "bounds",
                "bounds_frame", "units", "studs_per_unit", "vertices_measured", "source_dimensions",
                "source_units_per_stud", "scale_applied", "room_size", "anchor", "asset_id",
                "asset_type", "creator", "source", "creator_store_api_status", "creator_store_errors",
                "creator_store_search_url", "format", "duration_seconds", "valid", "warnings", "files",
-               "matches", "results", "similarity_percent", "changed_pixel_fraction")
+               "matches", "results", "world_name", "world_parts", "distinct_shapes", "camera_shots",
+               "longest_camera_gap_seconds", "snap_cuts", "face_closeups", "global_hour",
+               "scene_hour_overrides", "similarity_percent", "changed_pixel_fraction")
     for call in agent_run.get("tool_results", []):
         tool = str(call.get("tool") or "")
         result = call.get("result") or {}
@@ -1640,7 +1814,10 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
 
     started_all = time.monotonic()
     providers: list[str] = []
+    requirements_by_task = request.get("tool_requirements", {})
     for task in request.get("tasks", []):
+        tool_requirements = (requirements_by_task.get(str(task.get("id") or ""), {})
+                             if isinstance(requirements_by_task, dict) else {})
         activity_id = uuid.uuid4().hex
         stream_redactor = SecretStreamRedactor() if on_text_chunk else None
         stream_state = {"emitted": False, "answer_header": False}
@@ -1713,6 +1890,8 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
             "apply_to": task.get("apply_to", ""),
             "context": request.get("context", ""),
         }
+        if tool_requirements:
+            fields["tool_requirements"] = tool_requirements
         if task["instruction"] != original_instruction:
             fields["original_instruction"] = original_instruction
         if task.get("input", "") != original_input:
@@ -1769,6 +1948,10 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
                     groq_model_name=groq_model_name, root=root,
                     bazaar_key=bazaar_key, bazaar_url=bazaar_url,
                     url=url, groq_url=groq_url, timeout=timeout,
+                    required_asset_names=tool_requirements.get("asset_search_names", []),
+                    required_tools=tool_requirements.get("required_tools", []),
+                    inspect_fetched_meshes=tool_requirements.get("inspect_fetched_meshes") is True,
+                    place_measured_meshes=tool_requirements.get("place_measured_meshes") is True,
                     on_attempt=on_attempt,
                     on_text_chunk=relay_safe_answer if on_text_chunk else None,
                     on_tool_event=progress.tool_event)
@@ -1827,6 +2010,12 @@ def run_tasks(request: dict, *, api_key: str, model: str, root: Path | None = No
                 missing = agent_run["required_image_inspection_missing"]
                 entry["required_image_inspection_missing"] = missing
                 entry["error"] = "The sub-agent did not author required image inspection calls for: " + ", ".join(missing)
+            if agent_run.get("required_tool_requirements_missing"):
+                entry["ok"] = False
+                missing = agent_run["required_tool_requirements_missing"]
+                entry["required_tool_requirements_missing"] = missing
+                entry["error"] = ("The tool-enabled sub-agent did not complete required "
+                                   "asset/review evidence: " + "; ".join(map(str, missing)))
 
         if task["kind"] == "edit" and task.get("apply_to"):
             target = safe_target(task["apply_to"], root)
