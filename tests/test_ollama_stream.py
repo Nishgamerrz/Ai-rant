@@ -22,8 +22,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from ollama_stream import (MAX_PREDICT_CEILING, next_token_budget,
-                           public_output_parts)  # noqa: E402
+from ollama_stream import (MAX_PREDICT_CEILING, completed_public_fields,
+                           next_token_budget, public_output_parts)  # noqa: E402
 
 
 class PublicOutputTests(unittest.TestCase):
@@ -55,6 +55,22 @@ class PublicOutputTests(unittest.TestCase):
         self.assertIn("checking the story hook", parts[0][2])
         self.assertNotIn("private chain-of-thought", json.dumps(parts))
 
+    def test_public_rationale_streams_only_after_its_json_string_is_complete(self):
+        emitted = set()
+        self.assertEqual(completed_public_fields('{"public_rationale":"A thoughtful', emitted), [])
+        partial = '{"public_rationale":"A thoughtful hook leads to a clear choice.", "narration":'
+        fields = completed_public_fields(partial, emitted)
+        self.assertEqual(fields, [("public_rationale", "public rationale", "plan",
+                                   "A thoughtful hook leads to a clear choice.")])
+        emitted.add(fields[0][0])
+        self.assertEqual(completed_public_fields(partial + '"later"', emitted), [])
+
+    def test_private_reasoning_fields_are_never_extracted_as_live_public_text(self):
+        partial = ('{"thinking":"private text", "chain_of_thought":"secret",'
+                   '"public_status":"Checking the camera plan."}')
+        fields = completed_public_fields(partial)
+        self.assertEqual(fields, [("public_status", "public status", "plan",
+                                   "Checking the camera plan.")])
     def test_unparsed_structured_output_is_not_downgraded_to_public_prose(self):
         malformed = '{"public_rationale":"safe", "narration":"Maya returned it"'
         self.assertEqual(public_output_parts(malformed), [])
