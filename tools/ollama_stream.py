@@ -268,6 +268,15 @@ class TypedConsole:
         with CONSOLE_LOCK:
             self._close_box_locked()
 
+    def boxed(self, title: str, text: str, kind: str = "plan") -> None:
+        """Render a complete public model explanation in a coloured framed panel."""
+        if not text:
+            return
+        self.use(kind)
+        self.open_box(title)
+        self.write(text)
+        self.close_box()
+
     def note(self, text: str, kind: str = "thought") -> None:
         """One-off note that stays inside the frame instead of breaking it."""
         with CONSOLE_LOCK:
@@ -619,7 +628,13 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                 if not quiet:
                     for key, title, colour, public_text in completed_public_fields(
                             "".join(content), streamed_public_fields):
-                        console.line(f"[{label}] {title} ▸ {public_text}", kind=colour)
+                        if key == "public_rationale":
+                            console.boxed(
+                                f"[{label}] MODEL REASONING — PUBLIC SUMMARY",
+                                public_text, kind=colour,
+                            )
+                        else:
+                            console.line(f"[{label}] {title} ▸ {public_text}", kind=colour)
                         streamed_public_fields.add(key)
                 emit_activity_progress("answer")
                 emit_safe_progress("answer")
