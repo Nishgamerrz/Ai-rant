@@ -666,6 +666,30 @@ def build_subagent_request(response_path: Path, context_path: Path, output_path:
     return request
 
 
+def _anchor_name_key(value: Any) -> str:
+    """Compare model-anchor labels while ignoring harmless spaces and separators."""
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").casefold()).strip("_")
+
+
+def _match_model_anchor_names(model_props: list[dict], expected_names: list[str]) -> None:
+    """Require the assigned names, accepting only case/spacing/separator variants.
+
+    Helpers commonly render snake_case search names as human-readable labels
+    (for example, "bunk_bed" as "Bunk Bed"). Preserve the director's canonical
+    names in the assembled plan after proving that every label maps one-to-one.
+    """
+    expected_by_key = {_anchor_name_key(name): name for name in expected_names}
+    if len(expected_by_key) != len(expected_names):
+        raise ValueError("the director assigned model-anchor names that are not unique")
+    actual_keys = [_anchor_name_key(prop.get("name")) for prop in model_props]
+    if any(not key for key in actual_keys) or len(set(actual_keys)) != len(actual_keys):
+        raise ValueError("every models-task prop needs a unique, non-empty name")
+    if set(actual_keys) != set(expected_by_key):
+        raise ValueError("the models sub-agent did not return the assigned anchor names (even after normalizing spaces and separators)")
+    for prop, key in zip(model_props, actual_keys):
+        prop["name"] = expected_by_key[key]
+
+
 def assemble_plan(orchestration_path: Path, results_path: Path, output_path: Path) -> dict:
     """Combine the helper-authored map/camera JSON and model-authored prop anchors."""
     orchestration_response = _read_json(orchestration_path)
@@ -704,11 +728,8 @@ def assemble_plan(orchestration_path: Path, results_path: Path, output_path: Pat
         raise ValueError("map and model props must be JSON objects")
 
     map_names = {str(prop.get("name") or "").strip().casefold() for prop in map_props}
+    _match_model_anchor_names(model_props, expected_names)
     model_names = [str(prop.get("name") or "").strip() for prop in model_props]
-    if any(not name for name in model_names):
-        raise ValueError("every models-task prop needs a name")
-    if {name.casefold() for name in model_names} != {name.casefold() for name in expected_names}:
-        raise ValueError("the models sub-agent did not return the exact anchor names assigned by the local director")
     if any(name.casefold() in map_names for name in model_names):
         raise ValueError("a models-task anchor duplicates a map/camera-task prop name")
     combined_names = [*map_names, *(name.casefold() for name in model_names)]
