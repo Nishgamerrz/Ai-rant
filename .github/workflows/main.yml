@@ -838,7 +838,7 @@ jobs:
           python tools/say.py plan "The selected local model is coordinating the map and model-design helper calls."
           if ! python tools/ollama_stream.py --request map_orchestration_request.json \
               --output map_orchestration_response.json --label "map orchestration" \
-              --timeout 600 --stall-seconds 180 --max-seconds 600; then
+              --timeout 600 --stall-seconds 600 --max-seconds 1200; then
             python tools/say.py error "Selected model ${AI_MODEL} could not complete map orchestration; see the Ollama error above. No other local model was tried."
             exit 1
           fi
