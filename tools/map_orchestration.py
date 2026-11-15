@@ -47,7 +47,7 @@ def orchestration_schema() -> dict:
             "instruction": {"type": "string", "minLength": 20, "maxLength": 1200},
             "input": {"type": "string", "maxLength": 3000},
             "use_tools": {"type": "boolean",
-                           "description": "Optional; true gives the helper access to model-authored shared tools."},
+                           "description": "For topic models this is enforced true by the runner when omitted; explicit false is rejected. Enables Roblox asset search and mesh inspection."},
         },
         "required": ["id", "kind", "topic", "instruction"],
         "additionalProperties": False,
@@ -149,8 +149,14 @@ def _validated_tasks(plan: dict) -> list[dict]:
         if "use_tools" in task and not isinstance(task["use_tools"], bool):
             raise ValueError(f"sub-agent call {task_id} use_tools must be a JSON boolean")
         topic = str(task.get("topic") or "").strip().lower()
+        # Tool access is an invariant of the models task, not a creative choice.
+        # Some structured-output models omit optional booleans despite the prompt;
+        # enforce the safe required value here so a long orchestration call is not
+        # discarded for a missing flag. An explicit false remains a hard error.
+        if topic == "models" and "use_tools" not in task:
+            task["use_tools"] = True
         if topic == "models" and task.get("use_tools") is not True:
-            raise ValueError("the AI-authored models task must set use_tools:true for Roblox asset search and mesh inspection")
+            raise ValueError("the models task must enable use_tools for Roblox asset search and mesh inspection")
         if not str(task.get("instruction") or "").strip():
             raise ValueError(f"sub-agent call {task_id} has no instruction")
         if task.get("apply_to"):
