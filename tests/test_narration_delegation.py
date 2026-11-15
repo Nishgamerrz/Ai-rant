@@ -77,6 +77,16 @@ class NarrationDelegationTests(unittest.TestCase):
         self.assertEqual(result["creation_task"], creation["tasks"][0])
         self.assertEqual(result["proofread_task"], template["tasks"][0])
 
+    def test_t1_input_is_normalized_to_the_exact_first_draft_if_marker_is_malformed(self):
+        reply = {**self.reply, "subagent_tasks": [
+            {**self.reply["subagent_tasks"][0], "input": "the model misstated its marker"},
+            self.reply["subagent_tasks"][1],
+        ]}
+        result = self.extract(reply)
+        creation = json.loads(self.creation_request_path.read_text(encoding="utf-8"))
+        self.assertEqual(creation["tasks"][0]["input"], self.narration)
+        self.assertEqual(result["creation_task"]["input"], self.narration)
+
     def test_legacy_verbatim_creation_input_remains_supported(self):
         reply = {**self.reply, "subagent_tasks": [
             {**self.reply["subagent_tasks"][0], "input": self.narration},
@@ -106,8 +116,6 @@ class NarrationDelegationTests(unittest.TestCase):
             {**self.reply["subagent_tasks"][0], "kind": "edit"}, self.reply["subagent_tasks"][1]]})
         invalid_replies.append({**self.reply, "subagent_tasks": [
             self.reply["subagent_tasks"][0], {**self.reply["subagent_tasks"][1], "topic": "map"}]})
-        invalid_replies.append({**self.reply, "subagent_tasks": [
-            {**self.reply["subagent_tasks"][0], "input": "short note only"}, self.reply["subagent_tasks"][1]]})
         invalid_replies.append({**self.reply, "subagent_tasks": [
             {**self.reply["subagent_tasks"][0], "input": 123}, self.reply["subagent_tasks"][1]]})
         invalid_replies.append({**self.reply, "subagent_tasks": [
