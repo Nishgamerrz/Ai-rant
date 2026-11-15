@@ -87,15 +87,16 @@ def _validated_task(candidate, *, task_id: str, kind: str, topic: str,
     task_input = candidate["input"].strip()
     expected_input = "USE_FIRST_DRAFT" if kind == "write" else "USE_T1_CREATION_RESULT"
     if kind == "write":
-        # The local model already returns the complete narration in its top-level
-        # field. Asking it to duplicate a long story byte-for-byte inside t1.input
-        # made valid drafts fail when the structured output shortened or altered
-        # that copy. The model-authored marker keeps the call explicit; after
-        # validation, replace only that marker with the exact top-level draft.
-        input_is_valid = task_input == expected_input or narration in task_input
-        if task_input == expected_input:
-            task_input = narration
+        # The model's top-level narration is already the authoritative first
+        # draft. Treat t1.input as transport metadata, not a second creative
+        # decision: always pass the exact first draft to the helper. This avoids
+        # discarding a complete story because a small local model misspelled or
+        # paraphrased the marker in its structured task.
+        input_is_valid = True
+        task_input = narration
     else:
+        # The proofreading task must explicitly reference the creation result;
+        # its input is replaced with that exact result after t1 completes.
         input_is_valid = task_input == expected_input
     if (actual_id != task_id or actual_kind != kind or actual_topic != topic
             or not instruction or len(instruction) > MAX_TASK_INSTRUCTION_CHARS
