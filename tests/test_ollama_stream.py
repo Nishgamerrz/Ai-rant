@@ -22,8 +22,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from ollama_stream import (MAX_PREDICT_CEILING, next_token_budget,
-                           public_output_parts)  # noqa: E402
+from ollama_stream import (MAX_PREDICT_CEILING, completed_public_fields,
+                           next_token_budget, public_output_parts)  # noqa: E402
 
 
 class PublicOutputTests(unittest.TestCase):
@@ -55,6 +55,22 @@ class PublicOutputTests(unittest.TestCase):
         self.assertIn("checking the story hook", parts[0][2])
         self.assertNotIn("private chain-of-thought", json.dumps(parts))
 
+    def test_public_rationale_streams_only_after_its_json_string_is_complete(self):
+        emitted = set()
+        self.assertEqual(completed_public_fields('{"public_rationale":"A thoughtful', emitted), [])
+        partial = '{"public_rationale":"A thoughtful hook leads to a clear choice.", "narration":'
+        fields = completed_public_fields(partial, emitted)
+        self.assertEqual(fields, [("public_rationale", "public rationale", "plan",
+                                   "A thoughtful hook leads to a clear choice.")])
+        emitted.add(fields[0][0])
+        self.assertEqual(completed_public_fields(partial + '"later"', emitted), [])
+
+    def test_private_reasoning_fields_are_never_extracted_as_live_public_text(self):
+        partial = ('{"thinking":"private text", "chain_of_thought":"secret",'
+                   '"public_status":"Checking the camera plan."}')
+        fields = completed_public_fields(partial)
+        self.assertEqual(fields, [("public_status", "public status", "plan",
+                                   "Checking the camera plan.")])
     def test_unparsed_structured_output_is_not_downgraded_to_public_prose(self):
         malformed = '{"public_rationale":"safe", "narration":"Maya returned it"'
         self.assertEqual(public_output_parts(malformed), [])
@@ -225,21 +241,39 @@ class LiveStreamingTests(unittest.TestCase):
             stderr = result.stderr
             activity = [json.loads(line) for line in activity_path.read_text(encoding="utf-8").splitlines()]
 
-        # Internal reasoning and provider JSON are withheld. Safe progress and
-        # validated public fields from the selected Ollama model share one frame.
+        # Internal reasoning and provider JSON are withheld. Safe progress from
+        # Ollama stays in its activity frame; the validated public rationale uses
+        # its own frame, and the validated narration returns to the activity frame.
         import re
 
         plain_stdout = re.sub(r"\x1b\[[0-9;]*m", "", stdout)
-        box_start = plain_stdout.index("\u250c\u2500 Ollama activity · world plan")
-        box_end = plain_stdout.index("\u2514", box_start)
-        boxed_lines = plain_stdout[box_start:box_end].splitlines()
-        box_body = " ".join(line.split("\u2502 ", 1)[1]
-                             for line in boxed_lines if "\u2502 " in line)
-        self.assertIn("Selected local model: qwen3:8b", box_body)
-        self.assertIn("[world plan] reasoning is active; private model thoughts are hidden.", box_body)
-        self.assertIn("[world plan] preparing the structured result; raw JSON is hidden.", box_body)
-        self.assertIn("[world plan] public rationale \u25b8 A small choice turns the hook into a hopeful ending.", box_body)
-        self.assertIn("[world plan] narration \u25b8 Maya found it.", box_body)
+        boxes = []
+        cursor = 0
+        while True:
+            box_start = plain_stdout.find("\u250c\u2500 ", cursor)
+            if box_start < 0:
+                break
+            body_start = plain_stdout.find("\n", box_start) + 1
+            box_end = plain_stdout.find("\u2514", body_start)
+            if box_end < 0:
+                break
+            header = plain_stdout[box_start:body_start]
+            lines = plain_stdout[body_start:box_end].splitlines()
+            body = " ".join(line.split("\u2502 ", 1)[1]
+                             for line in lines if "\u2502 " in line)
+            boxes.append((header, body))
+            cursor = box_end + 1
+        activity_boxes = [body for header, body in boxes if "Ollama activity" in header]
+        rationale_boxes = [body for header, body in boxes if "MODEL REASONING — PUBLIC SUMMARY" in header]
+        self.assertGreaterEqual(len(activity_boxes), 2)
+        self.assertEqual(len(rationale_boxes), 1)
+        self.assertIn("Selected local model: qwen3:8b", activity_boxes[0])
+        self.assertIn("[world plan] reasoning is active; private model thoughts are hidden.",
+                      " ".join(activity_boxes))
+        self.assertIn("[world plan] preparing the structured result; raw JSON is hidden.",
+                      " ".join(activity_boxes))
+        self.assertIn("A small choice turns the hook into a hopeful ending.", rationale_boxes[0])
+        self.assertIn("[world plan] narration ▸ Maya found it.", " ".join(activity_boxes))
         self.assertNotIn("Thinking about the beats.", plain_stdout)
         self.assertNotIn('{"public_rationale"', plain_stdout)
         self.assertIn("[world plan] \u2713 done", plain_stdout)

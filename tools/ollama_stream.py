@@ -66,6 +66,34 @@ def _public_text(value, limit: int) -> str:
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
 
+def completed_public_fields(buffer: str, emitted: set[str] | None = None) -> list[tuple[str, str, str, str]]:
+    """Extract complete, explicitly public string fields from a partial JSON stream.
+
+    This exposes only fields the prompt deliberately marks as audience-facing
+    (status/rationale/design notes). It never reads Ollama private thinking channel
+    and never prints unfinished JSON fragments.
+    """
+    raw = str(buffer or "")
+    already = emitted or set()
+    decoder = json.JSONDecoder()
+    public_keys = {"public_status", "public_rationale", "design_brief", "note"}
+    found: list[tuple[str, str, str, str]] = []
+    for key, label, colour, limit in _PUBLIC_FIELDS:
+        if key not in public_keys or key in already:
+            continue
+        match = re.search(r'"' + re.escape(key) + r'"\s*:\s*', raw)
+        if not match:
+            continue
+        try:
+            value, _ = decoder.raw_decode(raw[match.end():])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, str):
+            safe = _public_text(value, limit)
+            if safe:
+                found.append((key, label, colour, safe))
+    return found
+
 def public_output_parts(response: str) -> list[tuple[str, str, str]]:
     """Extract only allowlisted user-facing fields; never display a JSON wrapper."""
     raw = str(response or "").strip()
@@ -245,6 +273,15 @@ class TypedConsole:
         with CONSOLE_LOCK:
             self._close_box_locked()
 
+    def boxed(self, title: str, text: str, kind: str = "plan") -> None:
+        """Render a complete public model explanation in a coloured framed panel."""
+        if not text:
+            return
+        self.use(kind)
+        self.open_box(title)
+        self.write(text)
+        self.close_box()
+
     def note(self, text: str, kind: str = "thought") -> None:
         """One-off note that stays inside the frame instead of breaking it."""
         with CONSOLE_LOCK:
@@ -382,8 +419,9 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
     thinking: list[str] = []
     console = TypedConsole(type_delay, type_budget)
     model_name = str(request.get("model") or "")
+    activity_box_title = f"Ollama activity · {label}"[:BOX_WIDTH - len(BOX_TOP) - 1]
     if not quiet:
-        console.open_box(f"Ollama activity · {label}"[:BOX_WIDTH - len(BOX_TOP) - 1])
+        console.open_box(activity_box_title)
         selected_model = model_name or "unspecified"
         console.note(
             f"Selected local model: {selected_model}; private reasoning and raw JSON stay hidden.",
@@ -414,6 +452,7 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
     # validated public fields after the complete response has been parsed.
     thinking_open = False
     answer_open = False
+    streamed_public_fields: set[str] = set()
     repeated = False
     seen = 0
     last_progress = started_at
@@ -599,6 +638,22 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                     thinking_open = True
             if piece_content:
                 content.append(piece_content)
+                # Public rationale/status is authored as a separate, audience-facing
+                # JSON field. Show it as soon as its complete JSON string arrives,
+                # rather than making the user wait for the full narration/plan.
+                if not quiet:
+                    for key, title, colour, public_text in completed_public_fields(
+                            "".join(content), streamed_public_fields):
+                        if key == "public_rationale":
+                            console.boxed(
+                                f"[{label}] MODEL REASONING — PUBLIC SUMMARY",
+                                public_text, kind=colour,
+                            )
+                            console.open_box(activity_box_title)
+                        else:
+                            console.use(colour, close_box=False)
+                            console.write(f"[{label}] {title} ▸ {public_text}\n", pace=False)
+                        streamed_public_fields.add(key)
                 emit_activity_progress("answer")
                 emit_safe_progress("answer")
                 if not quiet and not answer_open:
@@ -653,9 +708,17 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
     first_char_seconds = round((first_output - started_at), 1) if first_output else None
     if not quiet:
         if public_parts:
+            label_to_key = {
+                "public status": "public_status",
+                "public rationale": "public_rationale",
+                "design brief": "design_brief",
+                "review note": "note",
+            }
             for title, color, text in public_parts:
+                if label_to_key.get(title) in streamed_public_fields:
+                    continue
                 console.use(color, close_box=False)
-                console.write(f"[{label}] {title} \u25b8 {text}\n", pace=False)
+                console.write(f"[{label}] {title} ▸ {text}\n", pace=False)
         else:
             console.use("notice", close_box=False)
             console.write(

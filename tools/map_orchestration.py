@@ -47,7 +47,7 @@ def orchestration_schema() -> dict:
             "instruction": {"type": "string", "minLength": 20, "maxLength": 1200},
             "input": {"type": "string", "maxLength": 3000},
             "use_tools": {"type": "boolean",
-                           "description": "Optional; true gives the helper access to model-authored shared tools."},
+                           "description": "For topic models this is enforced true by the runner when omitted; explicit false is rejected. Enables Roblox asset search and mesh inspection."},
         },
         "required": ["id", "kind", "topic", "instruction"],
         "additionalProperties": False,
@@ -149,8 +149,14 @@ def _validated_tasks(plan: dict) -> list[dict]:
         if "use_tools" in task and not isinstance(task["use_tools"], bool):
             raise ValueError(f"sub-agent call {task_id} use_tools must be a JSON boolean")
         topic = str(task.get("topic") or "").strip().lower()
+        # Tool access is an invariant of the models task, not a creative choice.
+        # Some structured-output models omit optional booleans despite the prompt;
+        # enforce the safe required value here so a long orchestration call is not
+        # discarded for a missing flag. An explicit false remains a hard error.
+        if topic == "models" and "use_tools" not in task:
+            task["use_tools"] = True
         if topic == "models" and task.get("use_tools") is not True:
-            raise ValueError("the AI-authored models task must set use_tools:true for Roblox asset search and mesh inspection")
+            raise ValueError("the models task must enable use_tools for Roblox asset search and mesh inspection")
         if not str(task.get("instruction") or "").strip():
             raise ValueError(f"sub-agent call {task_id} has no instruction")
         if task.get("apply_to"):
@@ -660,6 +666,30 @@ def build_subagent_request(response_path: Path, context_path: Path, output_path:
     return request
 
 
+def _anchor_name_key(value: Any) -> str:
+    """Compare model-anchor labels while ignoring harmless spaces and separators."""
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").casefold()).strip("_")
+
+
+def _match_model_anchor_names(model_props: list[dict], expected_names: list[str]) -> None:
+    """Require the assigned names, accepting only case/spacing/separator variants.
+
+    Helpers commonly render snake_case search names as human-readable labels
+    (for example, "bunk_bed" as "Bunk Bed"). Preserve the director's canonical
+    names in the assembled plan after proving that every label maps one-to-one.
+    """
+    expected_by_key = {_anchor_name_key(name): name for name in expected_names}
+    if len(expected_by_key) != len(expected_names):
+        raise ValueError("the director assigned model-anchor names that are not unique")
+    actual_keys = [_anchor_name_key(prop.get("name")) for prop in model_props]
+    if any(not key for key in actual_keys) or len(set(actual_keys)) != len(actual_keys):
+        raise ValueError("every models-task prop needs a unique, non-empty name")
+    if set(actual_keys) != set(expected_by_key):
+        raise ValueError("the models sub-agent did not return the assigned anchor names (exact anchor names are required even after normalizing spaces and separators)")
+    for prop, key in zip(model_props, actual_keys):
+        prop["name"] = expected_by_key[key]
+
+
 def assemble_plan(orchestration_path: Path, results_path: Path, output_path: Path) -> dict:
     """Combine the helper-authored map/camera JSON and model-authored prop anchors."""
     orchestration_response = _read_json(orchestration_path)
@@ -698,11 +728,8 @@ def assemble_plan(orchestration_path: Path, results_path: Path, output_path: Pat
         raise ValueError("map and model props must be JSON objects")
 
     map_names = {str(prop.get("name") or "").strip().casefold() for prop in map_props}
+    _match_model_anchor_names(model_props, expected_names)
     model_names = [str(prop.get("name") or "").strip() for prop in model_props]
-    if any(not name for name in model_names):
-        raise ValueError("every models-task prop needs a name")
-    if {name.casefold() for name in model_names} != {name.casefold() for name in expected_names}:
-        raise ValueError("the models sub-agent did not return the exact anchor names assigned by the local director")
     if any(name.casefold() in map_names for name in model_names):
         raise ValueError("a models-task anchor duplicates a map/camera-task prop name")
     combined_names = [*map_names, *(name.casefold() for name in model_names)]
