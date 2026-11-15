@@ -165,12 +165,17 @@ class TypedConsole:
     def pacing(self) -> bool:
         return self.delay > 0 and self.spent < self.budget
 
-    def use(self, kind: str) -> None:
-        """Switch the colour for everything written next (thinking vs answer)."""
-        if self._box and kind != "thinking":
-            with CONSOLE_LOCK:
+    def use(self, kind: str, *, close_box: bool = True) -> None:
+        """Switch the colour for subsequent output.
+
+        By default, changing away from the legacy thinking colour closes its
+        frame. Validated public output can opt to stay in the Ollama activity
+        frame while using its normal answer colour.
+        """
+        with CONSOLE_LOCK:
+            if self._box and kind != "thinking" and close_box:
                 self._close_box_locked()
-        self.colour = kind
+            self.colour = kind
 
     def _switch(self, kind: str | None = None) -> None:
         wanted = ansi(kind or self.colour, stream=self.out)
@@ -182,7 +187,7 @@ class TypedConsole:
             self.out.write(wanted)
         self._open = wanted
 
-    def write(self, text: str) -> None:
+    def write(self, text: str, *, pace: bool = True) -> None:
         if not text:
             return
         with CONSOLE_LOCK:
@@ -212,7 +217,7 @@ class TypedConsole:
                     self.out.write(character)
                     self._line_start = character == "\n"
                 self.out.flush()
-                if self.pacing:
+                if pace and self.pacing:
                     time.sleep(self.delay)
                     self.spent += self.delay
 
@@ -413,17 +418,25 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
     content: list[str] = []
     thinking: list[str] = []
     console = TypedConsole(type_delay, type_budget)
+    model_name = str(request.get("model") or "")
+    activity_box_title = f"Ollama activity · {label}"[:BOX_WIDTH - len(BOX_TOP) - 1]
+    if not quiet:
+        console.open_box(activity_box_title)
+        selected_model = model_name or "unspecified"
+        console.note(
+            f"Selected local model: {selected_model}; private reasoning and raw JSON stay hidden.",
+            kind="notice")
     # Ask Ollama whether these weights are already in RAM, so a long wait is
     # described correctly: a real load, or prompt prefill on a resident model.
-    model_name = str(request.get("model") or "")
     resident = is_resident(model_name, url) if model_name else None
     prompt_chars = sum(len(str(message.get("content") or ""))
                        for message in (request.get("messages") or []))
     if not quiet and model_name:
         if resident:
-            print(paint(f"[{label}] {model_name} in memory — reading {prompt_chars:,}-char prompt", "notice"), flush=True)
+            console.note(f"{model_name} is in memory; reading a {prompt_chars:,}-character prompt.",
+                         kind="notice")
         elif resident is False:
-            print(paint(f"[{label}] {model_name} loading (first load)", "warning"), flush=True)
+            console.note(f"{model_name} is loading into memory for this call.", kind="warning")
     beat = None if quiet or heartbeat_seconds <= 0 else Heartbeat(
         label, heartbeat_seconds, console, resident=resident, prompt_chars=prompt_chars)
     if beat:
@@ -495,7 +508,7 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
             status = ("Structured result is still being prepared; raw JSON stays hidden "
                       f"until validation (safe update {safe_progress_updates}).")
             colour = "notice"
-        console.line(f"[{label}] {status}", kind=colour)
+        console.note(f"[{label}] {status}", kind=colour)
 
     def check_silent_timeout(exc: BaseException) -> None:
         """Turn a true no-content timeout into a bounded failure for this model."""
@@ -544,10 +557,11 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                         f"exceeded its {deadline - started_at:.0f}s wall-clock budget")
                 yield raw
         except CallDeadlineExceeded:
+            console.close_box()
             raise
         except (TimeoutError, urllib.error.URLError, OSError) as exc:
+            console.close_box()
             if deadline is not None and time.monotonic() >= deadline:
-                console.close_box()
                 raise CallDeadlineExceeded(
                     f"exceeded its {deadline - started_at:.0f}s wall-clock budget") from exc
             check_silent_timeout(exc)
@@ -570,6 +584,7 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
         detail = exc.read().decode("utf-8", "replace")
         if beat:
             beat.stop()
+        console.close_box()
         if exc.code == 400 and "think" in detail.lower():
             raise ThinkingUnsupported("selected model does not support the requested thinking mode") from exc
         if exc.code == 404:
@@ -590,6 +605,7 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
         finally:
             if beat:
                 beat.stop()
+            console.close_box()
         raise
     with handle as response:
         for raw in response_lines(response):
@@ -617,7 +633,7 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                 emit_activity_progress("thinking")
                 emit_safe_progress("thinking")
                 if not quiet and not thinking_open:
-                    console.line(f"[{label}] reasoning is active; private model thoughts are hidden.",
+                    console.note(f"[{label}] reasoning is active; private model thoughts are hidden.",
                                  kind="thinking")
                     thinking_open = True
             if piece_content:
@@ -633,13 +649,15 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                                 f"[{label}] MODEL REASONING — PUBLIC SUMMARY",
                                 public_text, kind=colour,
                             )
+                            console.open_box(activity_box_title)
                         else:
-                            console.line(f"[{label}] {title} ▸ {public_text}", kind=colour)
+                            console.use(colour, close_box=False)
+                            console.write(f"[{label}] {title} ▸ {public_text}\n", pace=False)
                         streamed_public_fields.add(key)
                 emit_activity_progress("answer")
                 emit_safe_progress("answer")
                 if not quiet and not answer_open:
-                    console.line(f"[{label}] preparing the structured result; raw JSON is hidden.",
+                    console.note(f"[{label}] preparing the structured result; raw JSON is hidden.",
                                  kind="notice")
                     answer_open = True
             # Watch the reasoning channel while it streams: that is where a local
@@ -651,8 +669,7 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                 if seen > 1200 and looks_stuck("".join(thinking)):
                     repeated = True
                     if not quiet:
-                        console.close_box()
-                        console.line(
+                        console.note(
                             f"[{label}] the model is looping on the same words instead of "
                             f"finishing; telling it to stop repeating and write the answer once.",
                             kind="warning")
@@ -690,7 +707,6 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
     # speed depends on.
     first_char_seconds = round((first_output - started_at), 1) if first_output else None
     if not quiet:
-        console.close_box()
         if public_parts:
             label_to_key = {
                 "public status": "public_status",
@@ -701,10 +717,14 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
             for title, color, text in public_parts:
                 if label_to_key.get(title) in streamed_public_fields:
                     continue
-                console.line(f"[{label}] {title} ▸ {text}", kind=color)
+                console.use(color, close_box=False)
+                console.write(f"[{label}] {title} ▸ {text}\n", pace=False)
         else:
-            console.line(f"[{label}] response received; structured fields used by the workflow are hidden.",
-                         kind="notice")
+            console.use("notice", close_box=False)
+            console.write(
+                f"[{label}] response received; structured fields used by the workflow are hidden.\n",
+                pace=False)
+        console.close_box()
         rate = f", {tokens / elapsed:.1f} tok/s" if elapsed >= 1 and tokens else ""
         prefill = (f", it read {prompt_tokens:,} prompt tokens in "
                    f"{prompt_ns / 1e9:.0f}s first" if prompt_tokens and prompt_ns else "")

@@ -23,9 +23,12 @@ class LiveSubagentUiTests(unittest.TestCase):
         self.assertIn("export function mergeLiveTools", source)
         self.assertIn("const displayTools = mergeLiveTools(tools, liveTools)", source)
         self.assertIn("safePublicStatus(publicStatus)", source)
-        self.assertIn("reasoning is active; private model thoughts are hidden", source)
+        self.assertIn("safeOllamaProgressStatus(plain)", source)
         self.assertIn("quietModelProgress", source)
-        self.assertIn("Selected model is processing the plan; private reasoning is hidden.", source)
+        model_progress = (ROOT / "web" / "lib" / "liveOllamaProgress.mjs").read_text(encoding="utf-8")
+        self.assertIn("reasoning is active; private model thoughts are hidden", model_progress)
+        self.assertIn("Local Ollama is processing the plan; only safe progress is shown.", model_progress)
+        self.assertIn("Local Ollama is preparing its structured plan; raw JSON stays hidden until validation.", model_progress)
         self.assertIn("public_status:", source)
         self.assertNotIn("liveLog.slice(", source, "raw workflow logs must never render in chat")
         self.assertIn("Subagent-authored tool calls", (ROOT / "web" / "components" / "AiActivityTimeline.tsx").read_text(encoding="utf-8"))
@@ -37,7 +40,9 @@ class LiveSubagentUiTests(unittest.TestCase):
         self.assertIn("liveSubagentActivityEvents", activity_timeline)
         self.assertIn("[subagent answer chunk]", (ROOT / "web" / "lib" / "liveSubagentLog.mjs").read_text(encoding="utf-8"))
         result = subprocess.run(
-            ["node", "--test", str(ROOT / "web" / "tests" / "liveSubagentLog.test.cjs")],
+            ["node", "--test",
+             str(ROOT / "web" / "tests" / "liveSubagentLog.test.cjs"),
+             str(ROOT / "web" / "tests" / "liveOllamaProgress.test.cjs")],
             cwd=ROOT / "web", capture_output=True, text=True, check=False,
         )
         self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)

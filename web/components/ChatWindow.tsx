@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { SubagentTimeline } from "./SubagentTimeline";
 import { encodeFaceReference } from "@/lib/faceReference";
+import { safeOllamaProgressStatus } from "@/lib/liveOllamaProgress.mjs";
 
 type Msg = { role: string; content: string; public_status?: string; tool_calls?: any[]; time?: string; tool?: string; output?: any; id?: string; queue_id?: string; delivery?: string };
 
@@ -74,7 +75,7 @@ export function parseLiveLogTail(tail: string): { msgs: Msg[]; tools: any[] } {
     const agentProgressIndex = plain.indexOf("[agent progress]");
     const publicStatusIndex = plain.indexOf("public status ▸");
     const publicRationaleIndex = plain.indexOf("public rationale ▸");
-    const safeModelProgress = plain.match(/\[[^\]]+\]\s+(reasoning is active; private model thoughts are hidden\.|preparing the structured result; raw JSON is hidden\.)/i);
+    const safeModelProgress = safeOllamaProgressStatus(plain);
     const quietModelProgress = plain.match(/\[([^\]]+)\]\s+((?:already in memory, no reload|still loading the model into memory|no first token yet|still working)[^\n]*?)(?:\s+\(quiet note (\d+\/\d+)\))?\s*$/i);
     if (subagentProgressIndex >= 0) {
       const separator = plain.indexOf("·", subagentProgressIndex);
@@ -86,9 +87,7 @@ export function parseLiveLogTail(tail: string): { msgs: Msg[]; tools: any[] } {
       const separator = plain.indexOf("▸", markerIndex);
       if (separator >= 0) publicStatus = plain.slice(separator + 1).trim();
     } else if (safeModelProgress) {
-      publicStatus = safeModelProgress[1].startsWith("reasoning is active")
-        ? "Selected model is processing the plan; private reasoning is hidden."
-        : "Selected model is preparing its structured plan; raw JSON stays hidden until validation.";
+      publicStatus = safeModelProgress;
     } else if (quietModelProgress) {
       const label = safeActivityText(quietModelProgress[1]);
       const detail = safeActivityText(quietModelProgress[2]);

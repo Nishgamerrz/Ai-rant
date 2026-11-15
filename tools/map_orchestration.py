@@ -685,7 +685,7 @@ def _match_model_anchor_names(model_props: list[dict], expected_names: list[str]
     if any(not key for key in actual_keys) or len(set(actual_keys)) != len(actual_keys):
         raise ValueError("every models-task prop needs a unique, non-empty name")
     if set(actual_keys) != set(expected_by_key):
-        raise ValueError("the models sub-agent did not return the assigned anchor names (even after normalizing spaces and separators)")
+        raise ValueError("the models sub-agent did not return the assigned anchor names (exact anchor names are required even after normalizing spaces and separators)")
     for prop, key in zip(model_props, actual_keys):
         prop["name"] = expected_by_key[key]
 
