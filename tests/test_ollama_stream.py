@@ -245,7 +245,9 @@ class LiveStreamingTests(unittest.TestCase):
         # the validated narration field are still presented with distinct colors.
         self.assertIn("[world plan] reasoning is active; private model thoughts are hidden.", stdout)
         self.assertIn("[world plan] preparing the structured result; raw JSON is hidden.", stdout)
-        self.assertIn("[world plan] public rationale \u25b8 A small choice turns the hook into a hopeful ending.", stdout)
+        self.assertIn("\u250c\u2500 [world plan] MODEL REASONING — PUBLIC SUMMARY", stdout)
+        self.assertIn("\u2502 A small choice turns the hook into a hopeful ending.", stdout)
+        self.assertIn("\u2514", stdout)
         self.assertIn("[world plan] narration \u25b8 Maya found it.", stdout)
         self.assertNotIn("Thinking about the beats.", stdout)
         self.assertNotIn('{"public_rationale"', stdout)
