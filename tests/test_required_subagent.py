@@ -208,10 +208,17 @@ class OrchestrationSchemaTests(unittest.TestCase):
             self.assertTrue(request["tool_requirements"]["t2"]["inspect_fetched_meshes"])
             self.assertTrue(request["tool_requirements"]["t2"]["place_measured_meshes"])
 
-    def test_models_task_must_author_tool_access(self) -> None:
+    def test_models_task_defaults_tool_access_on_when_the_model_omits_it(self) -> None:
+        plan = orchestration()
+        plan["subagent_tasks"][1].pop("use_tools")
+        tasks = map_orchestration._validated_tasks(plan)
+        models_task = next(task for task in tasks if task["topic"] == "models")
+        self.assertIs(models_task["use_tools"], True)
+
+    def test_models_task_cannot_explicitly_disable_tool_access(self) -> None:
         bad = orchestration()
         bad["subagent_tasks"][1]["use_tools"] = False
-        with self.assertRaisesRegex(ValueError, "models task must set use_tools:true"):
+        with self.assertRaisesRegex(ValueError, "models task must enable use_tools"):
             map_orchestration._validated_tasks(bad)
 
     def test_tool_access_must_be_an_ai_authored_json_boolean(self) -> None:
