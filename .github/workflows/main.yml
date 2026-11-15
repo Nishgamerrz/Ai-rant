@@ -869,7 +869,7 @@ jobs:
           ORCHESTRATION_STATUS=0
           python tools/ollama_stream.py --request map_orchestration_request.json \
             --output map_orchestration_response.json --label "map orchestration" \
-            --timeout 600 --stall-seconds 180 --max-seconds 600 || ORCHESTRATION_STATUS=$?
+            --timeout 600 --stall-seconds 600 --max-seconds 1200 || ORCHESTRATION_STATUS=$?
           if [ "$ORCHESTRATION_STATUS" -ne 0 ]; then
             ORCHESTRATION_HANDOFF=1
             ORCHESTRATION_FAILURE_REASON="selected local model orchestration did not return a usable first response (ollama_stream exit status ${ORCHESTRATION_STATUS})"

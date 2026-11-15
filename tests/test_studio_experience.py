@@ -275,7 +275,7 @@ class StudioExperienceTests(unittest.TestCase):
         self.assertIn('echo "AI_TIMEOUT=$AI_TIMEOUT" >> "$GITHUB_ENV"', workflow)
         self.assertEqual(workflow.count('--timeout "${AI_TIMEOUT:-900}"'), 1)
         self.assertNotIn("narration repair", workflow)
-        self.assertIn("--max-seconds 600", workflow)
+        self.assertIn("--max-seconds 1200", workflow)
         self.assertIn("--max-seconds 300", workflow)
         self.assertNotIn("NARRATION_MAX", workflow)
 

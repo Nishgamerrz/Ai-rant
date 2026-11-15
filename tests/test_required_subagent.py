@@ -794,7 +794,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("audit_roblox_map", (ROOT / "tools/map_orchestration.py").read_text(encoding="utf-8"))
 
     def test_local_map_calls_have_hard_deadlines_and_never_switch_models(self) -> None:
-        self.assertIn("--max-seconds 600", self.step)
+        self.assertIn("--stall-seconds 600", self.step)
+        self.assertIn("--max-seconds 1200", self.step)
         self.assertIn("--max-seconds 300", self.step)
         self.assertIn('"$AI_MODEL"', self.step)
         self.assertIn("No other local model was tried", self.step)

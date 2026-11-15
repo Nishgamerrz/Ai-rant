@@ -300,7 +300,7 @@ class RuntimeSpeedTests(unittest.TestCase):
         start = self.workflow.index("- name: Orchestrate and review the delegated map")
         end = self.workflow.index("- name: Re-view the AI world", start)
         map_step = self.workflow[start:end]
-        self.assertIn("--max-seconds 600", map_step)
+        self.assertIn("--max-seconds 1200", map_step)
         self.assertIn("--max-seconds 300", map_step)
         self.assertIn("AI_STALL=900", self.workflow)
         self.assertIn('--stall-seconds "${AI_STALL:-900}"', self.workflow)
@@ -790,7 +790,7 @@ class StallWatchdogTests(unittest.TestCase):
         map_start = workflow.index("- name: Orchestrate and review the delegated map")
         map_end = workflow.index("- name: Re-view the AI world", map_start)
         map_step = workflow[map_start:map_end]
-        self.assertIn("--max-seconds 600", map_step)
+        self.assertIn("--max-seconds 1200", map_step)
         self.assertIn("--max-seconds 300", map_step)
         for path, text in (("main.yml", workflow), ("agent.yml", agent_workflow),
                            ("nish_agent.py", agent_helper), ("ollama_stream.py", helper)):
