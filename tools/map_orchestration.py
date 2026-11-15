@@ -20,10 +20,13 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from console_style import paint  # noqa: E402
-from ai_activity import redact_secrets  # noqa: E402
+from ai_activity import append_activity, redact_secrets  # noqa: E402
 from map_delegation import MAP_CAMERA_TOPICS, extract_plan, missing_required_topics  # noqa: E402
 
 TASK_IDS = ("t1", "t2")
+ORCHESTRATION_HANDOFF_ID = "h1"
+EXTERNAL_PLANNER_PROVIDERS = frozenset({"bazaarlink", "gemini", "groq"})
+MAX_HANDOFF_CONTEXT_CHARS = 11_000
 VALID_TIMES = {"dawn", "day", "sunset", "night"}
 _PRIVATE_RATIONALE_MARKERS = (
     "chain of thought", "chain-of-thought", "private reasoning", "hidden reasoning",
@@ -101,8 +104,19 @@ def _read_json(path: Path) -> Any:
 def _orchestration(value: Any) -> dict:
     plan = extract_plan(value)
     if not isinstance(plan, dict):
-        raise ValueError("the selected model did not return an orchestration JSON object")
+        raise ValueError("the active map planner did not return an orchestration JSON object")
     return plan
+
+
+def _handoff_metadata(value: Any) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    metadata = value.get("orchestration_handoff")
+    if (not isinstance(metadata, dict)
+            or metadata.get("kind") != "explicit_external_orchestration_handoff"
+            or metadata.get("provider") not in EXTERNAL_PLANNER_PROVIDERS):
+        return {}
+    return metadata
 
 
 def _validated_tasks(plan: dict) -> list[dict]:
@@ -155,6 +169,86 @@ def _validated_tasks(plan: dict) -> list[dict]:
     return tasks
 
 
+def _without_optional_research(context: str) -> str:
+    """Drop optional web research first when an explicit handoff context is too large."""
+    marker = "Untrusted, optional requested research facts:"
+    index = context.rfind(marker)
+    if index < 0:
+        return context
+    boundary = context.rfind("\n\n", 0, index)
+    return context[:boundary if boundary >= 0 else index].rstrip()
+
+
+def build_orchestration_handoff_request(context_path: Path, local_model: str,
+                                        selected_preset: str, failure_reason: str,
+                                        output_path: Path) -> dict:
+    """Prepare an explicit external planner request after the selected local model fails.
+
+    This request contains only one handoff task. The workflow never constructs t1/t2;
+    the external planner must author both calls in its own first response, which is
+    run through the exact same validation and delegation path as a local response.
+    """
+    try:
+        context = context_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ValueError(f"could not read map context for the explicit handoff: {exc}") from exc
+    if not context:
+        raise ValueError("map context is empty; refusing an ungrounded orchestration handoff")
+    context = redact_secrets(context)
+    if len(context) > MAX_HANDOFF_CONTEXT_CHARS:
+        context = _without_optional_research(context)
+    model = redact_secrets(" ".join(str(local_model or "").split()))[:120]
+    preset = redact_secrets(" ".join(str(selected_preset or "").split()))[:120]
+    reason = redact_secrets(" ".join(str(failure_reason or "").split()))[:240]
+    if not model or not reason:
+        raise ValueError("the explicit handoff needs the selected local model and a failure reason")
+    run_context = "\n\n".join((
+        "EXPLICIT MAP-ORCHESTRATION HANDOFF. The selected local model did not return a usable first response. "
+        f"Selected preset: {preset or 'unknown'}; selected local Ollama model: {model}. "
+        f"Failure: {reason}. No other local model was tried. You are taking over as the external map planner; "
+        "do not claim the local model authored this response.",
+        "Map context from this run (story, narration, scene requirements, cast, duration, and targets):\n" + context,
+    ))
+    if len(run_context) > 11_900:
+        context = _without_optional_research(context)
+        run_context = "\n\n".join((
+            "EXPLICIT MAP-ORCHESTRATION HANDOFF. The selected local model did not return a usable first response. "
+            f"Selected preset: {preset or 'unknown'}; selected local Ollama model: {model}. "
+            f"Failure: {reason}. No other local model was tried. You are taking over as the external map planner; "
+            "do not claim the local model authored this response.",
+            "Map context from this run (story, narration, scene requirements, cast, duration, and targets):\n" + context,
+        ))
+    if len(run_context) > 11_900:
+        raise ValueError("map context is too large for a safe explicit handoff; no context was truncated")
+
+    instruction = (
+        "Explicit external handoff: the local planner failed. You are now the active planner; do not claim local authorship. "
+        "Return only JSON with exactly public_rationale, design_brief, model_anchor_names, search_queries, subagent_tasks; "
+        "do not write map props, coordinates, shots, or a blueprint here. Author exactly two calls now: t1 kind=write topic=map, "
+        "whose instruction asks for a complete JSON blueprint with at least 8 map-only props, exact cast, target timed cameras/faces, "
+        "and interior constraints; and t2 kind=write topic=models use_tools=true, asking for {props:[...]} for exactly the assigned "
+        "model names with no duplicates. Require exact Roblox mesh searches and real returned IDs only. If a supported mesh is fetched, "
+        "inspect its dimensions and call plan_mesh_placement with those exact source dimensions and an explicit studs_per_unit scale. "
+        "Never invent IDs/dimensions or claim import. Keep briefs/calls concise; include one safe public rationale and no private reasoning."
+    )
+    if len(instruction) > 1_200:
+        raise AssertionError("the static external handoff task instruction exceeded the runner limit")
+    request = {
+        "context": run_context,
+        "tasks": [{"id": ORCHESTRATION_HANDOFF_ID, "kind": "write", "topic": "map",
+                   "instruction": instruction}],
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(request, ensure_ascii=False) + "\n", encoding="utf-8")
+    append_activity({
+        "type": "orchestration_handoff", "stage": "map_orchestration",
+        "status": "started", "selected_local_model": model,
+        "selected_preset": preset, "reason": reason,
+        "public_status": "The selected local model could not continue; an explicit external planner handoff is starting.",
+    }, path=Path("dist/ai_activity.jsonl"), emit=False)
+    return request
+
+
 def _decode_answer(text: str, *, label: str) -> Any:
     """Parse a sub-agent's JSON-only answer, tolerating a single markdown fence."""
     candidate = str(text or "").strip()
@@ -189,6 +283,89 @@ def _successful_result(results: dict, task_id: str, topic: str) -> dict:
         reason = " ".join(str(result.get("error") or result.get("status") or "failed").split())[:240]
         raise ValueError(f"sub-agent task {task_id} ({topic}) did not complete: {reason}")
     return result
+
+
+def _validate_external_first_response(value: Any) -> dict:
+    """Apply the local first-response contract to an explicitly handed-off planner."""
+    if not isinstance(value, dict):
+        raise ValueError("the external planner's first response must be an orchestration JSON object")
+    required_keys = {"public_rationale", "design_brief", "model_anchor_names",
+                     "search_queries", "subagent_tasks"}
+    if set(value) != required_keys:
+        raise ValueError("the external planner must return exactly the compact orchestration fields")
+    brief = value.get("design_brief")
+    if not isinstance(brief, str) or not brief.strip() or len(brief) > 700:
+        raise ValueError("the external planner needs a concise design_brief (max 700 chars)")
+    queries = value.get("search_queries")
+    if (not isinstance(queries, list) or len(queries) > 3
+            or any(not isinstance(query, str) or len(query) > 120 for query in queries)):
+        raise ValueError("the external planner's search_queries must contain at most three strings of 120 chars")
+    names = value.get("model_anchor_names")
+    if (not isinstance(names, list) or not 1 <= len(names) <= 2
+            or any(not isinstance(name, str) for name in names)):
+        raise ValueError("the external planner must name one or two model anchors")
+    tasks = value.get("subagent_tasks")
+    if not isinstance(tasks, list) or len(tasks) != 2:
+        raise ValueError("the external planner's first response must author exactly two helper calls")
+    allowed_task_keys = {"id", "kind", "topic", "instruction", "input", "use_tools"}
+    for task in tasks:
+        if not isinstance(task, dict) or set(task) - allowed_task_keys:
+            raise ValueError("the external planner's helper calls contain an unsupported field")
+        task_id = task.get("id")
+        expected_topic = "map" if task_id == "t1" else "models" if task_id == "t2" else ""
+        if not expected_topic or task.get("topic") != expected_topic:
+            raise ValueError("the handoff must author t1 as the map task and t2 as the models task")
+        instruction = task.get("instruction")
+        if not isinstance(instruction, str) or not 20 <= len(instruction.strip()) <= 1_200:
+            raise ValueError(f"external helper call {task_id} needs an instruction of 20 to 1200 chars")
+        if "input" in task and (not isinstance(task["input"], str) or len(task["input"]) > 3_000):
+            raise ValueError(f"external helper call {task_id} input must be a string of at most 3000 chars")
+    plan = dict(value)
+    _validated_tasks(plan)
+    return plan
+
+
+def accept_orchestration_handoff(results_path: Path, output_path: Path,
+                                 local_model: str, selected_preset: str,
+                                 failure_reason: str) -> dict:
+    """Persist only an external planner's authored, fully validated first response."""
+    result = _successful_result(_read_json(results_path), ORCHESTRATION_HANDOFF_ID,
+                                "explicit map-orchestration handoff")
+    plan = _validate_external_first_response(
+        _decode_answer(str(result.get("text") or ""), label="external map orchestration"))
+    provider = redact_secrets(" ".join(str(result.get("provider") or "").split()))[:80]
+    provider_model = redact_secrets(" ".join(str(result.get("provider_model") or "").split()))[:120]
+    if provider not in EXTERNAL_PLANNER_PROVIDERS:
+        raise ValueError("the external planner response has no recognized provider provenance")
+    metadata = {
+        "kind": "explicit_external_orchestration_handoff",
+        "selected_local_model": redact_secrets(" ".join(str(local_model).split()))[:120],
+        "selected_preset": redact_secrets(" ".join(str(selected_preset).split()))[:120],
+        "failure_reason": redact_secrets(" ".join(str(failure_reason).split()))[:240],
+        "provider": provider,
+        "provider_model": provider_model,
+    }
+    if not metadata["selected_local_model"] or not metadata["failure_reason"]:
+        raise ValueError("the handoff provenance needs the selected local model and failure reason")
+    response = {"response": json.dumps(plan, ensure_ascii=False),
+                "orchestration_handoff": metadata}
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(response, ensure_ascii=False, indent=2) + "\n",
+                           encoding="utf-8")
+    append_activity({
+        "type": "orchestration_handoff", "stage": "map_orchestration",
+        "status": "complete", **metadata,
+        "public_rationale": plan["public_rationale"],
+        "public_status": (f"External {provider} planner authored and passed validation for its first-response "
+                           f"map/model calls; selected preset {metadata['selected_preset'] or 'unknown'} "
+                           f"and local model {metadata['selected_local_model']} remain unchanged."),
+    }, path=Path("dist/ai_activity.jsonl"), emit=False)
+    print(paint(f"External {provider} planner rationale: {plan['public_rationale']}", "plan"),
+          flush=True)
+    print(paint(f"Validated explicit external orchestration handoff via {provider} "
+                f"({provider_model or 'provider model unreported'}); selected local model "
+                f"{metadata['selected_local_model']} was not changed.", "success"), flush=True)
+    return response
 
 
 def _asset_name_in_query(name: str, query: str) -> bool:
@@ -438,18 +615,26 @@ def _apply_verified_placements(model_props: list[dict], asset_references: list[d
 
 
 def build_subagent_request(response_path: Path, context_path: Path, output_path: Path) -> dict:
-    """Forward only the two task calls in the selected model's first response."""
-    plan = _orchestration(_read_json(response_path))
+    """Forward only the two task calls in the active planner's first response."""
+    response = _read_json(response_path)
+    plan = _orchestration(response)
     tasks = _validated_tasks(plan)
+    handoff = _handoff_metadata(response)
     context = context_path.read_text(encoding="utf-8").strip()
     brief = str(plan.get("design_brief") or "").strip()
     names = [str(name).strip() for name in plan["model_anchor_names"]]
     extras = []
+    director = (f"External {handoff.get('provider') or 'sub-agent'} handoff planner"
+                if handoff else "Selected local director")
+    if handoff:
+        extras.append("Explicit orchestration handoff: the selected local model did not author these calls. "
+                      f"It remains {handoff.get('selected_local_model', 'the selected local model')}; "
+                      f"reason: {handoff.get('failure_reason', 'the local model could not continue')}.")
     rationale = str(plan.get("public_rationale") or "").strip()
     if rationale:
-        extras.append("Selected local director's public rationale:\n" + rationale)
+        extras.append(director + "'s public rationale:\n" + rationale)
     if brief:
-        extras.append("Selected local director's concise brief:\n" + brief)
+        extras.append(director + "'s concise brief:\n" + brief)
     extras.append("Model-anchor names assigned to the AI-authored models task: "
                   + ", ".join(names))
     models_task = next(task for task in tasks
@@ -477,7 +662,8 @@ def build_subagent_request(response_path: Path, context_path: Path, output_path:
 
 def assemble_plan(orchestration_path: Path, results_path: Path, output_path: Path) -> dict:
     """Combine the helper-authored map/camera JSON and model-authored prop anchors."""
-    orchestration = _orchestration(_read_json(orchestration_path))
+    orchestration_response = _read_json(orchestration_path)
+    orchestration = _orchestration(orchestration_response)
     tasks = _validated_tasks(orchestration)
     task_by_topic: dict[str, dict] = {}
     for task in tasks:
@@ -540,6 +726,9 @@ def assemble_plan(orchestration_path: Path, results_path: Path, output_path: Pat
     plan = dict(map_plan)
     plan["props"] = [*map_props, *model_props]
     plan["asset_references"] = asset_references
+    handoff = _handoff_metadata(orchestration_response)
+    if handoff:
+        plan["orchestration_handoff"] = handoff
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n",
                            encoding="utf-8")
@@ -681,7 +870,9 @@ def build_review_handoff_request(orchestration_path: Path, plan_path: Path,
                                   duration: float, cast: list[str] | str,
                                   output_path: Path) -> dict:
     """Give a tool-enabled external reviewer the current run, plan, and evidence."""
-    orchestration = _orchestration(_read_json(orchestration_path))
+    orchestration_response = _read_json(orchestration_path)
+    orchestration = _orchestration(orchestration_response)
+    orchestration_handoff = _handoff_metadata(orchestration_response)
     tasks = _validated_tasks(orchestration)
     plan = _read_json(plan_path)
     results = _read_json(results_path)
@@ -699,14 +890,22 @@ def build_review_handoff_request(orchestration_path: Path, plan_path: Path,
     map_context = context_path.read_text(encoding="utf-8").strip()
     safe_memory = redact_secrets(run_memory)[:5400]
     safe_context = redact_secrets(map_context)[:4600]
-    reason = redact_secrets(" ".join(str(failure_reason or "review call did not return a usable answer").split()))[:240]
+    reason = redact_secrets(" ".join(str(failure_reason or "local model could not continue").split()))[:240]
+    if orchestration_handoff:
+        local_failure = (
+            f"Selected local Ollama model {model} did not complete its first orchestration response ({reason}). "
+            f"The explicit external planner handoff was authored by {orchestration_handoff.get('provider', 'an external provider')} "
+            f"({orchestration_handoff.get('provider_model', 'model unreported')}); it must not be attributed to the local model."
+        )
+    else:
+        local_failure = f"Selected local Ollama model {model} did not complete its review call ({reason})."
     run_context = "\n\n".join((
         "Current-run system memory (selected local model/preset, narration, and earlier decisions):\n" + safe_memory,
         "Map-specific story and acceptance constraints:\n" + safe_context,
-        f"Selected local Ollama model: {model}. The local review call did not complete ({reason}). "
-        "This is an explicit external sub-agent handoff; do not switch or claim a different local model was used.",
+        local_failure + " This is an explicit external sub-agent handoff; do not switch or claim a different local model was used.",
     ))[:11900]
-    local_director = {
+    director_first_response = {
+        "source": "explicit_external_handoff" if orchestration_handoff else "selected_local_model",
         "public_rationale": orchestration.get("public_rationale", ""),
         "design_brief": orchestration.get("design_brief", ""),
         "model_anchor_names": orchestration.get("model_anchor_names", []),
@@ -714,10 +913,13 @@ def build_review_handoff_request(orchestration_path: Path, plan_path: Path,
                             "instruction": str(task.get("instruction") or "")[:1200]}
                            for task in tasks],
     }
+    if orchestration_handoff:
+        director_first_response["provider"] = orchestration_handoff.get("provider", "")
+        director_first_response["provider_model"] = orchestration_handoff.get("provider_model", "")
     review_input = {
         "selected_local_model": model,
         "handoff_reason": reason,
-        "local_director_first_response": local_director,
+        "director_first_response": director_first_response,
         "completed_helper_calls": completed,
         "assembled_plan_digest": _review_digest(plan),
         "asset_search_measurement_evidence": plan.get("asset_references", []),
@@ -752,7 +954,7 @@ def build_review_handoff_request(orchestration_path: Path, plan_path: Path,
         "use_tools": True,
         "instruction": (
             "Independently review the already assembled Roblox story-map plan using the current-run memory, "
-            "story/scene constraints, local director brief, model-search evidence, and full plan files. "
+            "story/scene constraints, director brief, model-search evidence, and full plan files. "
             "Do not edit, repair, rewrite, or replace any map. You MUST author and execute "
             f"audit_roblox_map(path=map_response.json, duration={float(duration):g}, cast={json.dumps(cast_names)}). "
             "Check story/theme and indoor-room fit, cast placements, usable cameras and face timing, and "
@@ -842,11 +1044,16 @@ def accept_handoff_review(orchestration_path: Path, results_path: Path, plan_pat
     review = _decode_answer(str(handoff.get("text") or ""), label="map-review handoff")
     provider = str(handoff.get("provider") or "external sub-agent")[:80]
     provider_model = str(handoff.get("provider_model") or "")[:120]
-    reason = redact_secrets(" ".join(str(failure_reason or "local review call stalled").split()))[:240]
+    reason = redact_secrets(" ".join(str(failure_reason or "local model could not continue").split()))[:240]
+    orchestration_handoff = _handoff_metadata(_read_json(orchestration_path))
     reviewer = {"kind": "context_aware_tool_enabled_subagent", "provider": provider,
                 "selected_local_model": str(local_model)[:120], "handoff_reason": reason}
     if provider_model:
         reviewer["provider_model"] = provider_model
+    if orchestration_handoff:
+        reviewer["orchestration_source"] = "explicit_external_handoff"
+        reviewer["orchestration_provider"] = orchestration_handoff.get("provider", "")
+        reviewer["orchestration_provider_model"] = orchestration_handoff.get("provider_model", "")
     return _record_review(orchestration_path, plan_path, review, reviewer,
                           "Context-aware tool-enabled sub-agent")
 
@@ -858,10 +1065,26 @@ def main() -> int:
     schema_parser = subparsers.add_parser("schema", help="write the compact orchestration JSON schema")
     schema_parser.add_argument("--output", required=True, type=Path)
 
-    queries_parser = subparsers.add_parser("queries", help="print AI-authored web search queries")
+    orchestration_handoff_parser = subparsers.add_parser(
+        "orchestration-handoff-request", help="prepare an explicit external first-response planner handoff")
+    orchestration_handoff_parser.add_argument("--context", required=True, type=Path)
+    orchestration_handoff_parser.add_argument("--model", required=True)
+    orchestration_handoff_parser.add_argument("--preset", required=True)
+    orchestration_handoff_parser.add_argument("--failure-reason", required=True)
+    orchestration_handoff_parser.add_argument("--output", required=True, type=Path)
+
+    accept_orchestration_handoff_parser = subparsers.add_parser(
+        "accept-orchestration-handoff", help="validate and record the external planner's authored first response")
+    accept_orchestration_handoff_parser.add_argument("--results", required=True, type=Path)
+    accept_orchestration_handoff_parser.add_argument("--model", required=True)
+    accept_orchestration_handoff_parser.add_argument("--preset", required=True)
+    accept_orchestration_handoff_parser.add_argument("--failure-reason", required=True)
+    accept_orchestration_handoff_parser.add_argument("--output", required=True, type=Path)
+
+    queries_parser = subparsers.add_parser("queries", help="print active planner-authored web search queries")
     queries_parser.add_argument("--response", required=True, type=Path)
 
-    prepare_parser = subparsers.add_parser("prepare", help="forward the AI-authored helper calls")
+    prepare_parser = subparsers.add_parser("prepare", help="forward the active planner's authored helper calls")
     prepare_parser.add_argument("--response", required=True, type=Path)
     prepare_parser.add_argument("--context", required=True, type=Path)
     prepare_parser.add_argument("--output", required=True, type=Path)
@@ -916,6 +1139,14 @@ def main() -> int:
             args.output.write_text(json.dumps(orchestration_schema()) + "\n", encoding="utf-8")
             print(paint(f"Wrote bounded map-orchestration schema to {args.output}", "plan"),
                   flush=True)
+        elif args.command == "orchestration-handoff-request":
+            build_orchestration_handoff_request(
+                args.context, args.model, args.preset, args.failure_reason, args.output)
+            print(paint(f"Prepared an explicit external planner handoff; selected local model "
+                        f"{args.model} and preset {args.preset} remain unchanged.", "plan"), flush=True)
+        elif args.command == "accept-orchestration-handoff":
+            accept_orchestration_handoff(args.results, args.output, args.model,
+                                         args.preset, args.failure_reason)
         elif args.command == "queries":
             plan = _orchestration(_read_json(args.response))
             _validated_tasks(plan)

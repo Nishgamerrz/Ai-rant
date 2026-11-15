@@ -759,6 +759,7 @@ jobs:
         env:
           STORY_TOPIC: ${{ steps.refine.outputs.story_topic || inputs.story_topic }}
           MAP_DETAIL: ${{ inputs.map_detail }}
+          MODEL_PRESET_LABEL: ${{ steps.model-preset.outputs.label }}
           MODEL_QUALITY: ${{ steps.model-preset.outputs.quality }}
           AI_MODEL: ${{ env.AI_MODEL }}
           OLLAMA_THINKING: ${{ env.OLLAMA_THINKING }}
@@ -835,26 +836,8 @@ jobs:
             --slurpfile schema map_orchestration_schema.json --argjson tokens "${MAP_ORCHESTRATION_TOKENS:-1200}" \
             '{model:$model,messages:[{role:"system",content:$system},{role:"user",content:$prompt}],format:$schema[0],think:$think,stream:false,keep_alive:"60m",options:{temperature:0.7,top_p:0.95,num_ctx:$ctx,num_predict:$tokens}}' \
             > map_orchestration_request.json
-          python tools/say.py plan "The selected local model is coordinating the map and model-design helper calls."
-          if ! python tools/ollama_stream.py --request map_orchestration_request.json \
-              --output map_orchestration_response.json --label "map orchestration" \
-              --timeout 600 --stall-seconds 180 --max-seconds 600; then
-            python tools/say.py error "Selected model ${AI_MODEL} could not complete map orchestration; see the Ollama error above. No other local model was tried."
-            exit 1
-          fi
-          if ! python tools/map_delegation.py map_orchestration_response.json > map_delegation.log 2>&1; then
-            python tools/say.py error "$(cat map_delegation.log)"
-            python tools/say.py error "The selected model's first response must author both map/camera and models sub-agent calls; stopping without a local map or a repair loop."
-            exit 1
-          fi
-          python tools/say.py success "$(cat map_delegation.log)"
-          python tools/map_orchestration.py queries --response map_orchestration_response.json > map_queries.txt
-          if [ -s map_queries.txt ]; then
-            mapfile -t QUERY_LIST < map_queries.txt
-            python tools/say.py tool "The local director requested one focused research pass for the sub-agent."
-            python tools/ai_web_search.py dist/web_research.json "${QUERY_LIST[@]}"
-          fi
-          python - <<'PY'
+          write_map_context() {
+            python - <<'PY'
           import json
           import os
           from pathlib import Path
@@ -877,9 +860,71 @@ jobs:
           ]
           Path('map_context.txt').write_text('\n\n'.join(part for part in context if part), encoding='utf-8')
           PY
+          }
+          # This context is also available to an explicit external planner handoff;
+          # it is built before the local call so a stall cannot lose the run constraints.
+          write_map_context
+          python tools/say.py plan "The selected local model is coordinating the map and model-design helper calls."
+          ORCHESTRATION_HANDOFF=0
+          ORCHESTRATION_STATUS=0
+          python tools/ollama_stream.py --request map_orchestration_request.json \
+            --output map_orchestration_response.json --label "map orchestration" \
+            --timeout 600 --stall-seconds 180 --max-seconds 600 || ORCHESTRATION_STATUS=$?
+          if [ "$ORCHESTRATION_STATUS" -ne 0 ]; then
+            ORCHESTRATION_HANDOFF=1
+            ORCHESTRATION_FAILURE_REASON="selected local model orchestration did not return a usable first response (ollama_stream exit status ${ORCHESTRATION_STATUS})"
+            python tools/say.py warning "Selected preset ${MODEL_PRESET_LABEL} (${MODEL_QUALITY}) -> local model ${AI_MODEL} did not return a usable map-orchestration response (exit status ${ORCHESTRATION_STATUS}). Explicit external planner handoff is starting; no other local Ollama model was tried."
+            python tools/map_orchestration.py orchestration-handoff-request \
+              --context map_context.txt --model "$AI_MODEL" \
+              --preset "${MODEL_PRESET_LABEL} (${MODEL_QUALITY})" \
+              --failure-reason "$ORCHESTRATION_FAILURE_REASON" \
+              --output map_orchestration_handoff_request.json
+            ORCHESTRATION_HANDOFF_STATUS=0
+            python tools/gemini_subagent.py --request map_orchestration_handoff_request.json \
+              --output map_orchestration_handoff_results.json || ORCHESTRATION_HANDOFF_STATUS=$?
+            if [ "$ORCHESTRATION_HANDOFF_STATUS" -ne 0 ]; then
+              python tools/say.py error "The external planner handoff could not complete; no helper tasks were invented and no map will be substituted."
+              exit 1
+            fi
+            if ! python tools/map_orchestration.py accept-orchestration-handoff \
+                --results map_orchestration_handoff_results.json \
+                --model "$AI_MODEL" --preset "${MODEL_PRESET_LABEL} (${MODEL_QUALITY})" \
+                --failure-reason "$ORCHESTRATION_FAILURE_REASON" \
+                --output map_orchestration_response.json; then
+              python tools/say.py error "The external planner did not author a valid first-response pair of map/model calls; stopping without synthesized tasks or a procedural map."
+              exit 1
+            fi
+          fi
+          if ! python tools/map_delegation.py map_orchestration_response.json > map_delegation.log 2>&1; then
+            python tools/say.py error "$(cat map_delegation.log)"
+            python tools/say.py error "The active planner's untouched first response must author both map/camera and models sub-agent calls; stopping without synthesized tasks or a local/procedural map."
+            exit 1
+          fi
+          if [ "$ORCHESTRATION_HANDOFF" -eq 1 ]; then
+            python tools/say.py success "The external handoff planner authored both helper calls in its first response; the selected preset/model remains ${MODEL_PRESET_LABEL} (${MODEL_QUALITY}) / ${AI_MODEL}."
+          else
+            python tools/say.py success "$(cat map_delegation.log)"
+          fi
+          python tools/map_orchestration.py queries --response map_orchestration_response.json > map_queries.txt
+          if [ -s map_queries.txt ]; then
+            mapfile -t QUERY_LIST < map_queries.txt
+            if [ "$ORCHESTRATION_HANDOFF" -eq 1 ]; then
+              python tools/say.py tool "The external handoff planner requested one focused research pass for the sub-agent."
+            else
+              python tools/say.py tool "The local director requested one focused research pass for the sub-agent."
+            fi
+            python tools/ai_web_search.py dist/web_research.json "${QUERY_LIST[@]}"
+          fi
+          # Refresh after any planner-authored research queries. If handoff occurred,
+          # its saved request retains the pre-research context used by the external planner.
+          write_map_context
           python tools/map_orchestration.py prepare --response map_orchestration_response.json \
             --context map_context.txt --output subagent_tasks.json
-          python tools/say.py tool "Running the map/camera and model-design calls authored in the local model's first response."
+          if [ "$ORCHESTRATION_HANDOFF" -eq 1 ]; then
+            python tools/say.py tool "Running the map/camera and model-design calls authored by the explicit external planner's first response."
+          else
+            python tools/say.py tool "Running the map/camera and model-design calls authored in the local model's first response."
+          fi
           HELPER_STATUS=0
           python tools/gemini_subagent.py --request subagent_tasks.json --output subagent_results.json --stdout || HELPER_STATUS=$?
           if [ "$HELPER_STATUS" -ne 0 ]; then
@@ -891,20 +936,29 @@ jobs:
             python tools/say.py error "The sub-agent did not return a complete map/camera plan and the assigned model anchors; no local or procedural map will be substituted."
             exit 1
           fi
-          # One short acceptance/review from the SAME selected model. A rejection is
-          # reported and stops; it can never reopen the old full-map repair loop.
-          python tools/map_orchestration.py review-request --orchestration map_orchestration_response.json \
-            --plan map_response.json --results subagent_results.json --context map_context.txt \
-            --system system_prompt.txt --model "$AI_MODEL" --think "$OLLAMA_THINKING" \
-            --num-ctx "$AI_NUM_CTX" --output map_review_request.json
-          python tools/say.py plan "The selected model is reviewing the delegated plan before the builder expands it."
+          # One short acceptance/review from the same selected model in the normal
+          # path. An initial orchestration handoff instead goes straight to the
+          # context-aware tool audit; the selected local model is not re-asked after failure.
           REVIEW_STATUS=0
-          python tools/ollama_stream.py --request map_review_request.json \
-            --output map_review_response.json --label "map acceptance review" \
-            --timeout 300 --stall-seconds 120 --max-seconds 300 || REVIEW_STATUS=$?
+          if [ "$ORCHESTRATION_HANDOFF" -eq 1 ]; then
+            REVIEW_STATUS=1
+            HANDOFF_REASON="$ORCHESTRATION_FAILURE_REASON"
+            python tools/say.py warning "The selected local model remains ${MODEL_PRESET_LABEL} (${MODEL_QUALITY}) / ${AI_MODEL}; it will not be re-asked. A tool-enabled external reviewer must audit the handed-off map before it can ship."
+          else
+            python tools/map_orchestration.py review-request --orchestration map_orchestration_response.json \
+              --plan map_response.json --results subagent_results.json --context map_context.txt \
+              --system system_prompt.txt --model "$AI_MODEL" --think "$OLLAMA_THINKING" \
+              --num-ctx "$AI_NUM_CTX" --output map_review_request.json
+            python tools/say.py plan "The selected model is reviewing the delegated plan before the builder expands it."
+            python tools/ollama_stream.py --request map_review_request.json \
+              --output map_review_response.json --label "map acceptance review" \
+              --timeout 300 --stall-seconds 120 --max-seconds 300 || REVIEW_STATUS=$?
+            if [ "$REVIEW_STATUS" -ne 0 ]; then
+              python tools/say.py warning "Selected preset ${MODEL_PRESET_LABEL} (${MODEL_QUALITY}) -> local model ${AI_MODEL} did not return an accepted review (exit status ${REVIEW_STATUS}); handing acceptance to a context-aware tool-enabled sub-agent. No other local model was tried."
+              HANDOFF_REASON="selected local model review did not return an accepted response (ollama_stream exit status ${REVIEW_STATUS})"
+            fi
+          fi
           if [ "$REVIEW_STATUS" -ne 0 ]; then
-            python tools/say.py warning "Selected model ${AI_MODEL} could not complete its review after the same-model retry; keeping the selected preset/model unchanged and handing acceptance to a context-aware tool-enabled sub-agent. No other local model was tried."
-            HANDOFF_REASON="selected local model review stalled after its same-model retry"
             python tools/map_orchestration.py review-handoff-request \
               --orchestration map_orchestration_response.json --plan map_response.json \
               --results subagent_results.json --context map_context.txt --system system_prompt.txt \
@@ -945,8 +999,13 @@ jobs:
             exit 1
           fi
           python tools/say.py success "$(cat map_validation.log)"
-          echo "Sub-agent map/camera/model anchors; selected local model reviewed" > dist/map_source.txt
-          python tools/say.py success "The selected model accepted the delegated map, cameras and model anchors."
+          if [ "$REVIEW_STATUS" -ne 0 ]; then
+            echo "Sub-agent map/camera/model anchors; context-aware tool-enabled external reviewer accepted" > dist/map_source.txt
+            python tools/say.py success "The context-aware external reviewer accepted the delegated map, cameras and model anchors."
+          else
+            echo "Sub-agent map/camera/model anchors; selected local model reviewed" > dist/map_source.txt
+            python tools/say.py success "The selected local model accepted the delegated map, cameras and model anchors."
+          fi
           WORLD_SUMMARY=$(python - <<'PY'
           import json
           from pathlib import Path
@@ -1366,7 +1425,7 @@ jobs:
         if: always()
         run: |
           mkdir -p dist
-          for file in story_creation_tasks.json story_creation_results.json story_proofread_template.json story_subagent_tasks.json story_subagent_results.json subagent_tasks.json subagent_results.json map_orchestration_response.json map_review_request.json map_review_response.json map_review_handoff_request.json map_review_handoff_results.json map_response.json map_subagent_review.done; do
+          for file in story_creation_tasks.json story_creation_results.json story_proofread_template.json story_subagent_tasks.json story_subagent_results.json subagent_tasks.json subagent_results.json map_orchestration_handoff_request.json map_orchestration_handoff_results.json map_orchestration_response.json map_review_request.json map_review_response.json map_review_handoff_request.json map_review_handoff_results.json map_response.json map_subagent_review.done; do
             if [ -s "$file" ]; then cp -f "$file" dist/; fi
           done
           ls -lh dist/*.json 2>/dev/null | head -n 20 || true
@@ -1388,6 +1447,8 @@ jobs:
             dist/narration_created_draft.txt
             dist/subagent_tasks.json
             dist/subagent_results.json
+            dist/map_orchestration_handoff_request.json
+            dist/map_orchestration_handoff_results.json
             dist/map_orchestration_response.json
             dist/map_review_request.json
             dist/map_review_response.json
