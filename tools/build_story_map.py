@@ -1561,12 +1561,25 @@ def _clean_subagent_review(value):
                 if str(item) in {"t1", "t2"}] if isinstance(value.get("accepted"), list) else []
     reviewer = value.get("reviewer") if isinstance(value.get("reviewer"), dict) else {}
     clean_reviewer = {key: _reference_text(reviewer[key], 240) for key in
-                      ("kind", "model", "provider", "provider_model", "selected_local_model", "handoff_reason")
+                      ("kind", "model", "provider", "provider_model", "selected_local_model", "handoff_reason",
+                       "orchestration_source", "orchestration_provider", "orchestration_provider_model")
                       if reviewer.get(key)}
     cleaned = {"accepted": list(dict.fromkeys(accepted)),
                "note": _reference_text(value.get("note"), 320)}
     if clean_reviewer:
         cleaned["reviewer"] = clean_reviewer
+    return cleaned
+
+
+def _clean_orchestration_handoff(value):
+    """Keep bounded provenance when map orchestration was explicitly handed off."""
+    if not isinstance(value, dict) or value.get("kind") != "explicit_external_orchestration_handoff":
+        return None
+    cleaned = {"kind": "explicit_external_orchestration_handoff"}
+    for key, limit in (("selected_local_model", 120), ("selected_preset", 120),
+                       ("failure_reason", 240), ("provider", 80), ("provider_model", 120)):
+        if value.get(key):
+            cleaned[key] = _reference_text(value[key], limit)
     return cleaned
 
 
@@ -1701,6 +1714,9 @@ def validate(plan, duration=90, usernames=(), min_props=16, visual_request=""):
     review = _clean_subagent_review(plan.get("subagent_review"))
     if review:
         normalized_plan["subagent_review"] = review
+    orchestration_handoff = _clean_orchestration_handoff(plan.get("orchestration_handoff"))
+    if orchestration_handoff:
+        normalized_plan["orchestration_handoff"] = orchestration_handoff
     return normalized_plan
 
 

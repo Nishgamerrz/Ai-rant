@@ -8,12 +8,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
+import build_story_map  # noqa: E402
 import map_delegation  # noqa: E402
 import map_orchestration  # noqa: E402
 
@@ -217,6 +219,86 @@ class OrchestrationSchemaTests(unittest.TestCase):
         bad["subagent_tasks"][1]["use_tools"] = "true"
         with self.assertRaisesRegex(ValueError, "use_tools must be a JSON boolean"):
             map_orchestration._validated_tasks(bad)
+
+
+class OrchestrationHandoffTests(unittest.TestCase):
+    def test_handoff_request_is_explicit_and_does_not_fabricate_the_map_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            context_file = root / "map_context.txt"
+            output_file = root / "handoff_request.json"
+            context_file.write_text(
+                "Story: two friends return a parcel. Scene mode: interior bedroom. "
+                "Camera target: 10-16 shots across 60 seconds.", encoding="utf-8")
+            with patch("map_orchestration.append_activity"):
+                request = map_orchestration.build_orchestration_handoff_request(
+                    context_file, "qwen3:8b", "Medium (medium)",
+                    "selected local model orchestration stalled after its same-model retry",
+                    output_file)
+            self.assertEqual(json.loads(output_file.read_text(encoding="utf-8")), request)
+        self.assertEqual([item["id"] for item in request["tasks"]], ["h1"])
+        self.assertEqual(request["tasks"][0]["kind"], "write")
+        self.assertNotIn("subagent_tasks", request)
+        self.assertLessEqual(len(request["tasks"][0]["instruction"]), 1200)
+        self.assertIn("do not claim the local model authored this response", request["context"])
+        self.assertIn("qwen3:8b", request["context"])
+        self.assertIn("interior bedroom", request["context"])
+        self.assertIn("Roblox mesh searches", request["tasks"][0]["instruction"])
+
+    def test_only_external_authored_first_response_can_supply_handoff_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            results_file = root / "handoff_results.json"
+            response_file = root / "map_orchestration_response.json"
+            results_file.write_text(json.dumps({"results": [{
+                "id": "h1", "ok": True, "provider": "groq",
+                "provider_model": "llama-3.3-70b-versatile",
+                "text": json.dumps(orchestration()),
+            }]}), encoding="utf-8")
+            with patch("map_orchestration.append_activity"):
+                response = map_orchestration.accept_orchestration_handoff(
+                    results_file, response_file, "qwen3:8b", "Medium (medium)",
+                    "selected local model orchestration stalled after its same-model retry")
+            saved = json.loads(response_file.read_text(encoding="utf-8"))
+        self.assertEqual(map_delegation.authored_topics(saved), {"map", "models"})
+        self.assertEqual(map_orchestration._orchestration(saved), orchestration())
+        self.assertEqual(response["orchestration_handoff"]["kind"],
+                         "explicit_external_orchestration_handoff")
+        self.assertEqual(response["orchestration_handoff"]["selected_local_model"], "qwen3:8b")
+        self.assertEqual(response["orchestration_handoff"]["provider"], "groq")
+        self.assertEqual(response["orchestration_handoff"]["provider_model"],
+                         "llama-3.3-70b-versatile")
+
+    def test_invalid_handoff_response_is_rejected_without_synthesized_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            results_file = root / "handoff_results.json"
+            response_file = root / "map_orchestration_response.json"
+            bad = orchestration()
+            bad["subagent_tasks"][1]["topic"] = "map"
+            results_file.write_text(json.dumps({"results": [{
+                "id": "h1", "ok": True, "provider": "gemini", "provider_model": "gemini-test",
+                "text": json.dumps(bad),
+            }]}), encoding="utf-8")
+            with patch("map_orchestration.append_activity"):
+                with self.assertRaisesRegex(ValueError, "t2 as the models task"):
+                    map_orchestration.accept_orchestration_handoff(
+                        results_file, response_file, "qwen3:8b", "Medium (medium)",
+                        "selected local model orchestration stalled")
+            self.assertFalse(response_file.exists())
+
+    def test_handoff_provenance_survives_map_normalization(self) -> None:
+        plan = blueprint()
+        plan["orchestration_handoff"] = {
+            "kind": "explicit_external_orchestration_handoff",
+            "selected_local_model": "qwen3:8b", "selected_preset": "Medium (medium)",
+            "failure_reason": "selected model stalled", "provider": "groq",
+            "provider_model": "llama-3.3-70b-versatile",
+        }
+        normalized = build_story_map.validate(
+            plan, duration=60, usernames=["Ava", "Bo"], min_props=8)
+        self.assertEqual(normalized["orchestration_handoff"]["provider"], "groq")
+        self.assertEqual(normalized["orchestration_handoff"]["selected_local_model"], "qwen3:8b")
 
 
 class SubagentAssemblyTests(unittest.TestCase):
@@ -467,13 +549,59 @@ class LocalReviewTests(unittest.TestCase):
         self.assertEqual(request["tool_requirements"]["r1"]["required_tools"],
                          ["audit_roblox_map"])
 
+    def test_external_review_request_names_the_external_planner_as_response_author(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            orchestration_file = root / "orchestration.json"
+            plan_file = root / "map_response.json"
+            results_file = root / "subagent_results.json"
+            context_file = root / "map_context.txt"
+            system_file = root / "system_prompt.txt"
+            output_file = root / "handoff_request.json"
+            orchestration_file.write_text(json.dumps({
+                "response": json.dumps(orchestration()),
+                "orchestration_handoff": {
+                    "kind": "explicit_external_orchestration_handoff",
+                    "selected_local_model": "qwen3:8b", "selected_preset": "Medium (medium)",
+                    "failure_reason": "selected local model orchestration stalled",
+                    "provider": "gemini", "provider_model": "gemini-2.5-flash",
+                },
+            }), encoding="utf-8")
+            plan_file.write_text(json.dumps(blueprint()), encoding="utf-8")
+            results_file.write_text(json.dumps({"results": [
+                {"id": "t1", "topic": "map", "ok": True, "text": json.dumps(blueprint())},
+                model_result(json.dumps({"props": [{"name": "Parcel Lantern"}]}),
+                             name="Parcel Lantern"),
+            ]}), encoding="utf-8")
+            context_file.write_text("Story: parcel return. Scene: interior bedroom.", encoding="utf-8")
+            system_file.write_text("RUN MEMORY: selected preset Medium; local model qwen3:8b.",
+                                   encoding="utf-8")
+            request = map_orchestration.build_review_handoff_request(
+                orchestration_file, plan_file, results_file, context_file, system_file,
+                "qwen3:8b", "selected local model orchestration stalled", 60,
+                ["Ava", "Bo"], output_file)
+        review_input = json.loads(request["tasks"][0]["input"])
+        self.assertEqual(review_input["director_first_response"]["source"],
+                         "explicit_external_handoff")
+        self.assertEqual(review_input["director_first_response"]["provider"], "gemini")
+        self.assertIn("did not complete its first orchestration response", request["context"])
+        self.assertIn("not be attributed to the local model", request["context"])
+
     def test_handoff_acceptance_requires_a_successful_tool_audit_and_records_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             orchestration_file = root / "orchestration.json"
             plan_file = root / "map_response.json"
             results_file = root / "review_results.json"
-            orchestration_file.write_text(json.dumps(orchestration()), encoding="utf-8")
+            orchestration_file.write_text(json.dumps({
+                "response": json.dumps(orchestration()),
+                "orchestration_handoff": {
+                    "kind": "explicit_external_orchestration_handoff",
+                    "selected_local_model": "qwen3:8b", "selected_preset": "Medium (medium)",
+                    "failure_reason": "selected local model orchestration stalled",
+                    "provider": "gemini", "provider_model": "gemini-2.5-flash",
+                },
+            }), encoding="utf-8")
             plan_file.write_text(json.dumps(blueprint()), encoding="utf-8")
             accepted = {"accepted": ["t1", "t2"], "note": "The plan fits the story and room.",
                         "changes_needed": False, "revision_instruction": ""}
@@ -495,6 +623,9 @@ class LocalReviewTests(unittest.TestCase):
         self.assertEqual(reviewer["provider"], "groq")
         self.assertEqual(reviewer["selected_local_model"], "qwen3:8b")
         self.assertIn("same-model", reviewer["handoff_reason"])
+        self.assertEqual(reviewer["orchestration_source"], "explicit_external_handoff")
+        self.assertEqual(reviewer["orchestration_provider"], "gemini")
+        self.assertEqual(reviewer["orchestration_provider_model"], "gemini-2.5-flash")
         self.assertEqual(plan["subagent_review"]["accepted"], ["t1", "t2"])
 
     def test_handoff_cannot_accept_without_a_successful_audit(self) -> None:
@@ -603,38 +734,68 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('--scene-mode "${WORLD_MODE:-auto}"', self.step)
         self.assertIn("Preserve all interior-room constraints", self.map_prompt())
 
-    def test_first_response_validation_happens_before_any_helper_call_without_repairs(self) -> None:
+    def test_first_response_validation_happens_before_map_helpers_without_repairs(self) -> None:
+        handoff_helper = self.step.index(
+            "python tools/gemini_subagent.py --request map_orchestration_handoff_request.json")
+        handoff_accept = self.step.index("python tools/map_orchestration.py accept-orchestration-handoff")
         validation = self.step.index("python tools/map_delegation.py map_orchestration_response.json")
-        helper_call = self.step.index("python tools/gemini_subagent.py")
+        helper_call = self.step.index("python tools/gemini_subagent.py --request subagent_tasks.json")
+        self.assertLess(handoff_helper, handoff_accept)
+        self.assertLess(handoff_accept, validation)
         self.assertLess(validation, helper_call)
         self.assertNotIn("for delegation_retry", self.step)
         self.assertNotIn("for helper_round", self.step)
         self.assertNotIn("map_repair_request.json", self.step)
-        self.assertIn("stopping without a local map or a repair loop", self.step)
+        self.assertIn("without synthesized tasks", self.step)
 
     def test_subagent_creates_map_camera_and_models_then_reviews_or_hands_off(self) -> None:
+        local_planner = self.step.index("python tools/ollama_stream.py --request map_orchestration_request.json")
+        orchestration_handoff = self.step.index("python tools/map_orchestration.py orchestration-handoff-request")
+        external_planner = self.step.index(
+            "python tools/gemini_subagent.py --request map_orchestration_handoff_request.json")
+        external_planner_accept = self.step.index("python tools/map_orchestration.py accept-orchestration-handoff")
+        validation = self.step.index("python tools/map_delegation.py map_orchestration_response.json")
         helper = self.step.index("python tools/gemini_subagent.py --request subagent_tasks.json")
         assemble = self.step.index("tools/map_orchestration.py assemble")
         review = self.step.index("tools/map_orchestration.py review-request")
-        handoff_request = self.step.index("tools/map_orchestration.py review-handoff-request")
-        handoff_helper = self.step.index("python tools/gemini_subagent.py --request map_review_handoff_request.json")
-        handoff_accept = self.step.index("python tools/map_orchestration.py accept-handoff")
+        review_handoff_request = self.step.index("tools/map_orchestration.py review-handoff-request")
+        review_handoff_helper = self.step.index(
+            "python tools/gemini_subagent.py --request map_review_handoff_request.json")
+        review_handoff_accept = self.step.index("python tools/map_orchestration.py accept-handoff")
         local_accept = self.step.index("python tools/map_orchestration.py accept --")
         builder = self.step.index("python tools/build_story_map.py")
+        self.assertLess(local_planner, orchestration_handoff)
+        self.assertLess(orchestration_handoff, external_planner)
+        self.assertLess(external_planner, external_planner_accept)
+        self.assertLess(external_planner_accept, validation)
+        self.assertLess(validation, helper)
         self.assertLess(helper, assemble)
         self.assertLess(assemble, review)
-        self.assertLess(review, handoff_request)
-        self.assertLess(handoff_request, handoff_helper)
-        self.assertLess(handoff_helper, handoff_accept)
-        self.assertLess(handoff_accept, builder)
+        self.assertLess(review, review_handoff_request)
+        self.assertLess(review_handoff_request, review_handoff_helper)
+        self.assertLess(review_handoff_helper, review_handoff_accept)
+        self.assertLess(review_handoff_accept, builder)
         self.assertLess(local_accept, builder)
-        self.assertIn("--stdout", self.step, "sub-agent answers and actual tool use remain live and visible")
-        self.assertIn("selected local model review stalled after its same-model retry", self.step)
-        self.assertIn("No other local model was tried", self.step)
+        self.assertIn("--stdout", self.step, "map/model answers and actual tool use remain visible")
+        self.assertIn("selected local model review did not return an accepted response", self.step)
+        self.assertIn("selected local model orchestration did not return a usable first response", self.step)
+        self.assertIn("no other local Ollama model was tried", self.step)
         self.assertIn("touch map_subagent_review.done", self.step)
 
+    def test_handoff_audits_external_first_response_and_records_artifacts(self) -> None:
+        self.assertIn("Explicit external planner handoff is starting", self.step)
+        self.assertIn("The selected local model remains ${MODEL_PRESET_LABEL}", self.step)
+        self.assertIn("the selected local model did not author these calls",
+                      (ROOT / "tools/map_orchestration.py").read_text(encoding="utf-8"))
+        self.assertIn("map_orchestration_handoff_request.json", self.text)
+        self.assertIn("map_orchestration_handoff_results.json", self.text)
+        self.assertIn("context-aware tool-enabled external reviewer accepted", self.step)
+        self.assertIn("External {provider} planner rationale", (ROOT / "tools/map_orchestration.py").read_text(encoding="utf-8"))
+        self.assertIn("audit_roblox_map", (ROOT / "tools/map_orchestration.py").read_text(encoding="utf-8"))
+
     def test_local_map_calls_have_hard_deadlines_and_never_switch_models(self) -> None:
-        self.assertIn("--max-seconds 600", self.step)
+        self.assertIn("--stall-seconds 600", self.step)
+        self.assertIn("--max-seconds 1200", self.step)
         self.assertIn("--max-seconds 300", self.step)
         self.assertIn('"$AI_MODEL"', self.step)
         self.assertIn("No other local model was tried", self.step)

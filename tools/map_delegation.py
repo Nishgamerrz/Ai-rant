@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Require the map planner's original AI response to author its helper tasks.
+"""Require the active map planner's first response to author its helper tasks.
 
-The workflow deliberately validates the untouched Ollama response before it
-builds or runs any Gemini request. A task synthesized by workflow code can never
-satisfy this contract.
+The normal planner is the selected local Ollama model. Only after that model
+fails may an explicit, provenance-recorded external handoff author a replacement
+first response. The workflow validates that untouched response before running
+map/model helper calls; workflow code never synthesizes the required tasks.
 """
 from __future__ import annotations
 
