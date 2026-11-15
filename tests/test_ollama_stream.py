@@ -225,15 +225,24 @@ class LiveStreamingTests(unittest.TestCase):
             stderr = result.stderr
             activity = [json.loads(line) for line in activity_path.read_text(encoding="utf-8").splitlines()]
 
-        # Internal reasoning and provider JSON are withheld; a public rationale and
-        # the validated narration field are still presented with distinct colors.
-        self.assertIn("[world plan] reasoning is active; private model thoughts are hidden.", stdout)
-        self.assertIn("[world plan] preparing the structured result; raw JSON is hidden.", stdout)
-        self.assertIn("[world plan] public rationale \u25b8 A small choice turns the hook into a hopeful ending.", stdout)
-        self.assertIn("[world plan] narration \u25b8 Maya found it.", stdout)
-        self.assertNotIn("Thinking about the beats.", stdout)
-        self.assertNotIn('{"public_rationale"', stdout)
-        self.assertIn("[world plan] \u2713 done", stdout)
+        # Internal reasoning and provider JSON are withheld. Safe progress and
+        # validated public fields from the selected Ollama model share one frame.
+        import re
+
+        plain_stdout = re.sub(r"\x1b\[[0-9;]*m", "", stdout)
+        box_start = plain_stdout.index("\u250c\u2500 Ollama activity · world plan")
+        box_end = plain_stdout.index("\u2514", box_start)
+        boxed_lines = plain_stdout[box_start:box_end].splitlines()
+        box_body = " ".join(line.split("\u2502 ", 1)[1]
+                             for line in boxed_lines if "\u2502 " in line)
+        self.assertIn("Selected local model: qwen3:8b", box_body)
+        self.assertIn("[world plan] reasoning is active; private model thoughts are hidden.", box_body)
+        self.assertIn("[world plan] preparing the structured result; raw JSON is hidden.", box_body)
+        self.assertIn("[world plan] public rationale \u25b8 A small choice turns the hook into a hopeful ending.", box_body)
+        self.assertIn("[world plan] narration \u25b8 Maya found it.", box_body)
+        self.assertNotIn("Thinking about the beats.", plain_stdout)
+        self.assertNotIn('{"public_rationale"', plain_stdout)
+        self.assertIn("[world plan] \u2713 done", plain_stdout)
         self.assertNotIn("reasoning chars", stdout)
         self.assertIn("\u001b[37m", stdout)
         self.assertIn("\u001b[36m", stdout)
@@ -244,6 +253,7 @@ class LiveStreamingTests(unittest.TestCase):
         self.assertIn("Maya found it.", model_event["output"])
         self.assertNotIn('{"public_rationale"', model_event["output"])
         self.assertNotIn("Thinking about the beats.", json.dumps(model_event))
+        self.assertNotIn("Thinking about the beats.", json.dumps(activity))
         artifact_progress = [event for event in activity if event.get("type") == "model_progress"]
         self.assertEqual({event.get("channel") for event in artifact_progress}, {"thinking", "answer"})
         thinking_previews = [event["preview"] for event in artifact_progress
