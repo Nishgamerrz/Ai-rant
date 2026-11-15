@@ -616,10 +616,11 @@ def stream(request: dict, url: str, label: str, timeout: float, quiet: bool,
                 # Public rationale/status is authored as a separate, audience-facing
                 # JSON field. Show it as soon as its complete JSON string arrives,
                 # rather than making the user wait for the full narration/plan.
-                for key, title, colour, public_text in completed_public_fields(
-                        "".join(content), streamed_public_fields):
-                    console.line(f"[{label}] {title} ▸ {public_text}", kind=colour)
-                    streamed_public_fields.add(key)
+                if not quiet:
+                    for key, title, colour, public_text in completed_public_fields(
+                            "".join(content), streamed_public_fields):
+                        console.line(f"[{label}] {title} ▸ {public_text}", kind=colour)
+                        streamed_public_fields.add(key)
                 emit_activity_progress("answer")
                 emit_safe_progress("answer")
                 if not quiet and not answer_open:
