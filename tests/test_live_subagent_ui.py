@@ -24,6 +24,11 @@ class LiveSubagentUiTests(unittest.TestCase):
         self.assertIn("const displayTools = mergeLiveTools(tools, liveTools)", source)
         self.assertIn("safePublicStatus(publicStatus)", source)
         self.assertIn("safeOllamaProgressStatus(plain)", source)
+        self.assertIn("parseLiveModelActivity(tail)", source)
+        self.assertIn("modelSummary", source)
+        self.assertIn("Selected model · public rationale", source)
+        self.assertIn("modelSummaryKind", source)
+        self.assertIn("Streaming model reply", source)
         self.assertIn("quietModelProgress", source)
         model_progress = (ROOT / "web" / "lib" / "liveOllamaProgress.mjs").read_text(encoding="utf-8")
         self.assertIn("reasoning is active; private model thoughts are hidden", model_progress)
@@ -42,7 +47,8 @@ class LiveSubagentUiTests(unittest.TestCase):
         result = subprocess.run(
             ["node", "--test",
              str(ROOT / "web" / "tests" / "liveSubagentLog.test.cjs"),
-             str(ROOT / "web" / "tests" / "liveOllamaProgress.test.cjs")],
+             str(ROOT / "web" / "tests" / "liveOllamaProgress.test.cjs"),
+             str(ROOT / "web" / "tests" / "liveModelActivity.test.cjs")],
             cwd=ROOT / "web", capture_output=True, text=True, check=False,
         )
         self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)

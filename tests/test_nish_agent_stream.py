@@ -10,6 +10,7 @@ import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +20,49 @@ import nish_agent  # noqa: E402
 
 
 class NishAgentSubagentStreamTests(unittest.TestCase):
+    def test_public_status_is_specific_and_never_uses_hidden_reasoning(self):
+        self.assertIn("task-specific user-facing update naming the current or next action", nish_agent.TOOL_DOC)
+        self.assertIn("short, task-specific update about the current/next action", nish_agent.TOOL_DOC)
+        self.assertIn("public_rationale", nish_agent.TOOL_DOC)
+        self.assertIn("not a step-by-step thought trace", nish_agent.TOOL_DOC)
+        self.assertIn("private Ollama reasoning channel is never displayed or saved", nish_agent.TOOL_DOC)
+
+    def test_selected_model_public_rationale_is_required_and_forwarded(self):
+        rationale = "I’ll inspect the relevant files first, then test the smallest safe change."
+        public_output = [
+            {"label": "public status", "text": "Inspecting the relevant files."},
+            {"label": "public rationale", "text": rationale},
+            {"label": "answer", "text": "The requested change is complete."},
+        ]
+        response = {
+            "public_status": "Inspecting the relevant files.",
+            "public_rationale": rationale,
+            "answer": "The requested change is complete.",
+            "tool_calls": [],
+        }
+        captured = {}
+
+        def fake_stream(command):
+            request_path = Path(command[command.index("--request") + 1])
+            output_path = Path(command[command.index("--output") + 1])
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            captured["request"] = request
+            output_path.write_text(json.dumps({
+                "response": json.dumps(response), "public_output": public_output,
+            }), encoding="utf-8")
+            return SimpleNamespace(returncode=0)
+
+        with patch.object(nish_agent.subprocess, "run", side_effect=fake_stream), redirect_stdout(io.StringIO()):
+            answer, parsed = nish_agent.run_one_round(
+                "selected-local-model", "inspect this task", [], "nish-agent r1/1", False)
+
+        schema = captured["request"]["format"]
+        self.assertEqual(schema["properties"]["public_rationale"],
+                         {"type": "string", "maxLength": 320})
+        self.assertIn("public_rationale", schema["required"])
+        self.assertEqual(parsed["public_rationale"], rationale)
+        self.assertEqual(answer, "The requested change is complete.")
+
     def test_child_stdout_is_forwarded_before_the_subagent_process_exits(self):
         output = io.StringIO()
         result_box = []

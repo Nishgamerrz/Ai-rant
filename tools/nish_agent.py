@@ -82,13 +82,14 @@ Available tools — return them as JSON exactly like this (inside ```json):
     {"tool": "create_image", "prompt": "a cute robot in a bedroom, soft lighting", "path": "robot.png"},
     {"tool": "subagent", "instruction": "write a clean function that...", "input": "optional context", "topic": "code"}
   ],
-  "public_status": "one concise user-facing progress summary; never hidden reasoning",
+  "public_status": "one concise, task-specific user-facing update naming the current or next action; never hidden reasoning",
+  "public_rationale": "one concise user-facing explanation of the chosen approach or key decision; no private chain-of-thought",
   "answer": "your user-facing reply for this round (shown in the chat)"
 }
 ```
 
 Rules:
-- Never reveal private chain-of-thought, hidden reasoning, or scratch work in `public_status` or `answer`. Use `public_status` only for a short audience-facing progress summary; the private Ollama reasoning channel is never displayed or saved.
+- Never reveal private chain-of-thought, hidden reasoning, or scratch work. Make `public_status` a short, task-specific update about the current/next action or a completed check—not a generic "thinking" notice. Make `public_rationale` a concise, high-level explanation of the approach or key decision (at most 1–2 sentences), not a step-by-step thought trace. These are public model-authored fields; the private Ollama reasoning channel is never displayed or saved.
 - The SUB-AGENT IS MANDATORY AT THE START. Your FIRST JSON must itself author a useful `subagent` call with a non-empty instruction for the hardest subtask. The runner will reject and re-ask if you omit it; it will never invent or inject a delegation call. The helper tries BazaarLink `auto:free` first when configured, then Gemini, then Groq. It returns provider, seconds, whether it edited a file, and FULL text. Set `use_tools: true` when the helper needs to search, inspect, or edit a visual reference.
   Keep each subagent instruction under 300 chars and focused: do NOT ask for an entire 20-page document with 50+ illustrations in one call — ask for a 1-page outline or a single section first, then expand in later rounds. The helper is capped at ~8k tokens (Groq now 8192→16384, Gemini 8192→16384) and will retry once if cut, but still keep requests focused.
 - `path` is always relative to the workspace root (dist/agent_workspace). Do not use absolute paths or .. .
@@ -453,7 +454,7 @@ def run_one_round(model: str, prompt: str, history: list[dict], label: str, enab
         "stream": False,
         "keep_alive": "60m",
         "options": {"temperature": 0.9, "num_predict": 8192, "num_ctx": 16384},
-        "format": {"type": "object", "properties": {"public_status": {"type": "string", "maxLength": 320}, "answer": {"type": "string"}, "tool_calls": {"type": "array", "items": {"type": "object"}}}, "required": ["public_status", "answer"], "additionalProperties": False},
+        "format": {"type": "object", "properties": {"public_status": {"type": "string", "maxLength": 320}, "public_rationale": {"type": "string", "maxLength": 320}, "answer": {"type": "string"}, "tool_calls": {"type": "array", "items": {"type": "object"}}}, "required": ["public_status", "public_rationale", "answer"], "additionalProperties": False},
     }
     # For local models that don't respect format strictly, we allow freeform too — parse fallback handles it.
     import tempfile, json as _json
@@ -490,9 +491,11 @@ def run_one_round(model: str, prompt: str, history: list[dict], label: str, enab
         }
         answer = public_fields.get("answer", "")
         public_status = public_fields.get("public status", "")
+        public_rationale = public_fields.get("public rationale", "")
         tool_calls = parsed.get("tool_calls") or []
-        return answer, {"public_status": public_status, "answer": answer,
-                        "tool_calls": tool_calls}
+        return answer, {"public_status": public_status,
+                        "public_rationale": public_rationale,
+                        "answer": answer, "tool_calls": tool_calls}
 
 def _chat_key_bytes() -> bytes:
     token = os.environ.get("AGENT_CHAT_KEY", "").strip()
