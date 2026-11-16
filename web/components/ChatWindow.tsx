@@ -3,12 +3,28 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { SubagentTimeline } from "./SubagentTimeline";
 import { encodeFaceReference } from "@/lib/faceReference";
 import { safeOllamaProgressStatus } from "@/lib/liveOllamaProgress.mjs";
+import { parseLiveModelActivity } from "@/lib/liveModelActivity.mjs";
 
-type Msg = { role: string; content: string; public_status?: string; tool_calls?: any[]; time?: string; tool?: string; output?: any; id?: string; queue_id?: string; delivery?: string };
+type Msg = {
+  role: string;
+  content: string;
+  public_status?: string;
+  tool_calls?: any[];
+  time?: string;
+  tool?: string;
+  output?: any;
+  id?: string;
+  queue_id?: string;
+  delivery?: string;
+  live_stream?: boolean;
+  model_label?: string;
+};
 
-export function parseLiveLogTail(tail: string): { msgs: Msg[]; tools: any[] } {
+export function parseLiveLogTail(tail: string): { msgs: Msg[]; tools: any[]; modelSummary: string; modelSummaryKind: string } {
   const msgs: Msg[] = [];
   const tools: any[] = [];
+  const modelActivity = parseLiveModelActivity(tail);
+  let modelSummary = modelActivity.summary;
   const lines = tail.split("\n");
   let buf = "";
   let inAnswer = false;
@@ -71,6 +87,7 @@ export function parseLiveLogTail(tail: string): { msgs: Msg[]; tools: any[] } {
     }
 
     let publicStatus = "";
+    let isModelStatus = false;
     const subagentProgressIndex = plain.indexOf("[subagent progress]");
     const agentProgressIndex = plain.indexOf("[agent progress]");
     const publicStatusIndex = plain.indexOf("public status ▸");
@@ -82,10 +99,12 @@ export function parseLiveLogTail(tail: string): { msgs: Msg[]; tools: any[] } {
       if (separator >= 0) publicStatus = plain.slice(separator + 1).trim();
     } else if (agentProgressIndex >= 0) {
       publicStatus = plain.slice(agentProgressIndex + "[agent progress]".length).trim();
+      isModelStatus = true;
     } else if (publicStatusIndex >= 0 || publicRationaleIndex >= 0) {
       const markerIndex = Math.max(publicStatusIndex, publicRationaleIndex);
       const separator = plain.indexOf("▸", markerIndex);
       if (separator >= 0) publicStatus = plain.slice(separator + 1).trim();
+      isModelStatus = true;
     } else if (safeModelProgress) {
       publicStatus = safeModelProgress;
     } else if (quietModelProgress) {
@@ -95,7 +114,7 @@ export function parseLiveLogTail(tail: string): { msgs: Msg[]; tools: any[] } {
       publicStatus = `${label}: ${detail}${note}`;
     }
     publicStatus = safePublicStatus(publicStatus);
-    if (publicStatus && !seenProgress.has(publicStatus)) {
+    if (publicStatus && !isModelStatus && !seenProgress.has(publicStatus)) {
       seenProgress.add(publicStatus);
       msgs.push({ role: "assistant", content: "", public_status: publicStatus, time: new Date().toISOString() });
     }
@@ -126,10 +145,12 @@ export function parseLiveLogTail(tail: string): { msgs: Msg[]; tools: any[] } {
           ...(ok === undefined ? {} : { ok }) } });
     }
 
-    // Legacy local-model result lines contain JSON, but private fields are ignored.
-    if (plain.includes("answer") && plain.includes("▸")) {
+    // Legacy local-model result lines may contain JSON. Never start JSON parsing
+    // for the plain-text `answer ▸ ...` field streamed by Ollama.
+    const legacyAnswerMarker = plain.match(/\banswer\s+▸\s*(\{.*)$/i);
+    if (legacyAnswerMarker) {
       inAnswer = true;
-      buf = plain.slice(plain.indexOf("{"));
+      buf = legacyAnswerMarker[1];
       try {
         const obj = JSON.parse(buf);
         if (obj.answer || obj.tool_calls) {
@@ -155,7 +176,16 @@ export function parseLiveLogTail(tail: string): { msgs: Msg[]; tools: any[] } {
     }
   }
   finishSubagentAnswer();
-  return { msgs, tools };
+  for (const answer of modelActivity.answers) {
+    msgs.push({
+      role: "assistant", content: answer.text,
+      id: `live-model-answer:${answer.label}`,
+      model_label: answer.label,
+      live_stream: answer.streaming,
+      time: new Date().toISOString(),
+    });
+  }
+  return { msgs, tools, modelSummary, modelSummaryKind: modelActivity.summaryKind };
 }
 
 function mergeLiveMessages(persisted: Msg[], live: Msg[]): Msg[] {
@@ -163,8 +193,13 @@ function mergeLiveMessages(persisted: Msg[], live: Msg[]): Msg[] {
     message.role, message.content, message.public_status || "", message.tool_calls || [],
   ]);
   const persistedKeys = new Set(persisted.map(keyOf));
+  const persistedAssistantText = new Set(persisted
+    .filter((message) => message.role === "assistant")
+    .map((message) => message.content));
   const liveKeys = new Set<string>();
   return [...persisted, ...live.filter((message) => {
+    if (message.id?.startsWith("live-model-answer:")
+        && persistedAssistantText.has(message.content)) return false;
     const key = keyOf(message);
     if (persistedKeys.has(key) || liveKeys.has(key)) return false;
     liveKeys.add(key);
@@ -202,6 +237,8 @@ export function ChatWindow({ runId, notice = "" }: { runId: number | null; notic
   const [liveLog, setLiveLog] = useState<string>("");
   const [liveMsgs, setLiveMsgs] = useState<Msg[]>([]);
   const [liveTools, setLiveTools] = useState<any[]>([]);
+  const [liveModelSummary, setLiveModelSummary] = useState("");
+  const [liveModelSummaryKind, setLiveModelSummaryKind] = useState<"rationale" | "status" | "">("");
   const [status, setStatus] = useState("idle");
   const [err, setErr] = useState("");
   const [chatToken, setChatToken] = useState("");
@@ -274,6 +311,10 @@ export function ChatWindow({ runId, notice = "" }: { runId: number | null; notic
         const parsed = parseLiveLogTail(j.logTail);
         if (parsed.msgs.length) setLiveMsgs(parsed.msgs);
         if (parsed.tools.length) setLiveTools(parsed.tools);
+        if (parsed.modelSummary) {
+          setLiveModelSummary(parsed.modelSummary);
+          setLiveModelSummaryKind(parsed.modelSummaryKind === "rationale" ? "rationale" : "status");
+        }
       }
     } catch {}
   }, [runId]);
@@ -355,6 +396,11 @@ export function ChatWindow({ runId, notice = "" }: { runId: number | null; notic
 
   useEffect(() => {
     setChatToken(runId ? sessionStorage.getItem(`nishagent_chat_${runId}`) || "" : "");
+    setLiveLog("");
+    setLiveMsgs([]);
+    setLiveTools([]);
+    setLiveModelSummary("");
+    setLiveModelSummaryKind("");
     setDraft("");
     setSending(false);
     setErr("");
@@ -367,6 +413,8 @@ export function ChatWindow({ runId, notice = "" }: { runId: number | null; notic
       setLiveLog("");
       setLiveMsgs([]);
       setLiveTools([]);
+      setLiveModelSummary("");
+      setLiveModelSummaryKind("");
       setStatus("idle");
       return;
     }
@@ -396,6 +444,7 @@ export function ChatWindow({ runId, notice = "" }: { runId: number | null; notic
 
   const displayMessages = mergeLiveMessages(messages, liveMsgs);
   const displayTools = mergeLiveTools(tools, liveTools);
+  const isRunning = status.includes("in_progress") || status.includes("queued");
 
   return (
     <div className="flex-1 flex flex-col min-h-0 bg-[#09090b]">
@@ -419,6 +468,26 @@ export function ChatWindow({ runId, notice = "" }: { runId: number | null; notic
           GitHub <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M3 7L7 3M7 3H4M7 3V6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
         </a>
       </div>
+
+      {(isRunning || liveModelSummary) && (
+        <section className="shrink-0 border-b border-sky-900/40 bg-gradient-to-r from-sky-950/20 via-zinc-950/80 to-violet-950/10 px-4 py-3" role="status" aria-live="polite" aria-atomic="false">
+          <div className="max-w-3xl mx-auto rounded-2xl border border-sky-900/40 bg-zinc-950/70 px-4 py-3 shadow-[0_8px_30px_rgba(14,165,233,0.06)]">
+            <div className="flex items-center gap-2">
+              <span className={`h-2 w-2 rounded-full ${isRunning ? "bg-sky-400 animate-pulse" : "bg-zinc-500"}`} />
+              <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-sky-300">
+                {liveModelSummaryKind === "rationale" ? "Selected model · public rationale" : "Selected model · public update"}
+              </span>
+              <span className="ml-auto rounded-full border border-sky-900/50 bg-sky-950/40 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-sky-200">
+                {isRunning ? "LIVE" : "LATEST"}
+              </span>
+            </div>
+            <p className="mt-2 text-sm leading-relaxed text-zinc-100 whitespace-pre-wrap break-words">
+              {liveModelSummary || "Waiting for the selected model’s next public update…"}
+            </p>
+            <div className="mt-2 text-[10px] text-zinc-500">A concise explanation or progress update authored by the selected model; hidden chain-of-thought is never exposed.</div>
+          </div>
+        </section>
+      )}
 
       {/* Subagent timeline — always visible via direct API */}
       {runId && (
@@ -511,6 +580,13 @@ export function ChatWindow({ runId, notice = "" }: { runId: number | null; notic
                       </summary>
                       <div className="mt-2 rounded-xl bg-sky-950/20 border border-sky-900/30 p-3 text-xs font-mono leading-relaxed text-sky-200 whitespace-pre-wrap break-words">{String(m.public_status).slice(0, 320)}</div>
                     </details>
+                  )}
+                  {m.model_label && !isUser && (
+                    <div className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-sky-300">
+                      <span className={`h-1.5 w-1.5 rounded-full ${m.live_stream ? "bg-sky-400 animate-pulse" : "bg-sky-700"}`} />
+                      {m.live_stream ? "Streaming model reply" : "Model reply"}
+                      <span className="font-normal normal-case tracking-normal text-zinc-500">· {m.model_label}</span>
+                    </div>
                   )}
                   <div className="text-sm leading-relaxed whitespace-pre-wrap break-words">{m.content}</div>
                   {m.tool_calls && (m.tool_calls as any[]).length > 0 && (
