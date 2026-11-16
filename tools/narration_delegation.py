@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -25,6 +26,61 @@ _PRIVATE_MARKERS = (
     "internal monologue", "scratchpad", "let me think step by step",
     "here is my reasoning", "here's my reasoning", "my thought process",
 )
+_CREATION_ACTIONS = (
+    "create", "creating", "created", "write", "writing", "written", "rewrite", "rewriting",
+    "rewritten", "develop", "developing", "developed", "craft", "crafting", "crafted", "shape",
+    "shaping", "shaped", "compose", "composing", "composed", "generate", "generating", "generated",
+    "produce", "producing", "produced", "expand", "expanding", "expanded", "enrich", "enriching",
+    "enriched", "enhance", "enhancing", "enhanced", "improve", "improving", "improved", "polish",
+    "polishing", "polished", "refine", "refining", "refined", "adapt", "adapting", "adapted", "rework",
+    "reworking", "reworked", "revise", "revising", "revised", "retell", "retelling", "retold",
+    "reimagine", "reimagining", "reimagined", "transform", "transforming", "transformed", "strengthen",
+    "strengthening", "strengthened", "elevate", "elevating", "elevated", "extend", "extending", "extended",
+    "continue", "continuing", "continued", "draft a", "draft the", "draft this", "draft your", "flesh out",
+    "flesh this out", "flesh it out", "flesh the story out", "flesh the draft out", "bring the story to life",
+    "bring this draft to life", "bring it to life", "bring this to life", "breathe life into",
+    "turn the draft into", "turn this draft into", "turn this into", "turn it into", "turn the story into",
+    "tell the story", "tell this story", "make the story", "make this story", "make the narration",
+    "make this narration", "make it more", "make it sound", "make this more", "add detail", "add details",
+    "add dialogue", "add a scene", "add scenes", "add to the story", "build on", "build upon",
+    "give the story", "give this story", "give the narration", "give this draft",
+)
+_PROOFREAD_ACTIONS = (
+    "proofread", "proofreading", "proof read", "proof reading", "correct", "corrects", "corrected",
+    "correcting", "correction", "edit", "edits", "edited", "editing", "fix", "fixes", "fixed", "fixing",
+    "spell-check", "spell check", "copyedit", "copyediting", "copy edit", "copy editing",
+)
+_PROOFREAD_REVIEW_ACTIONS = (
+    "check", "checking", "checked", "review", "reviewing", "reviewed", "verify", "verifying", "verified",
+    "inspect", "inspecting", "inspected", "read through", "go over", "look over",
+)
+_PROOFREAD_DIMENSIONS = (
+    "grammar", "grammatical", "spelling", "punctuation", "typo", "typos", "error", "errors", "dialogue",
+    "names", "pronouns", "continuity", "consistency", "capitalization",
+)
+_NEGATED_ACTION_PREFIX = re.compile(
+    r"\b(?:do\s+not|don't|dont|never|not|avoid|without|skip|omit|no)\b"
+    r"(?:\s+(?:just|simply|only|merely|ask|tell|have|the|helper|sub-agent|subagent|to|this|that|it|a|an|new)){0,5}\s*$"
+)
+_ACTION_CLAUSE_BREAK = re.compile(r"[.!?;]|\b(?:but|instead|however|rather|yet)\b")
+
+
+def _instruction_has_action(instruction: str, actions: tuple[str, ...]) -> bool:
+    """Find a whole-word action, ignoring explicit nearby negations."""
+    for action in actions:
+        pattern = re.compile(rf"(?<!\w){re.escape(action)}(?!\w)")
+        for match in pattern.finditer(instruction):
+            same_clause_prefix = _ACTION_CLAUSE_BREAK.split(instruction[:match.start()])[-1]
+            if not _NEGATED_ACTION_PREFIX.search(same_clause_prefix):
+                return True
+    return False
+
+
+def _has_proofreading_request(instruction: str) -> bool:
+    """Accept explicit proofreading/edit actions or checks of proofreading concerns."""
+    return (_instruction_has_action(instruction, _PROOFREAD_ACTIONS)
+            or (_instruction_has_action(instruction, _PROOFREAD_REVIEW_ACTIONS)
+                and _instruction_has_action(instruction, _PROOFREAD_DIMENSIONS)))
 
 
 class DelegationError(ValueError):
@@ -109,13 +165,16 @@ def _validated_task(candidate, *, task_id: str, kind: str, topic: str,
         )
     if len(task_input) > MAX_TASK_INPUT_CHARS:
         raise DelegationError(f"narration task {task_id!r} exceeds the helper's input limit")
-    lowered_instruction = instruction.casefold()
-    if kind == "write" and not any(word in lowered_instruction for word in
-                                    ("create", "write", "rewrite", "develop", "craft", "shape")):
-        raise DelegationError("the narration-creation task must ask the sub-agent to create or develop the story")
-    if kind == "edit" and not any(word in lowered_instruction for word in
-                                   ("proofread", "grammar", "correct", "edit")):
-        raise DelegationError("the narration-edit task must explicitly request proofreading or grammar correction")
+    lowered_instruction = " ".join(instruction.casefold().split())
+    if kind == "write" and not _instruction_has_action(lowered_instruction, _CREATION_ACTIONS):
+        raise DelegationError(
+            "the narration-creation task must request story creation or development "
+            "(for example: create, rewrite, develop, expand, enrich, or polish the story)"
+        )
+    if kind == "edit" and not _has_proofreading_request(lowered_instruction):
+        raise DelegationError(
+            "the narration-edit task must explicitly request proofreading, grammar, spelling, or correction"
+        )
     return {"id": actual_id, "kind": actual_kind, "topic": actual_topic,
             "instruction": instruction, "input": task_input}
 

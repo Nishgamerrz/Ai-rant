@@ -77,6 +77,63 @@ class NarrationDelegationTests(unittest.TestCase):
         self.assertEqual(result["creation_task"], creation["tasks"][0])
         self.assertEqual(result["proofread_task"], template["tasks"][0])
 
+    def test_natural_creation_and_proofreading_synonyms_are_accepted(self):
+        instruction_pairs = (
+            ("Expand and enrich this draft into a vivid, complete spoken narration.",
+             "Check spelling, punctuation, and grammar; return the corrected narration."),
+            ("Polish the story's pacing and bring it to life with vivid details.",
+             "Review the dialogue, names, pronouns, and continuity; return the corrected narration."),
+            ("Turn this draft into a natural, complete story with a clear ending.",
+             "Copyedit for consistency and typos, returning the complete corrected narration."),
+        )
+        for creation_instruction, proofread_instruction in instruction_pairs:
+            with self.subTest(creation_instruction=creation_instruction,
+                              proofread_instruction=proofread_instruction):
+                reply = {**self.reply, "subagent_tasks": [
+                    {**self.reply["subagent_tasks"][0], "instruction": creation_instruction},
+                    {**self.reply["subagent_tasks"][1], "instruction": proofread_instruction},
+                ]}
+                result = self.extract(reply)
+                self.assertEqual(result["creation_task"]["instruction"], creation_instruction)
+                self.assertEqual(result["proofread_task"]["instruction"], proofread_instruction)
+
+    def test_non_creation_note_is_rejected_with_an_actionable_error(self):
+        reply = {**self.reply, "subagent_tasks": [
+            {**self.reply["subagent_tasks"][0],
+             "instruction": "The story has a strong hook, characters, and ending."},
+            self.reply["subagent_tasks"][1],
+        ]}
+        with self.assertRaisesRegex(DelegationError, "story creation or development"):
+            self.extract(reply)
+        self.assertFalse(self.creation_request_path.exists())
+        self.assertFalse(self.proofread_template_path.exists())
+
+    def test_noun_only_or_negated_actions_do_not_satisfy_either_handoff(self):
+        invalid_creation_instructions = (
+            "The story's creation and development are complete; the draft is ready.",
+            "Do not rewrite the story; just summarize it.",
+        )
+        for instruction in invalid_creation_instructions:
+            with self.subTest(creation_instruction=instruction):
+                reply = {**self.reply, "subagent_tasks": [
+                    {**self.reply["subagent_tasks"][0], "instruction": instruction},
+                    self.reply["subagent_tasks"][1],
+                ]}
+                with self.assertRaisesRegex(DelegationError, "story creation or development"):
+                    self.extract(reply)
+                self.assertFalse(self.creation_request_path.exists())
+                self.assertFalse(self.proofread_template_path.exists())
+
+        reply = {**self.reply, "subagent_tasks": [
+            self.reply["subagent_tasks"][0],
+            {**self.reply["subagent_tasks"][1],
+             "instruction": "Do not proofread the narration; leave it unchanged."},
+        ]}
+        with self.assertRaisesRegex(DelegationError, "explicitly request proofreading"):
+            self.extract(reply)
+        self.assertFalse(self.creation_request_path.exists())
+        self.assertFalse(self.proofread_template_path.exists())
+
     def test_t1_input_is_normalized_to_the_exact_first_draft_if_marker_is_malformed(self):
         reply = {**self.reply, "subagent_tasks": [
             {**self.reply["subagent_tasks"][0], "input": "the model misstated its marker"},
